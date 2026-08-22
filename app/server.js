@@ -3,7 +3,7 @@ const os = require('os');
 const app = express();
 
 app.get('/', (req, res) => {
-  res.send(`Merhaba! Bu yanıtı veren konteyner: ${os.hostname()}\n`);
+  res.send(`Merhaba, dunya! (v1.1) Bu yanıtı veren konteyner: ${os.hostname()}\n`);
 });
 
 app.get('/healthz', (req, res) => res.send('ok\n'));
