@@ -26,7 +26,7 @@ export function Notes({ notes, loading, onCreate, onDelete, penFor }) {
 
   return (
     <section aria-labelledby="notes-title">
-      <p className="eyebrow">The application</p>
+      <p className="eyebrow">The application — notes are private to this browser</p>
       <h2 className="panel-title" id="notes-title">
         Notes
       </h2>

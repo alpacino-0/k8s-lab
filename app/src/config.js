@@ -21,6 +21,23 @@ function loadConfig(env = process.env) {
     metricsPort: num(env.METRICS_PORT, 9090, 'METRICS_PORT'),
     shutdownTimeoutMs: num(env.SHUTDOWN_TIMEOUT_MS, 10000, 'SHUTDOWN_TIMEOUT_MS'),
     demoEndpoints: env.DEMO_ENDPOINTS === 'true',
+
+    // Public-exposure limits. Anyone can use the demo without signing up, so
+    // the guard rails are per visitor rather than per account.
+    limits: {
+      // Notes are scoped to an anonymous visitor cookie: no signup friction,
+      // but nobody reads or deletes anyone else's notes.
+      visitorCookie: env.VISITOR_COOKIE || 'visitor',
+      visitorCookieDays: num(env.VISITOR_COOKIE_DAYS, 30, 'VISITOR_COOKIE_DAYS'),
+      secureCookie: env.SECURE_COOKIE === 'true',
+      maxNotesPerVisitor: num(env.MAX_NOTES_PER_VISITOR, 20, 'MAX_NOTES_PER_VISITOR'),
+      maxNoteLength: num(env.MAX_NOTE_LENGTH, 500, 'MAX_NOTE_LENGTH'),
+      // Backstop only. Each replica counts on its own, so the effective limit
+      // is this multiplied by the replica count — the ingress limiter is the
+      // one that actually bounds a client.
+      writesPerMinute: num(env.WRITES_PER_MINUTE, 40, 'WRITES_PER_MINUTE'),
+      readsPerMinute: num(env.READS_PER_MINUTE, 240, 'READS_PER_MINUTE'),
+    },
     // Filled by the Kubernetes downward API. Reading these needs no API access
     // and no service-account token — the kubelet injects them into the pod.
     pod: {

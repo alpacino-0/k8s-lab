@@ -66,7 +66,7 @@ git clone https://github.com/alpacino-0/k8s-lab.git && cd k8s-lab
 make up                                    # cluster + ingress + build + deploy
 echo "127.0.0.1 app.local" | sudo tee -a /etc/hosts
 open http://app.local:8080                 # arayüz
-make smoke                                 # 25 uçtan uca kontrol
+make smoke                                 # 31 uçtan uca kontrol
 ```
 
 ## Arayüz
@@ -86,7 +86,7 @@ değişkenleri — ve tarayıcı sadece geleni sayıyor.
 
 | Komut | Ne yapar |
 |---|---|
-| `make test` | Birim ve entegrasyon testleri (19 test, cluster gerekmez) |
+| `make test` | Birim ve entegrasyon testleri (24 test, cluster gerekmez) |
 | `make lint` | ESLint + `helm lint` + tüm values profillerini üretir |
 | `make deploy` | İki imajı da yeniden derler ve sürümü günceller |
 | `make web` | Arayüzü yerelde, port-forward edilmiş backend'e karşı çalıştırır |
@@ -113,6 +113,9 @@ değişkenleri — ve tarayıcı sadece geleni sayıyor.
 | Multi-stage imaj, yalnız üretim bağımlılıkları | `app/Dockerfile` | CI'da Trivy CRITICAL/HIGH bulguda durdurur |
 | npm runtime imajından çıkarıldı | `app/Dockerfile` | **tüm** Node.js paket CVE'lerini sıfırladı (aşağıda) |
 | Git'te secret yok | `.gitignore` + chart values | parola zorunlu bir chart değeri |
+| Notlar ziyaretçi başına izole | anonim çerez, owner'a göre filtrelenmiş sorgular | ikinci bir ziyaretçi ilkinin notunu ne görür ne siler |
+| Yazma sınırlı | ingress `limit-rps` + ziyaretçi sayaçları + not tavanı | uzun ve kota aşan yazmalar reddedilir |
+| Hiçbir şey kalıcı değil | saatlik saklama CronJob'ı | 24 saatten eski notlar silinir |
 
 Egress politikası **DNS'e açıkça izin verir**. Bu kuralı unutmak, varsayılan-reddet
 politikasının uygulamayı sessizce bozmasının en yaygın yoludur: isim çözümlemesi
@@ -157,10 +160,10 @@ Her push'ta beş job ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
 
 | Job | Neyi denetler |
 |---|---|
-| `test` | API için ESLint + 19 test; arayüz için ESLint + üretim derlemesi |
+| `test` | API için ESLint + 24 test; arayüz için ESLint + üretim derlemesi |
 | `manifests` | `helm lint`, üç values profili, kubeconform şema denetimi, iki Dockerfile için hadolint |
 | `image` | İki imajı derler, ikisinin de root olmadığını doğrular, salt-okunur başlatır, Trivy taraması |
-| `e2e` | Gerçek kind cluster kurar, chart'ı yükler, iki ingress yolunu da denetler, 25 kontrolü çalıştırır, ardından bir upgrade'in **sıfır istek düşürdüğünü** kanıtlar |
+| `e2e` | Gerçek kind cluster kurar, chart'ı yükler, iki ingress yolunu da denetler, 31 kontrolü çalıştırır, ardından bir upgrade'in **sıfır istek düşürdüğünü** kanıtlar |
 | `publish` | İki imajı da amd64 + arm64 için GHCR'a, SBOM ve provenance ile push eder (yalnız main) |
 
 ---
@@ -182,7 +185,7 @@ chart/                Helm chart — tek deploy yolu
   values-prod.yaml    otomatik ölçekleme, yedekleme, izleme, ağ politikaları
 scripts/
   bootstrap.sh        idempotent cluster + ingress + deploy
-  smoke-test.sh       güvenlik duruşu dahil 25 uçtan uca kontrol
+  smoke-test.sh       güvenlik duruşu dahil 31 uçtan uca kontrol
   teardown.sh         cluster'ı siler
 docs/
   LEARNING-LOG.tr.md  ölçümler ve bulunan hatalar
@@ -253,6 +256,32 @@ direktifini koyar koymaz miras alınan **tüm** başlıkları sessizce düşür�
 güvenlik başlıkları hiç gönderilmiyordu. Ve arayüzün Service'i, API'nin
 `app.kubernetes.io/name` etiketini taşıdığı için Prometheus nginx'ten `/metrics`
 kazımaya çalışıyordu.
+
+## Herkese açık bir adrese hazır
+
+Demo, yabancıların erişebileceği bir URL'e konabilir. Bunun için gerekenler ve
+sebepleri:
+
+**Herkes kullanabilir ama kimse aynı tabloyu paylaşmaz.** Giriş zorunlu olsaydı
+kimse demoyu denemezdi; ortak ve sınırsız bir tablo ise link paylaşıldıktan
+birkaç saat sonra spam duvarına döner. Notlar bunun yerine anonim bir ziyaretçi
+çerezine bağlı — kayıt yok, ve her sorgu sahibe göre filtreleniyor. CI'da
+doğrulanıyor: ikinci bir ziyaretçi ilkinin notunu ne okuyabiliyor ne silebiliyor.
+
+**Yazma üç katmanda sınırlı.** Ingress her istemci IP'sini sınırlıyor (`25r/s`,
+burst 125, 20 eşzamanlı bağlantı). Uygulama kendi ziyaretçi sayaçlarını yedek
+olarak tutuyor — bilerek replika başına, yani asıl bağlayıcı sınır ingress'te.
+Ve her ziyaretçi aynı anda 20 not tutabiliyor; depolama büyümesini durduran bu.
+
+**Hiçbir şey kalıcı değil.** Saatlik bir CronJob 24 saatten eski notları siliyor.
+Owner sütunu eklenmeden önce yazılmış satırlar bir sentinel sahiple işaretli:
+kimseye görünmüyorlar ve aynı iş tarafından temizleniyorlar.
+
+**Metin temizleniyor, güvenilmiyor.** Kontrol karakterleri ayıklanıyor, uzunluk
+500 karakterle, JSON gövdesi 32kb ile sınırlı; arayüz metni metin olarak basıyor.
+
+Ürün olması için hâlâ eksik olanlar: gerçek sertifikayla TLS, alan adı, cluster
+dışı yedekler ve gece uyandırılacak bir sorumlu.
 
 ## Bilinen sınırlar
 

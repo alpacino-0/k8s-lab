@@ -117,7 +117,10 @@ export default function App() {
         value: stats ? (stats.databaseUp ? 'reachable' : 'unreachable') : '—',
         state: stats ? (stats.databaseUp ? 'up' : 'down') : undefined,
       },
-      { term: 'Notes stored', value: stats?.notes ?? '—' },
+      {
+        term: 'Notes stored',
+        value: stats ? `${stats.notes} / ${stats.noteLimit ?? '—'}` : '—',
+      },
       { term: 'Replica uptime', value: stats ? `${stats.uptimeSeconds}s` : '—' },
       { term: 'Heap in use', value: stats ? `${stats.memoryMb} MB` : '—' },
       { term: 'Runtime', value: stats?.nodeVersion ?? '—' },
@@ -160,7 +163,7 @@ export default function App() {
 
           {error && (
             <p className="banner" role="status">
-              {error} — if the deployment is mid-rollout this clears on its own.
+              {error}
             </p>
           )}
 

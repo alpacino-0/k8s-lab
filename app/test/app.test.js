@@ -54,7 +54,10 @@ test('readiness succeeds when the database answers', async () => {
 });
 
 test('note creation validates input', async () => {
-  const db = { createNote: async (text) => ({ id: 1, text, created_at: 'now' }) };
+  const db = {
+    countNotesFor: async () => 0,
+    createNote: async (_owner, text) => ({ id: 1, text, created_at: 'now' }),
+  };
   await withServer({ db }, async (base) => {
     const empty = await fetch(`${base}/notes`, {
       method: 'POST',
@@ -146,7 +149,7 @@ test('the telemetry port serves nothing else', async () => {
 test('responses identify the replica that served them', async () => {
   await withServer(
     { config: { pod: { name: 'app-abc', node: 'worker-2', ip: '10.0.0.9', namespace: 'k8s-lab' } },
-      db: { countNotes: async () => 3 } },
+      db: { countNotesFor: async () => 3 } },
     async (base) => {
       const body = await (await fetch(`${base}/stats`)).json();
       assert.strictEqual(body.servedBy.pod, 'app-abc');
@@ -158,7 +161,7 @@ test('responses identify the replica that served them', async () => {
 });
 
 test('stats reports the database as down without failing the request', async () => {
-  const db = { countNotes: async () => { throw new Error('unreachable'); } };
+  const db = { countNotesFor: async () => { throw new Error('unreachable'); } };
   await withServer({ db }, async (base) => {
     const res = await fetch(`${base}/stats`);
     assert.strictEqual(res.status, 200, 'stats must stay available when the DB is not');
@@ -168,7 +171,7 @@ test('stats reports the database as down without failing the request', async () 
 
 test('deleting a note validates the id and reports a missing note', async () => {
   const db = {
-    deleteNote: async (id) => (id === 1 ? { id: 1, text: 'gone', created_at: 'now' } : null),
+    deleteNote: async (_owner, id) => (id === 1 ? { id: 1, text: 'gone', created_at: 'now' } : null),
   };
   await withServer({ db }, async (base) => {
     assert.strictEqual((await fetch(`${base}/notes/abc`, { method: 'DELETE' })).status, 400);
@@ -187,6 +190,117 @@ test('unknown routes return a JSON 404', async () => {
     assert.strictEqual(res.status, 404);
     assert.deepStrictEqual(await res.json(), { error: 'not found' });
   });
+});
+
+test('every response assigns an anonymous visitor cookie', async () => {
+  await withServer({}, async (base) => {
+    const cookie = (await fetch(`${base}/`)).headers.get('set-cookie');
+    assert.match(cookie, /^visitor=[0-9a-f]{32}/);
+    assert.match(cookie, /HttpOnly/);
+    assert.match(cookie, /SameSite=Lax/);
+  });
+});
+
+test('notes are scoped to the visitor that created them', async () => {
+  const store = [];
+  const db = {
+    listNotes: async (owner) => store.filter((n) => n.owner === owner),
+    createNote: async (owner, text) => {
+      const note = { id: store.length + 1, owner, text, created_at: 'now' };
+      store.push(note);
+      return note;
+    },
+    countNotesFor: async (owner) => store.filter((n) => n.owner === owner).length,
+    deleteNote: async (owner, id) => {
+      const i = store.findIndex((n) => n.id === id && n.owner === owner);
+      return i === -1 ? null : store.splice(i, 1)[0];
+    },
+  };
+
+  await withServer({ db }, async (base) => {
+    const post = await fetch(`${base}/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'mine' }),
+    });
+    assert.strictEqual(post.status, 201);
+    const mine = post.headers.get('set-cookie').split(';')[0];
+
+    // The owner sees it.
+    const own = await (await fetch(`${base}/notes`, { headers: { cookie: mine } })).json();
+    assert.strictEqual(own.count, 1);
+
+    // A different visitor does not.
+    const other = await (await fetch(`${base}/notes`)).json();
+    assert.strictEqual(other.count, 0, 'a visitor must not see other people\'s notes');
+
+    // And cannot delete it.
+    const steal = await fetch(`${base}/notes/1`, { method: 'DELETE' });
+    assert.strictEqual(steal.status, 404, 'deleting someone else\'s note must not succeed');
+
+    // The owner still can.
+    const del = await fetch(`${base}/notes/1`, { method: 'DELETE', headers: { cookie: mine } });
+    assert.strictEqual(del.status, 200);
+  });
+});
+
+test('a visitor cannot store more than the configured number of notes', async () => {
+  const db = {
+    countNotesFor: async () => 20,
+    createNote: async () => { throw new Error('should not be reached'); },
+  };
+  await withServer({ config: { limits: { ...loadConfig({}).limits, maxNotesPerVisitor: 20 } }, db },
+    async (base) => {
+      const res = await fetch(`${base}/notes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: 'one too many' }),
+      });
+      assert.strictEqual(res.status, 409);
+      assert.match((await res.json()).error, /20 notes/);
+    });
+});
+
+test('control characters are stripped from stored text', async () => {
+  let stored = null;
+  const db = {
+    countNotesFor: async () => 0,
+    createNote: async (_owner, text) => { stored = text; return { id: 1, text, created_at: 'now' }; },
+  };
+  await withServer({ db }, async (base) => {
+    await fetch(`${base}/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'clean\u0000text\u001b' }),
+    });
+    assert.strictEqual(stored, 'clean text');
+  });
+});
+
+test('writes are rate limited per visitor', async () => {
+  const db = {
+    countNotesFor: async () => 0,
+    createNote: async (_owner, text) => ({ id: 1, text, created_at: 'now' }),
+  };
+  await withServer(
+    { config: { limits: { ...loadConfig({}).limits, writesPerMinute: 3 } }, db },
+    async (base) => {
+      const cookie = 'visitor=' + 'a'.repeat(32);
+      const codes = [];
+      for (let i = 0; i < 5; i += 1) {
+        const res = await fetch(`${base}/notes`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', cookie },
+          body: JSON.stringify({ text: `note ${i}` }),
+        });
+        codes.push(res.status);
+        if (res.status === 429) {
+          assert.ok(res.headers.get('retry-after'), '429 must say when to retry');
+        }
+      }
+      assert.deepStrictEqual(codes, [201, 201, 201, 429, 429]);
+    },
+  );
 });
 
 test('logger writes one JSON object per line', () => {
