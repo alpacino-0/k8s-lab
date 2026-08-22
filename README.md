@@ -99,6 +99,7 @@ variables the kubelet injects — and the browser simply counts what came back.
 | `make policy-test` | Prove each policy rejects what it is supposed to |
 | `make tls` | Install cert-manager and serve HTTPS from a local CA |
 | `make logging` | Install Loki and Alloy, and wire Loki into Grafana |
+| `make gitops` | Install Argo CD and let it reconcile the release from git |
 | `make monitoring` | Install Prometheus + Grafana |
 | `make down` | Delete the cluster |
 
@@ -246,6 +247,36 @@ exist for clusters ingesting terabytes, and the failure mode of a heavy logging
 stack on a small cluster is that it evicts the application it was installed to
 observe.
 
+### Deployment
+
+CI and Argo CD do different jobs, and the split is deliberate: **CI proves a
+change in a cluster it throws away; Argo CD applies it to one that persists.**
+
+A pipeline that runs `helm upgrade` against a long-lived cluster is correct
+right up until someone runs `kubectl` by hand at 2am. After that, git and the
+cluster disagree and nothing notices. [`gitops/application.yaml`](gitops/application.yaml)
+turns that into an enforced invariant — `prune` removes what left git,
+`selfHeal` reverts what changed outside it.
+
+Measured on this cluster:
+
+| What was done by hand | What happened |
+|---|---|
+| `kubectl scale --replicas=5` (git says 2) | back to 2 in **5 seconds**, `OutOfSync → Synced` logged |
+| `kubectl delete deployment` | recreated in **5 seconds** |
+
+The namespace gets its Pod Security Admission labels and the policy opt-in
+label from `managedNamespaceMetadata`, so a GitOps-managed release is held to
+exactly the rules a hand-deployed one is.
+
+**A permanent OutOfSync that was not drift.** The Application sat at `OutOfSync`
+while being perfectly in sync. The API server fills in `apiVersion`, `kind`,
+`volumeMode` and a `status` block on StatefulSet `volumeClaimTemplates`, and
+none of it can be written in a manifest. A signal that is always red trains
+everyone to ignore the one thing GitOps exists to tell you. `volumeMode` is now
+stated explicitly, and the three fields the server owns are ignored by jq path
+rather than the whole block — so a real change to storage size is still seen.
+
 ### Reliability
 
 | Behaviour | Implementation | Measured |
@@ -314,10 +345,12 @@ chart/                Helm chart — the single deployment path
   values-dev.yaml     minimal footprint, demo endpoints on
   values-prod.yaml    autoscaling, backups, monitoring, network policies
   values-public.yaml  GHCR images, TLS, external secret — for a public address
+gitops/               the Argo CD Application: what the cluster should contain
 cluster/              cluster-scoped add-ons, kept out of the chart
   issuers.yaml        a local CA, so the TLS path is exercised not assumed
   loki-values.yaml    single-binary Loki, filesystem storage, 72h retention
   alloy-values.yaml   the log collector, labelled to match the metrics
+  argocd-values.yaml  Argo CD without Dex, notifications or ApplicationSets
 policies/             cluster policy, kept out of the chart on purpose
   namespace.yaml      Pod Security Admission labels
   admission-*.yaml    ValidatingAdmissionPolicy rules and their bindings
