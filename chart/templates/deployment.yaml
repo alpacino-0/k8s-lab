@@ -85,7 +85,7 @@ spec:
             {{- end }}
             {{- if .Values.postgres.enabled }}
             - secretRef:
-                name: {{ include "postgres.fullname" . }}
+                name: {{ include "postgres.secretName" . }}
             {{- end }}
           {{- if .Values.probes.startup.enabled }}
           startupProbe:

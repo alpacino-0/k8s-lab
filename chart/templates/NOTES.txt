@@ -16,8 +16,13 @@ Reach the service:
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "app.fullname" . }} 8080:{{ .Values.service.port }}
 {{- end }}
 
-{{- if eq .Values.postgres.auth.password "change-me" }}
+{{- if .Values.postgres.enabled }}
+{{- if .Values.postgres.auth.existingSecret }}
+  Credentials: secret "{{ .Values.postgres.auth.existingSecret }}" (managed outside this chart)
+{{- else if eq .Values.postgres.auth.password "change-me" }}
 
-WARNING: the database password is still the chart default. Override it:
+WARNING: the database password is still the chart default. Either override it:
   helm upgrade {{ .Release.Name }} ... --set postgres.auth.password=<strong-password>
+or, better, create the secret out of band and set postgres.auth.existingSecret.
+{{- end }}
 {{- end }}

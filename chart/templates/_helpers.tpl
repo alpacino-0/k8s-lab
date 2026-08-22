@@ -67,3 +67,13 @@ app.kubernetes.io/component: web
 app.kubernetes.io/name: k8s-lab-web
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
+
+{{/* Secret holding the database credentials: either one we render or one the
+     operator created out of band. */}}
+{{- define "postgres.secretName" -}}
+{{- if .Values.postgres.auth.existingSecret -}}
+{{- .Values.postgres.auth.existingSecret -}}
+{{- else -}}
+{{- include "postgres.fullname" . -}}
+{{- end -}}
+{{- end -}}
