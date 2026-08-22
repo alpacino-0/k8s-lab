@@ -21,6 +21,8 @@ function loadConfig(env = process.env) {
     metricsPort: num(env.METRICS_PORT, 9090, 'METRICS_PORT'),
     shutdownTimeoutMs: num(env.SHUTDOWN_TIMEOUT_MS, 10000, 'SHUTDOWN_TIMEOUT_MS'),
     demoEndpoints: env.DEMO_ENDPOINTS === 'true',
+    // Above this, a successful request is still worth a line.
+    slowRequestMs: num(env.SLOW_REQUEST_MS, 250, 'SLOW_REQUEST_MS'),
 
     // Public-exposure limits. Anyone can use the demo without signing up, so
     // the guard rails are per visitor rather than per account.

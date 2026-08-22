@@ -96,6 +96,7 @@ değişkenleri — ve tarayıcı sadece geleni sayıyor.
 | `make policies` | Kabul politikalarını uygular |
 | `make policy-test` | Her politikanın doğru şeyi reddettiğini kanıtlar |
 | `make tls` | cert-manager kurar, yerel CA ile HTTPS sunar |
+| `make logging` | Loki + Alloy kurar, Loki'yi Grafana'ya bağlar |
 | `make monitoring` | Prometheus + Grafana kurar |
 | `make down` | Cluster'ı siler |
 
@@ -199,6 +200,47 @@ diğer Ingress sessizce sertifikasız kalır.
 Yerelde: `make tls`, sonra `https://localhost:8443`. Tarayıcı uyarır — CA yerel
 olduğu için. Gerçek olmayan tek şey o.
 
+### Loglar
+
+Uygulama her isteği değil, **eyleme değer olanı** logluyor:
+
+| Sonuç | Seviye |
+|---|---|
+| 5xx | `error` |
+| 4xx | `warn` |
+| 250 ms'den yavaş 2xx | `warn`, süresiyle |
+| diğer her şey | `debug`, yani üretimde kapalı |
+
+Sağlıklı her istek için bir satır, saklaması para eden ve önemli satırları
+gömen gürültüdür. Hiç log basmayan bir servis ise operatöre metriği
+açıklayacak hiçbir şey bırakmaz. Bu ikisinin arası.
+
+Beş 404, bir 400 ve altı başarılı istekten sonra ölçülen:
+
+```
+level=info    15   (başlangıç)
+level=warn     5   (404'ler ve 400)
+level=error    0
+loglanan başarılı istek   0
+```
+
+Ve etiket şemasının varlık sebebi olan geçiş — Prometheus pod'u adlandırıyor,
+Loki aynı adla sorgulanıyor:
+
+```
+promql:  topk(1, sum by (pod) (http_requests_total{status=~"4.."}))
+         → app-k8s-lab-app-557bc659bb-dpp6p, 4×404 ve 1×400
+
+logql:   {namespace="k8s-lab", pod="app-k8s-lab-app-557bc659bb-dpp6p"}
+           | json | level=`warn`
+         → warn request rejected POST /notes -> 400 (2.95ms)
+```
+
+`make logging` kuruyor. Loki tek-binary modda, filesystem depolamayla ve 72
+saatlik saklamayla çalışıyor: dağıtık mod, nesne depolama ve cache'ler terabayt
+işleyen cluster'lar için var; küçük bir cluster'da ağır bir log yığınının
+başarısızlık biçimi, gözlemlemek için kurulduğu uygulamayı tahliye etmesidir.
+
 ### Dayanıklılık
 
 | Davranış | Uygulama | Ölçüm |
@@ -221,7 +263,11 @@ Büyüme anında, küçülme kasten yavaştır: büyümede geç kalmanın bedeli
   hook Job'u olarak. Init container'da olsaydı eşzamanlı replikalar DDL kilitlerinde yarışırdı.
 - **Config değişince pod'lar yenilenir** — `checksum/config` anotasyonu sayesinde.
   Olmasaydı ConfigMap güncellenir ama çalışan konteynerler eski değeri kullanmaya devam ederdi.
-- **Yapılandırılmış JSON loglar**, satır başına bir nesne; her log toplayıcı doğrudan ayrıştırır.
+- **Loglar toplanıyor ve sorgulanabiliyor**, sadece yapılandırılmış değil. Loki
+  saklıyor, Grafana Alloy taşıyor ve etiketler Prometheus metriklerindekiyle
+  aynı adlarda — yani panodaki bir sıçrama ile arkasındaki satırlar tek etiket
+  uzaklıkta. Promtail bariz seçim olurdu; Mart 2026'da desteği bitti, bu yüzden
+  Alloy kullanılıyor.
 - **Uygulama metrikleri**, sadece altyapı metrikleri değil: `http_requests_total`,
   `http_request_duration_seconds`, `notes_total`, `database_up`.
 - **Gerçekten ateşleyen alarmlar.** `up == 0`, tüm hedefler yok olduğunda ateşlemez;
@@ -264,6 +310,8 @@ chart/                Helm chart — tek deploy yolu
   values-public.yaml  GHCR imajları, TLS, harici secret — herkese açık adres için
 cluster/              cluster kapsamlı eklentiler, chart'ın dışında
   issuers.yaml        yerel CA — TLS yolu varsayılmıyor, çalıştırılıyor
+  loki-values.yaml    tek-binary Loki, filesystem depolama, 72 saat saklama
+  alloy-values.yaml   log toplayıcı, metriklerle aynı etiketlerle
 policies/             cluster politikası, bilerek chart'ın dışında
   namespace.yaml      Pod Security Admission etiketleri
   admission-*.yaml    ValidatingAdmissionPolicy kuralları ve bağlamaları

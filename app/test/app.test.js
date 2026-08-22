@@ -398,6 +398,49 @@ test('the note count is cached and invalidated by writes', async () => {
   });
 });
 
+test('logs what an operator would act on, and nothing else', async () => {
+  const lines = [];
+  const capture = {
+    error: (msg, f) => lines.push(['error', msg, f]),
+    warn: (msg, f) => lines.push(['warn', msg, f]),
+    info: () => {},
+    debug: (msg, f) => lines.push(['debug', msg, f]),
+  };
+  await withServer({ logger: capture, db: null }, async (base) => {
+    await fetch(`${base}/healthz`);          // 200, fast  -> debug
+    await fetch(`${base}/nope`);             // 404        -> warn
+    await fetch(`${base}/notes`);            // 503        -> error
+  });
+
+  const levels = lines.filter((l) => l[1] !== 'request' || true).map((l) => `${l[0]}:${l[2].status}`);
+  assert.ok(levels.includes('debug:200'), 'a healthy request stays at debug');
+  assert.ok(levels.includes('warn:404'), 'a client error is a warning');
+  assert.ok(levels.includes('error:503'), 'a server error is an error');
+  const failed = lines.find((l) => l[0] === 'error');
+  assert.ok(typeof failed[2].durationMs === 'number', 'duration is recorded');
+});
+
+test('a slow response is logged even when it succeeds', async () => {
+  const lines = [];
+  const capture = {
+    error: () => {}, info: () => {}, debug: () => {},
+    warn: (msg, f) => lines.push([msg, f]),
+  };
+  const slowDb = {
+    countNotesFor: async () => {
+      await new Promise((r) => setTimeout(r, 60));
+      return 1;
+    },
+  };
+  await withServer(
+    { logger: capture, db: slowDb, config: { slowRequestMs: 25 } },
+    async (base) => { await fetch(`${base}/stats`); },
+  );
+  const slow = lines.find(([msg]) => msg === 'slow request');
+  assert.ok(slow, 'a request over the threshold is logged');
+  assert.ok(slow[1].durationMs >= 25);
+});
+
 test('logger writes one JSON object per line', () => {
   const written = [];
   const original = process.stdout.write.bind(process.stdout);

@@ -1,0 +1,30 @@
+# Registers Loki with the Grafana that kube-prometheus-stack installed.
+#
+# The sidecar in that chart watches for ConfigMaps carrying this label, so the
+# datasource appears without touching the monitoring release. Same trick the
+# bundled dashboards use.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-datasource
+  namespace: monitoring
+  labels:
+    grafana_datasource: "1"
+data:
+  loki-datasource.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Loki
+        type: loki
+        uid: loki
+        access: proxy
+        url: http://loki.monitoring.svc.cluster.local:3100
+        jsonData:
+          maxLines: 1000
+          # Turns a pod label in a log line into a link to that pod's metrics.
+          # The point of using the same label names on both sides.
+          derivedFields:
+            - name: pod
+              matcherRegex: '"pod":"([^"]+)"'
+              datasourceUid: prometheus
+              url: '$${__value.raw}'

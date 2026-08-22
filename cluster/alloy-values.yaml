@@ -1,0 +1,99 @@
+# Grafana Alloy, collecting pod logs into Loki.
+#
+# Promtail would have been the obvious choice and is what most guides still
+# show. It reached end of life in March 2026; Alloy is its replacement and
+# takes the same job with a different configuration language.
+#
+# The important part of the config below is the label set: namespace, pod and
+# container are named exactly as the Prometheus metrics name them, so a spike
+# on a dashboard and the logs behind it are one click apart rather than two
+# label schemes to reconcile by hand.
+controller:
+  type: daemonset
+  # A log collector that skips the control plane has a blind spot exactly where
+  # the interesting failures are. Tolerate the taint that keeps ordinary
+  # workloads off it.
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/master
+      operator: Exists
+      effect: NoSchedule
+
+alloy:
+  configMap:
+    content: |
+      // Discover every pod on this node.
+      discovery.kubernetes "pods" {
+        role = "pod"
+        selectors {
+          role  = "pod"
+          field = "spec.nodeName=" + coalesce(sys.env("HOSTNAME"), constants.hostname)
+        }
+      }
+
+      // Keep the labels that let a metric and a log line be joined, and drop
+      // the rest: every distinct label combination is a separate stream in
+      // Loki, and unbounded labels are how a logging backend falls over.
+      discovery.relabel "pods" {
+        targets = discovery.kubernetes.pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+          target_label  = "app"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_node_name"]
+          target_label  = "node"
+        }
+      }
+
+      loki.source.kubernetes "pods" {
+        targets    = discovery.relabel.pods.output
+        forward_to = [loki.process.app.receiver]
+      }
+
+      // The application already emits one JSON object per line. Parsing it
+      // here turns level and msg into queryable fields without turning them
+      // into labels — a label per log level would be fine, a label per message
+      // would not.
+      loki.process "app" {
+        stage.json {
+          expressions = {
+            level = "level",
+            msg   = "msg",
+          }
+        }
+        stage.labels {
+          values = { level = "level" }
+        }
+        forward_to = [loki.write.default.receiver]
+      }
+
+      loki.write "default" {
+        endpoint {
+          url = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+        }
+      }
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 192Mi
+
+crds:
+  create: false

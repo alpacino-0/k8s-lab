@@ -189,8 +189,12 @@ jobs:
           kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.13.0/deploy/static/provider/baremetal/deploy.yaml
           kubectl wait -n ingress-nginx --for=condition=Ready pod \
             -l app.kubernetes.io/component=controller --timeout=300s
+          # Both ports, matching the two mappings in kind-config.yaml. Pinning
+          # only HTTP leaves 8443 pointing at nothing, which is a confusing way
+          # to fail: the certificate is issued, the listener is up, and the
+          # connection simply never arrives.
           kubectl patch svc ingress-nginx-controller -n ingress-nginx --type=json \
-            -p='[{"op":"replace","path":"/spec/ports/0/nodePort","value":30080}]'
+            -p='[{"op":"replace","path":"/spec/ports/0/nodePort","value":30080},{"op":"replace","path":"/spec/ports/1/nodePort","value":30443}]'
 
       - name: Build and load the images
         run: |
@@ -259,6 +263,8 @@ jobs:
 
       - name: HTTPS, the redirect and the Secure cookie must all work
         run: |
+          kubectl get svc -n ingress-nginx ingress-nginx-controller \
+            -o jsonpath='{range .spec.ports[*]}{.name}={.nodePort} {end}{"\n"}'
           for _ in $(seq 1 30); do
             curl -sk -o /dev/null https://localhost:8443/api/healthz -H 'Host: app.local' && break || sleep 2
           done

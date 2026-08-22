@@ -82,8 +82,15 @@ function createApp({ config, logger, metrics, db, redis = null }) {
   }
 
   // Observe every request except the scrape endpoint itself.
+  //
+  // What gets logged is deliberately not "every request". A line per healthy
+  // request is noise that costs money to store and hides the lines that
+  // matter; a service that logs nothing gives an operator nothing to correlate
+  // a metric spike against. The middle ground is to log what someone would act
+  // on: failures, and requests slow enough to be worth a look.
   app.use((req, res, next) => {
     if (req.path === '/metrics') return next();
+    const startedNs = process.hrtime.bigint();
     const stop = metrics.httpDuration.startTimer({
       route: req.path,
       method: req.method,
@@ -95,11 +102,19 @@ function createApp({ config, logger, metrics, db, redis = null }) {
         method: req.method,
         status: res.statusCode,
       });
-      logger.debug('request', {
+
+      const durationMs = Number(process.hrtime.bigint() - startedNs) / 1e6;
+      const fields = {
         method: req.method,
         path: req.path,
         status: res.statusCode,
-      });
+        durationMs: Math.round(durationMs * 100) / 100,
+      };
+
+      if (res.statusCode >= 500) logger.error('request failed', fields);
+      else if (res.statusCode >= 400) logger.warn('request rejected', fields);
+      else if (durationMs >= config.slowRequestMs) logger.warn('slow request', fields);
+      else logger.debug('request', fields);
     });
     next();
   });

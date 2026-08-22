@@ -1,0 +1,57 @@
+# Loki in single-binary mode with filesystem storage.
+#
+# The distributed mode exists for clusters ingesting terabytes; this one has
+# five workloads. Object storage, caches and read/write separation would all be
+# ceremony here, and the failure mode of a heavy logging stack on a small
+# cluster is that the logging stack evicts the application it was installed to
+# observe.
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  storage:
+    type: filesystem
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+  limits_config:
+    retention_period: 72h          # a demo does not need last month's logs
+    ingestion_rate_mb: 4
+    ingestion_burst_size_mb: 8
+    max_query_series: 500
+    reject_old_samples: true
+    reject_old_samples_max_age: 24h
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 2Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      memory: 512Mi
+
+# Everything below is for the distributed deployment or for object storage.
+read: { replicas: 0 }
+write: { replicas: 0 }
+backend: { replicas: 0 }
+chunksCache: { enabled: false }
+resultsCache: { enabled: false }
+lokiCanary: { enabled: false }
+test: { enabled: false }
+gateway: { enabled: false }
+minio: { enabled: false }
