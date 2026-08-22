@@ -9,7 +9,7 @@ const { createRateLimiter } = require('./ratelimit');
  * Build the Express app. Dependencies are injected so tests can run without
  * a database or a real metrics registry.
  */
-function createApp({ config, logger, metrics, db }) {
+function createApp({ config, logger, metrics, db, redis = null }) {
   const app = express();
   const startedAt = Date.now();
 
@@ -32,12 +32,37 @@ function createApp({ config, logger, metrics, db }) {
   const writeLimiter = createRateLimiter({ limit: limits.writesPerMinute });
   const readLimiter = createRateLimiter({ limit: limits.readsPerMinute });
 
-  function limited(limiter) {
-    return (req, res, next) => {
+  /**
+   * Rate limiting, shared across replicas when Redis is reachable and
+   * per-replica when it is not. The fallback is looser, never absent: a shared
+   * store being down must not turn into an outage.
+   */
+  function limited(limiter, limit) {
+    return async (req, res, next) => {
       // Keyed on the visitor rather than the IP: shared networks and mobile
       // carriers put many people behind a single address.
-      const { allowed, remaining, retryAfter } = limiter.check(req.visitorId);
+      const key = `rl:${req.method === 'GET' ? 'r' : 'w'}:${req.visitorId}`;
+      let backend = 'memory';
+      let allowed;
+      let remaining;
+      let retryAfter = 60;
+
+      const shared = redis ? await redis.slidingWindow(key, 60_000) : null;
+      if (shared) {
+        backend = 'redis';
+        allowed = shared.count <= limit;
+        remaining = Math.max(0, limit - shared.count);
+      } else {
+        const local = limiter.check(req.visitorId);
+        allowed = local.allowed;
+        remaining = local.remaining;
+        retryAfter = local.retryAfter;
+      }
+
       res.setHeader('RateLimit-Remaining', String(remaining));
+      res.setHeader('RateLimit-Policy', `${limit};w=60`);
+      metrics.limiterDecisions.inc({ backend, outcome: allowed ? 'allowed' : 'limited' });
+
       if (!allowed) {
         res.setHeader('Retry-After', String(retryAfter));
         metrics.rateLimited.inc({ route: req.path });
@@ -45,6 +70,15 @@ function createApp({ config, logger, metrics, db }) {
       }
       next();
     };
+  }
+
+  const statsCacheKey = (visitor) => `notes:count:${visitor}`;
+  // Do not assume config.redis exists just because a client was injected —
+  // that coupling is invisible until something rewires the two.
+  const statsCacheSeconds = (config.redis && config.redis.statsCacheSeconds) || 3;
+
+  async function invalidateCount(visitor) {
+    if (redis) await redis.del(statsCacheKey(visitor));
   }
 
   // Observe every request except the scrape endpoint itself.
@@ -87,7 +121,7 @@ function createApp({ config, logger, metrics, db }) {
     });
   });
 
-  app.get('/notes', limited(readLimiter), async (req, res) => {
+  app.get('/notes', limited(readLimiter, limits.readsPerMinute), async (req, res) => {
     if (!db) return res.status(503).json({ error: 'database not configured' });
     try {
       const notes = await db.listNotes(req.visitorId);
@@ -98,7 +132,7 @@ function createApp({ config, logger, metrics, db }) {
     }
   });
 
-  app.post('/notes', limited(writeLimiter), async (req, res) => {
+  app.post('/notes', limited(writeLimiter, limits.writesPerMinute), async (req, res) => {
     if (!db) return res.status(503).json({ error: 'database not configured' });
     const raw = req.body && typeof req.body.text === 'string' ? req.body.text : '';
     // Strip control characters; keep tabs and newlines out of stored text.
@@ -115,6 +149,7 @@ function createApp({ config, logger, metrics, db }) {
         });
       }
       const note = await db.createNote(req.visitorId, text);
+      await invalidateCount(req.visitorId);
       res.status(201).json({ servedBy: identity(), note });
     } catch (err) {
       logger.error('failed to create note', { error: err.message });
@@ -122,7 +157,7 @@ function createApp({ config, logger, metrics, db }) {
     }
   });
 
-  app.delete('/notes/:id', limited(writeLimiter), async (req, res) => {
+  app.delete('/notes/:id', limited(writeLimiter, limits.writesPerMinute), async (req, res) => {
     if (!db) return res.status(503).json({ error: 'database not configured' });
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id < 1) {
@@ -131,6 +166,7 @@ function createApp({ config, logger, metrics, db }) {
     try {
       const deleted = await db.deleteNote(req.visitorId, id);
       if (!deleted) return res.status(404).json({ error: 'note not found' });
+      await invalidateCount(req.visitorId);
       res.json({ servedBy: identity(), deleted });
     } catch (err) {
       logger.error('failed to delete note', { error: err.message });
@@ -140,14 +176,25 @@ function createApp({ config, logger, metrics, db }) {
 
   // Curated read-only summary for the UI. The raw /metrics endpoint stays
   // internal — Prometheus scrapes it, the public ingress does not route to it.
-  app.get('/stats', limited(readLimiter), async (req, res) => {
+  app.get('/stats', limited(readLimiter, limits.readsPerMinute), async (req, res) => {
     let notes = null;
     let databaseUp = false;
+    let cached = false;
     if (db) {
       try {
-        // Scoped to the caller — /stats must not leak how much other people
-        // have stored.
-        notes = await db.countNotesFor(req.visitorId);
+        // The interface polls this every few seconds and the burst button hits
+        // it sixty times, so the count is read far more often than it changes.
+        // Short TTL, invalidated on every write, scoped to the caller —
+        // /stats must not leak how much other people have stored.
+        const key = statsCacheKey(req.visitorId);
+        const hit = redis ? await redis.get(key) : null;
+        if (hit !== null) {
+          notes = Number(hit);
+          cached = true;
+        } else {
+          notes = await db.countNotesFor(req.visitorId);
+          if (redis) await redis.setEx(key, statsCacheSeconds, notes);
+        }
         databaseUp = true;
       } catch {
         databaseUp = false;
@@ -160,6 +207,8 @@ function createApp({ config, logger, metrics, db }) {
       notes,
       noteLimit: limits.maxNotesPerVisitor,
       databaseUp,
+      cached,
+      sharedStore: redis ? redis.isHealthy() : null,
       nodeVersion: process.version,
       memoryMb: Math.round(process.memoryUsage().heapUsed / 1048576),
     });

@@ -4,13 +4,15 @@ const { loadConfig } = require('./config');
 const { createLogger } = require('./logger');
 const { createMetrics } = require('./metrics');
 const { createDb } = require('./db');
+const { createRedis } = require('./redis');
 const { createApp, createMetricsApp } = require('./app');
 
 const config = loadConfig();
 const logger = createLogger({ level: config.logLevel, base: { env: config.env } });
 const metrics = createMetrics();
 const db = createDb(config.db, logger);
-const app = createApp({ config, logger, metrics, db });
+const redis = createRedis(config.redis, logger, metrics);
+const app = createApp({ config, logger, metrics, db, redis });
 const metricsApp = createMetricsApp({ metrics, db });
 
 const server = app.listen(config.port, () => {
@@ -46,6 +48,7 @@ async function shutdown(signal) {
   metricsServer.close();
   server.close(async () => {
     try {
+      if (redis) await redis.close();
       if (db) await db.close();
       logger.info('shutdown complete');
       process.exit(0);

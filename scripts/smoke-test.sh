@@ -98,6 +98,20 @@ check "oversized notes are rejected" \
      -d \"{\\\"text\\\":\\\"\$(head -c 600 /dev/zero | tr '\\0' 'x')\\\"}\" ${BASE}/notes)\" = 400 ]"
 rm -f "$JAR_A" "$JAR_B"
 
+# ---- shared state ----------------------------------------------------------
+if kubectl -n "$NAMESPACE" get deploy "${RELEASE}-redis" >/dev/null 2>&1; then
+  kubectl -n "$NAMESPACE" port-forward "svc/${SVC}" "${METRICS_PORT}:9090" >/dev/null 2>&1 &
+  check "shared store is reachable from the app" \
+    sh -c "curl -sf ${METRICS}/metrics | grep -qE '^redis_up\{[^}]*\} 1'"
+  check "the rate limiter is using the shared store" \
+    sh -c "curl -sf ${METRICS}/metrics | grep -q 'rate_limiter_decisions_total{backend=\"redis\"'"
+  check "the note count is served from cache" \
+    sh -c "curl -sf -b '$JAR' ${BASE}/stats >/dev/null; curl -sf -b '$JAR' ${BASE}/stats | grep -q '\"cached\":true'"
+  check "redis refuses connections from unrelated pods" \
+    sh -c "! kubectl -n '$NAMESPACE' run redisprobe-$RANDOM --rm -i --restart=Never --quiet \
+       --image=redis:7.4-alpine --command -- redis-cli -h ${RELEASE}-redis -t 5 ping 2>/dev/null | grep -q PONG"
+fi
+
 # Security posture, read straight from the running pod spec.
 POD=$(kubectl -n "$NAMESPACE" get pod -l "app.kubernetes.io/name=k8s-lab-app" \
         --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)

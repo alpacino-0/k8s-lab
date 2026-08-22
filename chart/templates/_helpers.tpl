@@ -77,3 +77,20 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- include "postgres.fullname" . -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "redis.fullname" -}}
+{{- printf "%s-redis" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "redis.selectorLabels" -}}
+app.kubernetes.io/name: redis
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end -}}
+
+{{- define "redis.labels" -}}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+{{ include "redis.selectorLabels" . }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/part-of: k8s-lab
+app.kubernetes.io/component: cache
+{{- end -}}

@@ -81,6 +81,18 @@ topologySpread:
   maxSkew: 1
   whenUnsatisfiable: ScheduleAnyway
 
+redis:
+  enabled: true
+  maxmemory: 64mb
+  statsCacheSeconds: 3
+  resources:
+    requests:
+      cpu: 10m
+      memory: 24Mi
+    limits:
+      cpu: 150m
+      memory: 96Mi
+
 retention:
   enabled: true
   schedule: "17 * * * *"
