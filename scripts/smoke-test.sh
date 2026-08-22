@@ -177,16 +177,18 @@ if kubectl -n "$NAMESPACE" get deploy "${RELEASE}-redis" >/dev/null 2>&1; then
     sh -c "curl -sf ${METRICS}/metrics | grep -q 'rate_limiter_decisions_total{backend=\"redis\"'"
   check "the note count is served from cache" \
     sh -c "curl -sf -b '$JAR' ${BASE}/stats >/dev/null; curl -sf -b '$JAR' ${BASE}/stats | grep -q '\"cached\":true'"
-  # A plain TCP attempt with the image already used above, rather than pulling
-  # a redis image for one connection.
+  # Redis does not speak HTTP, so a status code proves nothing: curl reports
+  # 000 whether the connection was refused or merely produced no HTTP response.
+  # What distinguishes the two is whether the TCP connection was established at
+  # all, which curl states in its verbose output.
   REDIS_OUT=$(run_probe "curlimages/curl:8.11.1" \
-    '["sh","-c","code=$(curl -s -m 8 -o /dev/null -w %{http_code} telnet://'"${RELEASE}-redis.${NAMESPACE}"':6379); echo PROBE_RAN:$code"]')
+    '["sh","-c","if curl -sv -m 8 telnet://'"${RELEASE}-redis.${NAMESPACE}"':6379 2>\u00261 | grep -q \"Connected to\"; then echo PROBE_RAN:connected; else echo PROBE_RAN:blocked; fi"]')
   if [[ "$REDIS_OUT" != *"PROBE_RAN:"* ]]; then
     fail "the redis isolation probe never ran: ${REDIS_OUT:0:140}"
-  elif [[ "$REDIS_OUT" == *"PROBE_RAN:000"* ]]; then
+  elif [[ "$REDIS_OUT" == *"PROBE_RAN:blocked"* ]]; then
     pass "redis refuses connections from unrelated pods"
   else
-    fail "an unrelated pod reached redis (${REDIS_OUT##*PROBE_RAN:}) — NetworkPolicy not enforced"
+    fail "an unrelated pod opened a connection to redis — NetworkPolicy not enforced"
   fi
 fi
 
