@@ -2,7 +2,7 @@
 
 # Pinned to a specific patch release so builds are reproducible.
 # For stricter supply-chain guarantees pin by digest: node:20.19.4-alpine3.21@sha256:...
-ARG NODE_VERSION=20.19.4-alpine3.21
+ARG NODE_VERSION=20.20.2-alpine3.22
 
 # ---------- Stage 1: production dependencies only ----------
 FROM node:${NODE_VERSION} AS deps
@@ -24,6 +24,17 @@ ENV NODE_ENV=production \
 WORKDIR /app
 
 # node:alpine ships an unprivileged "node" user (uid 1000). Never run as root.
+# Pull the latest security patches for the base image's OS packages. Pinning the
+# base tag keeps builds reproducible; this keeps them patched.
+RUN apk upgrade --no-cache
+
+# npm is a build-time tool. Leaving it in the runtime image ships its entire
+# dependency tree (tar, minimatch, glob, sigstore, ...) and every CVE they carry,
+# for code that never executes here — the entrypoint is `node`, not `npm`.
+RUN rm -rf /usr/local/lib/node_modules/npm \
+           /usr/local/bin/npm /usr/local/bin/npx \
+           /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg
+
 COPY --chown=node:node --from=deps /app/node_modules ./node_modules
 COPY --chown=node:node package.json ./
 COPY --chown=node:node src ./src
