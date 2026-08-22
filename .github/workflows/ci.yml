@@ -173,6 +173,14 @@ jobs:
           cluster_name: ci
           config: kind-config.yaml
 
+      # Applied first, so the release has to satisfy them rather than being
+      # grandfathered in — and so the API server has picked the bindings up
+      # long before anything is tested against them.
+      - name: Apply cluster policies
+        run: |
+          kubectl apply -f policies/namespace.yaml
+          kubectl apply -f policies/admission-policies.yaml -f policies/admission-bindings.yaml
+
       # The zero-downtime check below measures through the ingress controller,
       # the same path a real user takes. `kubectl port-forward` is bound to one
       # pod, so a rollout kills the tunnel and the measurement, not the service.
@@ -189,13 +197,6 @@ jobs:
           docker build -t "k8s-lab-app:${IMAGE_TAG}" ./app
           docker build -t "k8s-lab-web:${IMAGE_TAG}" ./web
           kind load docker-image "k8s-lab-app:${IMAGE_TAG}" "k8s-lab-web:${IMAGE_TAG}" --name ci
-
-      # Applied before the chart, so the release has to satisfy them rather than
-      # being grandfathered in.
-      - name: Apply cluster policies
-        run: |
-          kubectl apply -f policies/namespace.yaml
-          kubectl apply -f policies/admission-policies.yaml -f policies/admission-bindings.yaml
 
       - name: Policies must reject what they are meant to
         run: NAMESPACE=k8s-lab IMAGE="k8s-lab-app:${IMAGE_TAG}" ./scripts/policy-test.sh
