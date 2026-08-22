@@ -32,6 +32,7 @@ flowchart TB
 
         subgraph NS["namespace: k8s-lab"]
             WEB["web<br/>Deployment · 2 replika<br/>nginx, uid 101, salt-okunur"]
+            RD[("redis<br/>paylaşımlı pencere + cache")]
             APP["app<br/>Deployment · HPA 3-10 · PDB min 2<br/>root değil · salt-okunur rootfs"]
             PG[("postgres-0<br/>StatefulSet · PVC")]
             MIG["migration Job<br/>Helm post-install hook"]
@@ -49,6 +50,7 @@ flowchart TB
     U -->|"app.local/"| ING --> WEB
     U -->|"app.local/api"| ING --> NP --> APP
     APP --> PG
+    APP -->|"hız penceresi, not sayısı"| RD
     MIG -.->|sürüm başına bir kez| PG
     BK -.->|pg_dump + gzip -t| PG
     PROM -->|":9090/metrics · 15sn"| APP
@@ -66,7 +68,7 @@ git clone https://github.com/alpacino-0/k8s-lab.git && cd k8s-lab
 make up                                    # cluster + ingress + build + deploy
 echo "127.0.0.1 app.local" | sudo tee -a /etc/hosts
 open http://app.local:8080                 # arayüz
-make smoke                                 # 31 uçtan uca kontrol
+make smoke                                 # 35 uçtan uca kontrol
 ```
 
 ## Arayüz
@@ -86,7 +88,7 @@ değişkenleri — ve tarayıcı sadece geleni sayıyor.
 
 | Komut | Ne yapar |
 |---|---|
-| `make test` | Birim ve entegrasyon testleri (24 test, cluster gerekmez) |
+| `make test` | Birim ve entegrasyon testleri (27 test, cluster gerekmez) |
 | `make lint` | ESLint + `helm lint` + tüm values profillerini üretir |
 | `make deploy` | İki imajı da yeniden derler ve sürümü günceller |
 | `make web` | Arayüzü yerelde, port-forward edilmiş backend'e karşı çalıştırır |
@@ -114,7 +116,8 @@ değişkenleri — ve tarayıcı sadece geleni sayıyor.
 | npm runtime imajından çıkarıldı | `app/Dockerfile` | **tüm** Node.js paket CVE'lerini sıfırladı (aşağıda) |
 | Git'te secret yok | `.gitignore` + chart values | parola zorunlu bir chart değeri |
 | Notlar ziyaretçi başına izole | anonim çerez, owner'a göre filtrelenmiş sorgular | ikinci bir ziyaretçi ilkinin notunu ne görür ne siler |
-| Yazma sınırlı | ingress `limit-rps` + ziyaretçi sayaçları + not tavanı | uzun ve kota aşan yazmalar reddedilir |
+| Yazma sınırlı | ingress `limit-rps` + paylaşımlı pencere + not tavanı | uzun ve kota aşan yazmalar reddedilir |
+| Limitler replikalar arası bağlayıcı | Redis kayan pencere | limit 30 iken 60 istek: paylaşımlı **29 geçti**, replika başına **60 geçti** |
 | Hiçbir şey kalıcı değil | saatlik saklama CronJob'ı | 24 saatten eski notlar silinir |
 
 Egress politikası **DNS'e açıkça izin verir**. Bu kuralı unutmak, varsayılan-reddet
@@ -160,10 +163,10 @@ Her push'ta beş job ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
 
 | Job | Neyi denetler |
 |---|---|
-| `test` | API için ESLint + 24 test; arayüz için ESLint + üretim derlemesi |
+| `test` | API için ESLint + 27 test; arayüz için ESLint + üretim derlemesi |
 | `manifests` | `helm lint`, üç values profili, kubeconform şema denetimi, iki Dockerfile için hadolint |
 | `image` | İki imajı derler, ikisinin de root olmadığını doğrular, salt-okunur başlatır, Trivy taraması |
-| `e2e` | Gerçek kind cluster kurar, chart'ı yükler, iki ingress yolunu da denetler, 31 kontrolü çalıştırır, ardından bir upgrade'in **sıfır istek düşürdüğünü** kanıtlar |
+| `e2e` | Gerçek kind cluster kurar, chart'ı yükler, iki ingress yolunu da denetler, 35 kontrolü çalıştırır, ardından bir upgrade'in **sıfır istek düşürdüğünü** kanıtlar |
 | `publish` | İki imajı da amd64 + arm64 için GHCR'a, SBOM ve provenance ile push eder (yalnız main) |
 
 ---
@@ -179,14 +182,14 @@ web/                  React arayüzü (Vite), yetkisiz nginx ile servis edilir
   src/                app · pod defteri · notlar · mekanizmalar
   nginx.conf          SPA fallback, CSP, yazma işlemleri /tmp ile sınırlı
 chart/                Helm chart — tek deploy yolu
-  templates/          17 kaynak şablonu + helper'lar
+  templates/          18 kaynak şablonu + helper'lar
   values.yaml         açıklamalı varsayılanlar
   values-dev.yaml     minimum ayak izi, demo uçları açık
   values-prod.yaml    otomatik ölçekleme, yedekleme, izleme, ağ politikaları
   values-public.yaml  GHCR imajları, TLS, harici secret — herkese açık adres için
 scripts/
   bootstrap.sh        idempotent cluster + ingress + deploy
-  smoke-test.sh       güvenlik duruşu dahil 31 uçtan uca kontrol
+  smoke-test.sh       güvenlik duruşu dahil 35 uçtan uca kontrol
   teardown.sh         cluster'ı siler
 docs/
   DEPLOY.md           herkese açık bir adrese alma kılavuzu
@@ -271,9 +274,24 @@ birkaç saat sonra spam duvarına döner. Notlar bunun yerine anonim bir ziyaret
 doğrulanıyor: ikinci bir ziyaretçi ilkinin notunu ne okuyabiliyor ne silebiliyor.
 
 **Yazma üç katmanda sınırlı.** Ingress her istemci IP'sini sınırlıyor (`25r/s`,
-burst 125, 20 eşzamanlı bağlantı). Uygulama kendi ziyaretçi sayaçlarını yedek
-olarak tutuyor — bilerek replika başına, yani asıl bağlayıcı sınır ingress'te.
-Ve her ziyaretçi aynı anda 20 not tutabiliyor; depolama büyümesini durduran bu.
+burst 125, 20 eşzamanlı bağlantı). Uygulama, ziyaretçi başına sayımı bütün
+replikaların paylaştığı bir Redis kayan penceresinde yapıyor. Ve her ziyaretçi
+aynı anda 20 not tutabiliyor; depolama büyümesini durduran bu.
+
+Paylaşımlı pencere, süreç içi olanın sessizce bozuk olması yüzünden eklendi. Üç
+replika ayrı ayrı sayıyordu, yani istemci hakkının üç katını alıyordu — kod bunu
+bir yorumda itiraf ediyordu ama hiçbir test doğrulamıyordu. Ölçüm, dakikada 30
+limitine karşı 60 istek:
+
+| | Geçen | Reddedilen |
+|---|---|---|
+| Replika başına sayaç | **60** | 0 |
+| Paylaşımlı pencere | **29** | 31 |
+
+CI artık bu karşılaştırmayı her push'ta çalıştırıyor. Redis opsiyonel: erişilemez
+olduğunda servis çökmüyor, replika başına sayıma ve soğuk cache'e düşüyor —
+çalışan bir deployment'tan Redis adresi silinerek doğrulandı; istekler
+karşılanmaya devam etti, yalnızca limit gevşedi.
 
 **Hiçbir şey kalıcı değil.** Saatlik bir CronJob 24 saatten eski notları siliyor.
 Owner sütunu eklenmeden önce yazılmış satırlar bir sentinel sahiple işaretli:

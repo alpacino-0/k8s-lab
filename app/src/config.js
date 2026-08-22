@@ -38,6 +38,16 @@ function loadConfig(env = process.env) {
       writesPerMinute: num(env.WRITES_PER_MINUTE, 40, 'WRITES_PER_MINUTE'),
       readsPerMinute: num(env.READS_PER_MINUTE, 240, 'READS_PER_MINUTE'),
     },
+
+    // Shared counters and a small read cache. Optional: without it the service
+    // runs exactly as before, with per-replica limits and no caching.
+    redis: env.REDIS_URL
+      ? {
+          url: env.REDIS_URL,
+          connectTimeoutMs: num(env.REDIS_CONNECT_TIMEOUT_MS, 2000, 'REDIS_CONNECT_TIMEOUT_MS'),
+          statsCacheSeconds: num(env.STATS_CACHE_SECONDS, 3, 'STATS_CACHE_SECONDS'),
+        }
+      : null,
     // Filled by the Kubernetes downward API. Reading these needs no API access
     // and no service-account token — the kubelet injects them into the pod.
     pod: {

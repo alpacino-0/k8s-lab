@@ -33,6 +33,7 @@ flowchart TB
 
         subgraph NS["namespace: k8s-lab"]
             WEB["web<br/>Deployment · 2 replicas<br/>nginx, uid 101, read-only"]
+            RD[("redis<br/>shared window + cache")]
             APP["app<br/>Deployment · HPA 3-10 · PDB min 2<br/>non-root · read-only rootfs"]
             PG[("postgres-0<br/>StatefulSet · PVC")]
             MIG["migration Job<br/>Helm post-install hook"]
@@ -50,6 +51,7 @@ flowchart TB
     U -->|"app.local/"| ING --> WEB
     U -->|"app.local/api"| ING --> NP --> APP
     APP --> PG
+    APP -->|"rate window, note count"| RD
     MIG -.->|once per release| PG
     BK -.->|pg_dump + gzip -t| PG
     PROM -->|":9090/metrics · 15s"| APP
@@ -67,7 +69,7 @@ git clone https://github.com/alpacino-0/k8s-lab.git && cd k8s-lab
 make up                                    # cluster + ingress + build + deploy
 echo "127.0.0.1 app.local" | sudo tee -a /etc/hosts
 open http://app.local:8080                 # the interface
-make smoke                                 # 31 end-to-end checks
+make smoke                                 # 35 end-to-end checks
 ```
 
 ## The interface
@@ -88,7 +90,7 @@ variables the kubelet injects — and the browser simply counts what came back.
 
 | Command | What it does |
 |---|---|
-| `make test` | Unit and integration tests (24 tests, no cluster needed) |
+| `make test` | Unit and integration tests (27 tests, no cluster needed) |
 | `make lint` | ESLint + `helm lint` + renders every values profile |
 | `make deploy` | Rebuild both images and upgrade the release |
 | `make web` | Run the interface locally against a port-forwarded backend |
@@ -116,7 +118,8 @@ variables the kubelet injects — and the browser simply counts what came back.
 | npm removed from the runtime image | `app/Dockerfile` | eliminated **every** Node.js package CVE (see below) |
 | No secrets in git | `.gitignore` + chart values | password is a required chart value |
 | Notes isolated per visitor | anonymous cookie, owner-scoped queries | a second visitor cannot read or delete the first one's notes |
-| Writes bounded | ingress `limit-rps` + per-visitor counters + a note cap | oversized and over-quota writes are rejected |
+| Writes bounded | ingress `limit-rps` + a shared window + a note cap | oversized and over-quota writes are rejected |
+| Rate limits bind across replicas | Redis sliding window | 60 requests against a limit of 30: **29 allowed** shared, **60 allowed** per replica |
 | Nothing kept forever | hourly retention CronJob | notes older than 24h are deleted |
 
 The egress policy explicitly allows DNS. Forgetting that rule is the most common
@@ -163,10 +166,10 @@ Five jobs on every push ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
 
 | Job | Gate |
 |---|---|
-| `test` | ESLint and 24 tests for the API; ESLint and a production build for the interface |
+| `test` | ESLint and 27 tests for the API; ESLint and a production build for the interface |
 | `manifests` | `helm lint`, renders all three values profiles, kubeconform schema validation, hadolint on both Dockerfiles |
 | `image` | Builds both images, asserts each is non-root, boots each read-only, Trivy scan (fails on CRITICAL/HIGH) |
-| `e2e` | Creates a real kind cluster, installs the chart, checks both ingress routes, runs the 31-check smoke test, then proves an upgrade drops zero requests |
+| `e2e` | Creates a real kind cluster, installs the chart, checks both ingress routes, runs the 35-check smoke test, then proves an upgrade drops zero requests |
 | `publish` | Pushes both images to GHCR for amd64 and arm64, with SBOM and provenance attestation (main only) |
 
 ---
@@ -182,14 +185,14 @@ web/                  React interface (Vite), served by unprivileged nginx
   src/                app · pod ledger · notes · mechanisms
   nginx.conf          SPA fallback, CSP, writes confined to /tmp
 chart/                Helm chart — the single deployment path
-  templates/          17 resource templates + helpers
+  templates/          18 resource templates + helpers
   values.yaml         documented defaults
   values-dev.yaml     minimal footprint, demo endpoints on
   values-prod.yaml    autoscaling, backups, monitoring, network policies
   values-public.yaml  GHCR images, TLS, external secret — for a public address
 scripts/
   bootstrap.sh        idempotent cluster + ingress + deploy
-  smoke-test.sh       31 end-to-end checks including security posture
+  smoke-test.sh       35 end-to-end checks including security posture
   teardown.sh         destroy the cluster
 docs/
   DEPLOY.md           runbook for putting this on a public address
@@ -273,10 +276,25 @@ instead — no signup, and every query is filtered by owner. Verified in CI: a
 second visitor cannot read or delete the first one's notes.
 
 **Writes are bounded three ways.** The ingress limits each client IP
-(`25r/s`, burst 125, 20 concurrent connections). The application keeps its own
-per-visitor counters as a backstop — deliberately per replica, so the ingress
-is the limit that actually binds. And each visitor may hold 20 notes at a
-time, which is what stops storage growing rather than what stops request rate.
+(`25r/s`, burst 125, 20 concurrent connections). The application counts per
+visitor in a Redis sliding window shared by every replica. And each visitor may
+hold 20 notes at a time, which is what stops storage growing rather than what
+stops request rate.
+
+The shared window is there because the in-process one was quietly broken. Three
+replicas each counted separately, so a client got three times its allowance —
+the code said so in a comment and nothing tested it. Measured, 60 requests
+against a limit of 30 per minute:
+
+| | Allowed | Rejected |
+|---|---|---|
+| Per-replica counters | **60** | 0 |
+| Shared window | **29** | 31 |
+
+CI now runs that comparison on every push. Redis is optional: with it
+unavailable the service falls back to per-replica counting and a cold cache
+rather than failing, which was verified by removing its address from a running
+deployment — requests kept being served, only the limit went loose.
 
 **Nothing is kept forever.** An hourly CronJob deletes notes older than 24
 hours. Rows written before the owner column existed carry a sentinel owner:

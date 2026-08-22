@@ -86,6 +86,26 @@ web:
     enabled: true
     minAvailable: 1
 
+# Shared counters across replicas, plus a short read cache.
+#
+# The in-process limiter counts per pod, so a client spread over N replicas got
+# N times its allowance. This makes the window shared. Optional: with
+# redis.enabled=false the service falls back to per-replica counting and no
+# caching, and keeps working.
+redis:
+  enabled: true
+  image: redis:7.4-alpine
+  maxmemory: 64mb
+  emptyDirSize: 128Mi
+  statsCacheSeconds: 3
+  resources:
+    requests:
+      cpu: 10m
+      memory: 24Mi
+    limits:
+      cpu: 200m
+      memory: 96Mi
+
 # Nothing is kept forever on a public demo.
 retention:
   enabled: true

@@ -76,6 +76,12 @@ spec:
               valueFrom: { fieldRef: { fieldPath: status.podIP } }
             - name: NODE_NAME
               valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+            {{- if .Values.redis.enabled }}
+            - name: REDIS_URL
+              value: "redis://{{ include "redis.fullname" . }}:6379"
+            - name: STATS_CACHE_SECONDS
+              value: {{ .Values.redis.statsCacheSeconds | quote }}
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "app.fullname" . }}

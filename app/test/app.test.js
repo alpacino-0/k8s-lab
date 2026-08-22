@@ -18,6 +18,7 @@ async function withServer(overrides, fn) {
     logger: overrides.logger || silentLogger,
     metrics,
     db: overrides.db ?? null,
+    redis: overrides.redis ?? null,
   });
   const server = app.listen(0);
   await new Promise((r) => server.once('listening', r));
@@ -301,6 +302,100 @@ test('writes are rate limited per visitor', async () => {
       assert.deepStrictEqual(codes, [201, 201, 201, 429, 429]);
     },
   );
+});
+
+/** Stand-in for the shared store, with a switch to make it "unavailable". */
+function fakeRedis({ healthy = true } = {}) {
+  const store = new Map();
+  let counter = 0;
+  return {
+    healthy,
+    calls: { slidingWindow: 0, get: 0, setEx: 0, del: 0 },
+    isHealthy() { return this.healthy; },
+    async slidingWindow() {
+      this.calls.slidingWindow += 1;
+      if (!this.healthy) return null;
+      counter += 1;
+      return { count: counter };
+    },
+    async get(key) {
+      this.calls.get += 1;
+      return this.healthy ? (store.has(key) ? store.get(key) : null) : null;
+    },
+    async setEx(key, _s, value) {
+      this.calls.setEx += 1;
+      if (this.healthy) store.set(key, String(value));
+    },
+    async del(key) {
+      this.calls.del += 1;
+      store.delete(key);
+    },
+  };
+}
+
+test('the shared store enforces the limit across replicas', async () => {
+  const redis = fakeRedis();
+  await withServer(
+    { config: { limits: { ...loadConfig({}).limits, readsPerMinute: 3 } }, redis },
+    async (base) => {
+      const codes = [];
+      for (let i = 0; i < 5; i += 1) {
+        const res = await fetch(`${base}/stats`);
+        codes.push(res.status);
+        assert.strictEqual(res.headers.get('ratelimit-policy'), '3;w=60');
+      }
+      assert.deepStrictEqual(codes, [200, 200, 200, 429, 429]);
+      assert.strictEqual(redis.calls.slidingWindow, 5, 'every request consults the shared window');
+    },
+  );
+});
+
+test('an unavailable shared store falls back instead of failing', async () => {
+  const redis = fakeRedis({ healthy: false });
+  await withServer({ redis, db: { countNotesFor: async () => 1 } }, async (base) => {
+    const res = await fetch(`${base}/stats`);
+    assert.strictEqual(res.status, 200, 'the service must keep serving without Redis');
+    const body = await res.json();
+    assert.strictEqual(body.sharedStore, false);
+    assert.strictEqual(body.cached, false);
+    assert.ok(redis.calls.slidingWindow > 0, 'it still tried');
+  });
+});
+
+test('the note count is cached and invalidated by writes', async () => {
+  const redis = fakeRedis();
+  let dbCalls = 0;
+  const db = {
+    countNotesFor: async () => { dbCalls += 1; return 2; },
+    createNote: async (_o, text) => ({ id: 9, text, created_at: 'now' }),
+  };
+
+  await withServer({ redis, db }, async (base) => {
+    const first = await (await fetch(`${base}/stats`)).json();
+    const jar = first ? null : null; // cookie handling below
+    assert.strictEqual(first.cached, false, 'first read is a miss');
+    assert.strictEqual(dbCalls, 1);
+
+    // Same visitor, so the second read should come from the cache.
+    const cookie = 'visitor=' + 'b'.repeat(32);
+    await fetch(`${base}/stats`, { headers: { cookie } });
+    const second = await (await fetch(`${base}/stats`, { headers: { cookie } })).json();
+    assert.strictEqual(second.cached, true, 'second read is a hit');
+    const afterCache = dbCalls;
+
+    // A write must drop the cached count.
+    await fetch(`${base}/notes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie },
+      body: JSON.stringify({ text: 'invalidate me' }),
+    });
+    assert.ok(redis.calls.del > 0, 'writing must invalidate the cached count');
+
+    const third = await (await fetch(`${base}/stats`, { headers: { cookie } })).json();
+    assert.strictEqual(third.cached, false, 'the read after a write goes to the database');
+    assert.ok(dbCalls > afterCache);
+    assert.ok(jar === null);
+  });
 });
 
 test('logger writes one JSON object per line', () => {

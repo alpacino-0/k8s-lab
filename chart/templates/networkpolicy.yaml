@@ -68,6 +68,16 @@ spec:
         - protocol: TCP
           port: 5432
     {{- end }}
+    {{- if .Values.redis.enabled }}
+    # Shared counters and cache.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "redis.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 6379
+    {{- end }}
 {{- if .Values.postgres.enabled }}
 ---
 # 2) The database accepts connections only from the application and the
