@@ -58,14 +58,45 @@ check "database gauge is healthy" \
 check "telemetry port serves nothing else" \
   sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' ${METRICS}/notes)\" = 404 ]"
 
-check "note can be written"      sh -c "curl -sf -X POST -H 'Content-Type: application/json' \
+# Notes are scoped to a visitor cookie, so write and read must share one jar.
+JAR=$(mktemp)
+curl -sf -c "$JAR" -o /dev/null "${BASE}/notes" || true
+
+check "note can be written"      sh -c "curl -sf -b '$JAR' -X POST -H 'Content-Type: application/json' \
                                    -d '{\"text\":\"smoke-test\"}' ${BASE}/notes | grep -q smoke-test"
-check "note can be read back"    sh -c "curl -sf ${BASE}/notes | grep -q smoke-test"
-check "empty note is rejected"   sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+check "note can be read back"    sh -c "curl -sf -b '$JAR' ${BASE}/notes | grep -q smoke-test"
+check "empty note is rejected"   sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' -b '$JAR' -X POST \
                                    -H 'Content-Type: application/json' -d '{\"text\":\"\"}' ${BASE}/notes)\" = 400 ]"
 check "unknown route returns 404" sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' ${BASE}/nope)\" = 404 ]"
 check "demo endpoint is disabled" sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' ${BASE}/burn)\" = 404 ]"
 check "no credentials in /config" sh -c "! curl -s ${BASE}/config | grep -qiE 'password|secret|token'"
+
+# ---- public-exposure guard rails ------------------------------------------
+# Notes are scoped to an anonymous visitor cookie: no signup, but no shared
+# graffiti wall either.
+JAR_A=$(mktemp); JAR_B=$(mktemp)
+curl -sf -c "$JAR_A" -o /dev/null "${BASE}/notes" || true
+curl -sf -c "$JAR_B" -o /dev/null "${BASE}/notes" || true
+
+check "visitor cookie is issued" sh -c "grep -q visitor '$JAR_A'"
+
+NOTE_ID=$(curl -sf -b "$JAR_A" -X POST -H 'Content-Type: application/json' \
+  -d '{"text":"isolation probe"}' "${BASE}/notes" \
+  | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+
+check "a second visitor cannot see the first one's notes" \
+  sh -c "! curl -sf -b '$JAR_B' ${BASE}/notes | grep -q 'isolation probe'"
+check "a second visitor cannot delete them" \
+  sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' -b '$JAR_B' -X DELETE ${BASE}/notes/${NOTE_ID})\" = 404 ]"
+check "the owner can delete their own note" \
+  sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' -b '$JAR_A' -X DELETE ${BASE}/notes/${NOTE_ID})\" = 200 ]"
+check "rate limit headers are returned" \
+  sh -c "curl -s -D - -o /dev/null -b '$JAR_A' ${BASE}/notes | grep -qi 'ratelimit-remaining'"
+check "oversized notes are rejected" \
+  sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' -b '$JAR_A' -X POST \
+     -H 'Content-Type: application/json' \
+     -d \"{\\\"text\\\":\\\"\$(head -c 600 /dev/zero | tr '\\0' 'x')\\\"}\" ${BASE}/notes)\" = 400 ]"
+rm -f "$JAR_A" "$JAR_B"
 
 # Security posture, read straight from the running pod spec.
 POD=$(kubectl -n "$NAMESPACE" get pod -l "app.kubernetes.io/name=k8s-lab-app" \

@@ -67,7 +67,7 @@ git clone https://github.com/alpacino-0/k8s-lab.git && cd k8s-lab
 make up                                    # cluster + ingress + build + deploy
 echo "127.0.0.1 app.local" | sudo tee -a /etc/hosts
 open http://app.local:8080                 # the interface
-make smoke                                 # 25 end-to-end checks
+make smoke                                 # 31 end-to-end checks
 ```
 
 ## The interface
@@ -88,7 +88,7 @@ variables the kubelet injects — and the browser simply counts what came back.
 
 | Command | What it does |
 |---|---|
-| `make test` | Unit and integration tests (19 tests, no cluster needed) |
+| `make test` | Unit and integration tests (24 tests, no cluster needed) |
 | `make lint` | ESLint + `helm lint` + renders every values profile |
 | `make deploy` | Rebuild both images and upgrade the release |
 | `make web` | Run the interface locally against a port-forwarded backend |
@@ -115,6 +115,9 @@ variables the kubelet injects — and the browser simply counts what came back.
 | Multi-stage image, production deps only | `app/Dockerfile` | Trivy blocks CRITICAL/HIGH findings in CI |
 | npm removed from the runtime image | `app/Dockerfile` | eliminated **every** Node.js package CVE (see below) |
 | No secrets in git | `.gitignore` + chart values | password is a required chart value |
+| Notes isolated per visitor | anonymous cookie, owner-scoped queries | a second visitor cannot read or delete the first one's notes |
+| Writes bounded | ingress `limit-rps` + per-visitor counters + a note cap | oversized and over-quota writes are rejected |
+| Nothing kept forever | hourly retention CronJob | notes older than 24h are deleted |
 
 The egress policy explicitly allows DNS. Forgetting that rule is the most common
 way a default-deny policy silently breaks an application: name resolution fails
@@ -160,10 +163,10 @@ Five jobs on every push ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
 
 | Job | Gate |
 |---|---|
-| `test` | ESLint and 19 tests for the API; ESLint and a production build for the interface |
+| `test` | ESLint and 24 tests for the API; ESLint and a production build for the interface |
 | `manifests` | `helm lint`, renders all three values profiles, kubeconform schema validation, hadolint on both Dockerfiles |
 | `image` | Builds both images, asserts each is non-root, boots each read-only, Trivy scan (fails on CRITICAL/HIGH) |
-| `e2e` | Creates a real kind cluster, installs the chart, checks both ingress routes, runs the 25-check smoke test, then proves an upgrade drops zero requests |
+| `e2e` | Creates a real kind cluster, installs the chart, checks both ingress routes, runs the 31-check smoke test, then proves an upgrade drops zero requests |
 | `publish` | Pushes both images to GHCR for amd64 and arm64, with SBOM and provenance attestation (main only) |
 
 ---
@@ -185,7 +188,7 @@ chart/                Helm chart — the single deployment path
   values-prod.yaml    autoscaling, backups, monitoring, network policies
 scripts/
   bootstrap.sh        idempotent cluster + ingress + deploy
-  smoke-test.sh       25 end-to-end checks including security posture
+  smoke-test.sh       31 end-to-end checks including security posture
   teardown.sh         destroy the cluster
 docs/
   LEARNING-LOG.tr.md  measured results and the bugs found (Turkish)
@@ -256,6 +259,32 @@ inherited `add_header` as soon as a nested block sets one of its own, so the
 security headers were never sent; and the interface's Service was carrying the
 API's `app.kubernetes.io/name` label, which made Prometheus try to scrape
 `/metrics` from nginx.
+
+## Ready for a public address
+
+The demo can be put on a URL strangers can reach. What that required, and why:
+
+**Anyone can use it, nobody shares a table.** Requiring a login would mean
+nobody tries the demo; a shared unbounded table becomes a spam wall within
+hours of being linked. Notes are scoped to an anonymous visitor cookie
+instead — no signup, and every query is filtered by owner. Verified in CI: a
+second visitor cannot read or delete the first one's notes.
+
+**Writes are bounded three ways.** The ingress limits each client IP
+(`25r/s`, burst 125, 20 concurrent connections). The application keeps its own
+per-visitor counters as a backstop — deliberately per replica, so the ingress
+is the limit that actually binds. And each visitor may hold 20 notes at a
+time, which is what stops storage growing rather than what stops request rate.
+
+**Nothing is kept forever.** An hourly CronJob deletes notes older than 24
+hours. Rows written before the owner column existed carry a sentinel owner:
+invisible to everyone, and removed by the same job.
+
+**Text is sanitised, not trusted.** Control characters are stripped, length is
+capped at 500, the JSON body at 32kb, and the interface renders text as text.
+
+Still missing before this is a product rather than a reachable demo: TLS with
+a real certificate, a domain, off-cluster backups, and someone who gets paged.
 
 ## Known limitations
 

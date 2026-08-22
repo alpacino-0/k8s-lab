@@ -2,6 +2,8 @@
 
 const express = require('express');
 const os = require('os');
+const { visitorMiddleware } = require('./visitor');
+const { createRateLimiter } = require('./ratelimit');
 
 /**
  * Build the Express app. Dependencies are injected so tests can run without
@@ -19,8 +21,31 @@ function createApp({ config, logger, metrics, db }) {
     ip: (config.pod && config.pod.ip) || null,
     namespace: (config.pod && config.pod.namespace) || null,
   });
+  const limits = config.limits;
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '64kb' }));
+  // Trust the ingress controller's X-Forwarded-For so proxy hops do not hide
+  // the real client from anything that inspects it.
+  app.set('trust proxy', true);
+  app.use(express.json({ limit: '32kb' }));
+  app.use(visitorMiddleware(limits));
+
+  const writeLimiter = createRateLimiter({ limit: limits.writesPerMinute });
+  const readLimiter = createRateLimiter({ limit: limits.readsPerMinute });
+
+  function limited(limiter) {
+    return (req, res, next) => {
+      // Keyed on the visitor rather than the IP: shared networks and mobile
+      // carriers put many people behind a single address.
+      const { allowed, remaining, retryAfter } = limiter.check(req.visitorId);
+      res.setHeader('RateLimit-Remaining', String(remaining));
+      if (!allowed) {
+        res.setHeader('Retry-After', String(retryAfter));
+        metrics.rateLimited.inc({ route: req.path });
+        return res.status(429).json({ error: 'too many requests, slow down' });
+      }
+      next();
+    };
+  }
 
   // Observe every request except the scrape endpoint itself.
   app.use((req, res, next) => {
@@ -62,10 +87,10 @@ function createApp({ config, logger, metrics, db }) {
     });
   });
 
-  app.get('/notes', async (req, res) => {
+  app.get('/notes', limited(readLimiter), async (req, res) => {
     if (!db) return res.status(503).json({ error: 'database not configured' });
     try {
-      const notes = await db.listNotes();
+      const notes = await db.listNotes(req.visitorId);
       res.json({ servedBy: identity(), count: notes.length, notes });
     } catch (err) {
       logger.error('failed to list notes', { error: err.message });
@@ -73,13 +98,23 @@ function createApp({ config, logger, metrics, db }) {
     }
   });
 
-  app.post('/notes', async (req, res) => {
+  app.post('/notes', limited(writeLimiter), async (req, res) => {
     if (!db) return res.status(503).json({ error: 'database not configured' });
-    const text = req.body && typeof req.body.text === 'string' ? req.body.text.trim() : '';
+    const raw = req.body && typeof req.body.text === 'string' ? req.body.text : '';
+    // Strip control characters; keep tabs and newlines out of stored text.
+    const text = raw.replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
     if (!text) return res.status(400).json({ error: 'field "text" is required' });
-    if (text.length > 500) return res.status(400).json({ error: 'field "text" is too long' });
+    if (text.length > limits.maxNoteLength) {
+      return res.status(400).json({ error: `field "text" must be ${limits.maxNoteLength} characters or fewer` });
+    }
     try {
-      const note = await db.createNote(text);
+      const held = await db.countNotesFor(req.visitorId);
+      if (held >= limits.maxNotesPerVisitor) {
+        return res.status(409).json({
+          error: `you can keep ${limits.maxNotesPerVisitor} notes at a time — delete one first`,
+        });
+      }
+      const note = await db.createNote(req.visitorId, text);
       res.status(201).json({ servedBy: identity(), note });
     } catch (err) {
       logger.error('failed to create note', { error: err.message });
@@ -87,14 +122,14 @@ function createApp({ config, logger, metrics, db }) {
     }
   });
 
-  app.delete('/notes/:id', async (req, res) => {
+  app.delete('/notes/:id', limited(writeLimiter), async (req, res) => {
     if (!db) return res.status(503).json({ error: 'database not configured' });
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id < 1) {
       return res.status(400).json({ error: 'id must be a positive integer' });
     }
     try {
-      const deleted = await db.deleteNote(id);
+      const deleted = await db.deleteNote(req.visitorId, id);
       if (!deleted) return res.status(404).json({ error: 'note not found' });
       res.json({ servedBy: identity(), deleted });
     } catch (err) {
@@ -105,12 +140,14 @@ function createApp({ config, logger, metrics, db }) {
 
   // Curated read-only summary for the UI. The raw /metrics endpoint stays
   // internal — Prometheus scrapes it, the public ingress does not route to it.
-  app.get('/stats', async (req, res) => {
+  app.get('/stats', limited(readLimiter), async (req, res) => {
     let notes = null;
     let databaseUp = false;
     if (db) {
       try {
-        notes = await db.countNotes();
+        // Scoped to the caller — /stats must not leak how much other people
+        // have stored.
+        notes = await db.countNotesFor(req.visitorId);
         databaseUp = true;
       } catch {
         databaseUp = false;
@@ -121,6 +158,7 @@ function createApp({ config, logger, metrics, db }) {
       environment: config.env,
       uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
       notes,
+      noteLimit: limits.maxNotesPerVisitor,
       databaseUp,
       nodeVersion: process.version,
       memoryMb: Math.round(process.memoryUsage().heapUsed / 1048576),

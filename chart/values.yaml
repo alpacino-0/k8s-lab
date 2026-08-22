@@ -44,6 +44,15 @@ config:
   LOG_LEVEL: info
   GREETING: Hello
   DEMO_ENDPOINTS: "false"
+  # Guard rails for a publicly reachable demo. Notes are scoped to an anonymous
+  # visitor cookie rather than an account: a login would kill the demo, and a
+  # shared unbounded table becomes a spam wall.
+  MAX_NOTES_PER_VISITOR: "20"
+  MAX_NOTE_LENGTH: "500"
+  WRITES_PER_MINUTE: "40"
+  READS_PER_MINUTE: "240"
+  # Set to "true" once the ingress terminates TLS.
+  SECURE_COOKIE: "false"
 
 # Application secret. In a real cluster this comes from an external manager
 # (see docs) — the plain value here exists only so `helm install` works locally.
@@ -77,6 +86,12 @@ web:
     enabled: true
     minAvailable: 1
 
+# Nothing is kept forever on a public demo.
+retention:
+  enabled: true
+  schedule: "17 * * * *"   # hourly, off the hour to avoid the busy minute
+  hours: 24
+
 ingress:
   enabled: true
   className: nginx
@@ -85,6 +100,10 @@ ingress:
   # cluster be reached at http://localhost:8080 without editing /etc/hosts,
   # which is the only step of the quick start that needs root.
   extraHosts: []
+  rateLimit:
+    requestsPerSecond: 25
+    burstMultiplier: 5
+    connections: 20
   tls:
     enabled: false
     secretName: k8s-lab-app-tls

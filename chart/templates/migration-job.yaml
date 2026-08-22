@@ -17,6 +17,12 @@ data:
       created_at timestamptz NOT NULL DEFAULT now()
     );
     CREATE INDEX IF NOT EXISTS notes_created_at_idx ON notes (created_at DESC);
+  002_owner.sql: |
+    -- Notes belong to an anonymous visitor. Rows written before this column
+    -- existed get a sentinel owner, so they are invisible to everyone and are
+    -- removed by the retention job.
+    ALTER TABLE notes ADD COLUMN IF NOT EXISTS owner text NOT NULL DEFAULT 'legacy';
+    CREATE INDEX IF NOT EXISTS notes_owner_idx ON notes (owner, id DESC);
 ---
 # Runs once per release, before the new pods roll out. An init container would
 # run this on every pod start; concurrent replicas would then race on DDL locks.

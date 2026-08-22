@@ -1,0 +1,71 @@
+{{- if and .Values.postgres.enabled .Values.retention.enabled }}
+# Anyone can write to the public demo, so nothing is kept forever. Notes older
+# than the retention window are removed on a schedule; without this the table
+# only ever grows and the demo turns into a spam archive.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "app.fullname" . }}-retention
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.retention.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            {{- include "app.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: database-job
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: prune
+              image: {{ .Values.postgres.image | quote }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: DB_HOST
+                  value: {{ include "postgres.host" . | quote }}
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "postgres.fullname" . }}
+                      key: POSTGRES_PASSWORD
+                - name: RETENTION_HOURS
+                  value: {{ .Values.retention.hours | quote }}
+              envFrom:
+                - secretRef:
+                    name: {{ include "postgres.fullname" . }}
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  psql -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+                    -v ON_ERROR_STOP=1 -c \
+                    "DELETE FROM notes WHERE created_at < now() - interval '${RETENTION_HOURS} hours';"
+                  psql -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -c \
+                    "SELECT 'remaining notes: ' || count(*) FROM notes;"
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}
+{{- end }}

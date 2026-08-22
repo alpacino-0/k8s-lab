@@ -28,13 +28,20 @@ function createMetrics({ appName = 'k8s-lab-app' } = {}) {
     registers: [registry],
   });
 
+  const rateLimited = new client.Counter({
+    name: 'rate_limited_total',
+    help: 'Requests rejected by the in-process rate limiter',
+    labelNames: ['route'],
+    registers: [registry],
+  });
+
   const dbUp = new client.Gauge({
     name: 'database_up',
     help: '1 when the last database health check succeeded, 0 otherwise',
     registers: [registry],
   });
 
-  return { registry, httpRequests, httpDuration, notesTotal, dbUp };
+  return { registry, httpRequests, httpDuration, notesTotal, dbUp, rateLimited };
 }
 
 module.exports = { createMetrics };

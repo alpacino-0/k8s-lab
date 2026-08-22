@@ -30,24 +30,32 @@ function createDb(dbConfig, logger) {
     async ping() {
       await pool.query('SELECT 1');
     },
-    async listNotes(limit = 20) {
+    async listNotes(owner, limit = 20) {
       const { rows } = await pool.query(
-        'SELECT id, text, created_at FROM notes ORDER BY id DESC LIMIT $1',
-        [limit],
+        'SELECT id, text, created_at FROM notes WHERE owner = $1 ORDER BY id DESC LIMIT $2',
+        [owner, limit],
       );
       return rows;
     },
-    async createNote(text) {
+    async createNote(owner, text) {
       const { rows } = await pool.query(
-        'INSERT INTO notes (text) VALUES ($1) RETURNING id, text, created_at',
-        [text],
+        'INSERT INTO notes (owner, text) VALUES ($1, $2) RETURNING id, text, created_at',
+        [owner, text],
       );
       return rows[0];
     },
-    async deleteNote(id) {
+    async countNotesFor(owner) {
       const { rows } = await pool.query(
-        'DELETE FROM notes WHERE id = $1 RETURNING id, text, created_at',
-        [id],
+        'SELECT count(*)::int AS n FROM notes WHERE owner = $1',
+        [owner],
+      );
+      return rows[0].n;
+    },
+    async deleteNote(owner, id) {
+      // Scoped by owner: a visitor cannot delete a note they cannot see.
+      const { rows } = await pool.query(
+        'DELETE FROM notes WHERE id = $1 AND owner = $2 RETURNING id, text, created_at',
+        [id, owner],
       );
       return rows[0] || null;
     },

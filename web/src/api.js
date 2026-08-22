@@ -7,11 +7,19 @@ const BASE = '/api';
 async function request(path, options = {}) {
   const res = await fetch(BASE + path, {
     headers: { 'Content-Type': 'application/json' },
+    // The visitor cookie scopes notes to this browser.
+    credentials: 'same-origin',
     ...options,
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(body.error || `request failed with status ${res.status}`);
+    if (res.status === 429) {
+      const retry = res.headers.get('Retry-After');
+      throw new Error(
+        `Too many requests. Try again in ${retry || 'a moment'}${retry ? ' seconds' : ''}.`,
+      );
+    }
+    throw new Error(body.error || `Request failed with status ${res.status}.`);
   }
   return body;
 }
