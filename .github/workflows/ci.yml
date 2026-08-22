@@ -97,7 +97,7 @@ jobs:
           docker rm -f ro
 
       - name: Scan image for known vulnerabilities
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: k8s-lab-app:${{ env.IMAGE_TAG }}
           format: table
@@ -122,6 +122,17 @@ jobs:
           cluster_name: ci
           config: kind-config.yaml
 
+      # The zero-downtime check below measures through the ingress controller,
+      # the same path a real user takes. `kubectl port-forward` is bound to one
+      # pod, so a rollout kills the tunnel and the measurement, not the service.
+      - name: Install ingress-nginx
+        run: |
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.13.0/deploy/static/provider/baremetal/deploy.yaml
+          kubectl wait -n ingress-nginx --for=condition=Ready pod \
+            -l app.kubernetes.io/component=controller --timeout=300s
+          kubectl patch svc ingress-nginx-controller -n ingress-nginx --type=json \
+            -p='[{"op":"replace","path":"/spec/ports/0/nodePort","value":30080}]'
+
       - name: Build and load the image
         run: |
           docker build -t "k8s-lab-app:${IMAGE_TAG}" ./app
@@ -138,15 +149,22 @@ jobs:
           kubectl -n k8s-lab rollout status statefulset/app-postgres --timeout=300s
           kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app --timeout=300s
 
+      - name: Ingress must serve the app
+        run: |
+          for _ in $(seq 1 30); do
+            curl -sf -H 'Host: app.local' http://localhost:8080/healthz && break || sleep 2
+          done
+          curl -sf -H 'Host: app.local' http://localhost:8080/ | grep -q 'Served by'
+
       - name: Smoke test
         run: ./scripts/smoke-test.sh
 
       - name: Upgrade must be zero-downtime
         run: |
-          kubectl -n k8s-lab port-forward svc/app-k8s-lab-app 18081:80 &
-          sleep 5
-          ( for _ in $(seq 1 150); do
-              curl -sf -m 3 localhost:18081/healthz >/dev/null || echo DOWN
+          # Record every outcome, not just failures, so the totals are meaningful.
+          ( for _ in $(seq 1 200); do
+              if curl -sf -m 3 -H 'Host: app.local' http://localhost:8080/healthz >/dev/null
+              then echo OK; else echo DOWN; fi
               sleep 0.2
             done > /tmp/rollout.log ) &
           LOOP=$!
@@ -156,14 +174,17 @@ jobs:
             --set config.GREETING=Upgraded --timeout 10m
           kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app --timeout=300s
           wait $LOOP
-          echo "failed requests: $(grep -c DOWN /tmp/rollout.log || true)"
-          ! grep -q DOWN /tmp/rollout.log
+          TOTAL=$(wc -l < /tmp/rollout.log)
+          FAILED=$(grep -c DOWN /tmp/rollout.log || true)
+          echo "requests through ingress: $TOTAL, failed: $FAILED"
+          [ "$FAILED" -eq 0 ]
 
       - name: Diagnostics on failure
         if: failure()
         run: |
-          kubectl -n k8s-lab get all,pvc,networkpolicy
+          kubectl -n k8s-lab get all,pvc,networkpolicy,ingress
           kubectl -n k8s-lab describe pods
+          kubectl -n ingress-nginx get pods
           kubectl -n k8s-lab logs -l app.kubernetes.io/name=k8s-lab-app --tail=100 --all-containers || true
           kubectl -n k8s-lab get events --sort-by=.lastTimestamp | tail -40
 
