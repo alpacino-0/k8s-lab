@@ -78,7 +78,50 @@ EOF
   } > "$WORK/manifest.yaml"
 }
 
+# ValidatingAdmissionPolicy bindings are not effective the instant they are
+# applied — the API server has to pick them up. Locally that delay is invisible
+# because the policies were applied minutes earlier; in CI, where apply and
+# test are seconds apart, four checks silently passed against a policy that was
+# not yet enforcing. Poll until a manifest that must be rejected actually is.
+wait_for_enforcement() {
+  cat > "$WORK/manifest.yaml" <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: policy-readiness
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: c
+      image: ${IMAGE}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: { drop: ["ALL"] }
+      readinessProbe: { httpGet: { path: /healthz, port: 3000 } }
+      livenessProbe: { httpGet: { path: /healthz, port: 3000 } }
+EOF
+  for _ in $(seq 1 60); do
+    if [[ "$(apply_dry)" == *"requests and a memory limit"* ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 echo "admission policy checks in namespace '$NAMESPACE'"
+
+if wait_for_enforcement; then
+  pass "policies are being enforced"
+else
+  fail "policies never took effect — every check below would be meaningless"
+  echo; echo "some policy checks failed"; exit 1
+fi
 
 write_pod;                             must_admit  "a compliant pod is admitted"
 write_pod "$IMAGE" true none;          must_reject "a pod without resource bounds is rejected" "requests and a memory limit"
