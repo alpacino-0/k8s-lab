@@ -14,10 +14,15 @@ spec:
     spec:
       containers:
         - name: web
-          image: k8s-lab-app:1.0
+          image: k8s-lab-app:2.0
           imagePullPolicy: IfNotPresent   # yerel imaji kullan, Docker Hub'a gitme
           ports:
             - containerPort: 3000
+          envFrom:                 # tum anahtarlari ortam degiskeni olarak al
+            - configMapRef:
+                name: k8s-lab-config
+            - secretRef:
+                name: k8s-lab-secret
           readinessProbe:        # "trafik alabilir mi?"
             httpGet:
               path: /healthz

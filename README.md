@@ -74,6 +74,75 @@ kubectl logs <ad> [--previous]   # uygulama ne diyor?
 - **Rolling update sırasında iki sürüm aynı anda çalışır** — DB şeması değişiklikleri
   geriye dönük uyumlu olmalı.
 
+## Bölüm 5 — Üretim pratikleri
+
+### ConfigMap & Secret
+Ayarlar imaja gömülmez, ortam değişkeni olarak enjekte edilir (`envFrom`).
+Aynı imaj farklı ConfigMap ile dev/staging/prod'da çalışır.
+
+> **Secret şifreleme değildir** — sadece base64. `kubectl get secret -o jsonpath=... | base64 -d`
+> ile herkes okur. Üretimde: etcd encryption-at-rest + RBAC + Vault/Sealed Secrets.
+> Bu repoda `k8s/secret.yaml` **.gitignore'da**; şablonu `k8s/secret.yaml.ornek`.
+
+### Graceful shutdown (PID 1 tuzağı)
+Konteynerde PID 1 olan süreç, handler tanımlamadığı sinyalleri **yok sayar**.
+SIGTERM işleyicisi olmadan her pod kapanışı `terminationGracePeriodSeconds`
+(varsayılan 30s) dolana kadar bekler, sonra SIGKILL yer.
+
+| Durum | Pod'un silinme süresi |
+|---|---|
+| SIGTERM işleyicisi yok | **30 saniye** |
+| `process.on('SIGTERM', ...)` var | **0 saniye** |
+
+### Liveness vs readiness — ölçülmüş davranış
+`/kirilsin` çağrılıp `/healthz` 500 döndürüldüğünde:
+
+| Süre | Olay | Sorumlu |
+|---|---|---|
+| +15s | `READY 1/1 → 0/1`, pod trafikten çıkarıldı | readiness (5s × 3) |
+| +25s | Konteyner öldürülüp yeniden kuruldu | liveness (10s × 3) |
+| +35s | Pod sağlıklı, tekrar trafikte | readiness |
+
+Önce readiness devreye girer → hasta pod'a tek istek bile gitmez.
+
+### Ingress
+NodePort yerine tek giriş noktası, host + path tabanlı yönlendirme.
+
+| İstek | Hedef servis |
+|---|---|
+| `app.local/` | `k8s-lab-app` |
+| `app.local/api` | `k8s-lab-api` (`rewrite-target` ile `/api` öneki soyulur) |
+| `baska.local/` | HTTP 404 |
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.13.0/deploy/static/provider/baremetal/deploy.yaml
+kubectl patch svc ingress-nginx-controller -n ingress-nginx --type=json \
+  -p='[{"op":"replace","path":"/spec/ports/0/nodePort","value":30080}]'
+kubectl apply -f k8s/ingress.yaml
+curl -H "Host: app.local" localhost:8080/api
+```
+
+### Servis keşfi (CoreDNS)
+Pod içinden `http://k8s-lab-api` çalışır. Tam ad: `<servis>.<namespace>.svc.cluster.local`.
+Mikroservisler birbirine IP ile değil, **servis adıyla** ulaşır.
+
+### Namespace + ResourceQuota + LimitRange
+`staging` namespace'i `default` ile aynı isimli kaynakları barındırır, kotayla sınırlıdır.
+Kota aşımı `kubectl get pods` çıktısında **görünmez** — Deployment koşullarına bakılır:
+
+```bash
+kubectl -n staging get deployment k8s-lab-app -o jsonpath='{.status.conditions}'
+# ReplicaFailure: FailedCreate — exceeded quota: staging-kota, used: pods=4, limited: pods=4
+kubectl -n staging get events --sort-by=.lastTimestamp
+```
+
+### CI/CD — `.github/workflows/ci.yml`
+| Job | Yaptığı |
+|---|---|
+| `build-test` | İmajı build eder, konteyneri ayağa kaldırıp `/healthz` ve `/` duman testi |
+| `k8s-test` | Gerçek kind cluster kurar, deploy eder, cluster içinden doğrular; hata olursa `describe`+`logs` basar |
+| `publish` | Sadece `main`'de: imajı GHCR'a push eder (`:sha` ve `:latest`), GHA build cache ile |
+
 ## Temizlik
 
 ```bash

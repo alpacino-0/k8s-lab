@@ -1,0 +1,94 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  # 1) Imaji uret ve konteyner gercekten ayaga kalkiyor mu, dogrula
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Imaji build et
+        run: docker build -t k8s-lab-app:test ./app
+
+      - name: Duman testi (smoke test)
+        run: |
+          docker run -d -p 8080:3000 --name test k8s-lab-app:test
+          for i in $(seq 1 15); do
+            curl -sf localhost:8080/healthz && break || sleep 1
+          done
+          curl -sf localhost:8080/healthz | grep -q ok
+          curl -sf localhost:8080/ | grep -q Konteyner
+          docker rm -f test
+
+  # 2) Gercek bir kind cluster kurup deploy et — manifestler dogru mu?
+  k8s-test:
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: kind cluster kur
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ci
+
+      - name: Imaji build et ve node'lara yukle
+        run: |
+          docker build -t k8s-lab-app:2.1 ./app
+          kind load docker-image k8s-lab-app:2.1 --name ci
+
+      - name: Deploy
+        run: |
+          kubectl apply -f k8s/configmap.yaml -f k8s/secret.yaml
+          kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml
+          kubectl rollout status deployment/k8s-lab-app --timeout=180s
+
+      - name: Dogrula
+        run: |
+          kubectl get pods -o wide
+          kubectl run kontrol --rm -i --restart=Never --image=curlimages/curl -- \
+            curl -sf http://k8s-lab-app/healthz | grep -q ok
+
+      - name: Hata durumunda teshis bilgisi bas
+        if: failure()
+        run: |
+          kubectl get pods -o wide
+          kubectl describe pods -l app=k8s-lab-app
+          kubectl logs -l app=k8s-lab-app --tail=50 || true
+
+  # 3) Sadece main'e push'ta: imaji GitHub Container Registry'e gonder
+  publish:
+    runs-on: ubuntu-latest
+    needs: k8s-test
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: GHCR'a giris yap
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}   # otomatik saglanir
+
+      - name: Build ve push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
