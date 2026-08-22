@@ -7,7 +7,7 @@ IMAGE       ?= k8s-lab-app
 IMAGE_TAG   ?= 1.0.0
 
 .DEFAULT_GOAL := help
-.PHONY: help test lint build web up down deploy smoke policies policy-test tls logs monitoring port-forward clean
+.PHONY: help test lint build web up down deploy smoke policies policy-test tls logs logging monitoring port-forward clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -88,3 +88,13 @@ tls: ## Install cert-manager, issue from a local CA, serve HTTPS on :8443
 	@echo ""
 	@echo "  https://localhost:8443 — the browser warns because the CA is local."
 	@echo "  Everything else is real: Certificate, secret, TLS listener, 308 redirect, Secure cookie."
+
+logging: ## Install Loki and Alloy, and register Loki with Grafana
+	helm repo add grafana https://grafana.github.io/helm-charts
+	helm repo update
+	helm upgrade --install loki grafana/loki -n monitoring -f cluster/loki-values.yaml --wait --timeout 12m
+	helm upgrade --install alloy grafana/alloy -n monitoring -f cluster/alloy-values.yaml --wait --timeout 10m
+	kubectl apply -f cluster/loki-datasource.yaml
+	@echo ""
+	@echo "  Grafana: make port-forward, then Explore -> Loki"
+	@echo '  Try:  {namespace="k8s-lab", app="k8s-lab-app"} | json | level=`warn`'

@@ -98,6 +98,7 @@ variables the kubelet injects — and the browser simply counts what came back.
 | `make policies` | Apply the admission policies |
 | `make policy-test` | Prove each policy rejects what it is supposed to |
 | `make tls` | Install cert-manager and serve HTTPS from a local CA |
+| `make logging` | Install Loki and Alloy, and wire Loki into Grafana |
 | `make monitoring` | Install Prometheus + Grafana |
 | `make down` | Delete the cluster |
 
@@ -203,6 +204,48 @@ garbage-collected and the other Ingress quietly loses it.
 Locally: `make tls`, then `https://localhost:8443`. The browser warns, because
 the CA is local — that is the one thing that is not real.
 
+### Logs
+
+The application logs what someone would act on, not every request:
+
+| Outcome | Level |
+|---|---|
+| 5xx | `error` |
+| 4xx | `warn` |
+| 2xx slower than 250 ms | `warn`, with the duration |
+| everything else | `debug`, so it is off in production |
+
+A line per healthy request is noise that costs money to store and buries the
+lines that matter. A service that logs nothing leaves an operator with no way
+to explain a metric. This is the middle.
+
+Measured after five 404s, one 400 and six successful requests:
+
+```
+level=info    15   (startup)
+level=warn     5   (the 404s and the 400)
+level=error    0
+successful requests logged   0
+```
+
+And the pivot the label scheme exists for — Prometheus names the pod, Loki is
+queried with the same name:
+
+```
+promql:  topk(1, sum by (pod) (http_requests_total{status=~"4.."}))
+         → app-k8s-lab-app-557bc659bb-dpp6p, 4×404 and 1×400
+
+logql:   {namespace="k8s-lab", pod="app-k8s-lab-app-557bc659bb-dpp6p"}
+           | json | level=`warn`
+         → warn request rejected POST /notes -> 400 (2.95ms)
+```
+
+`make logging` installs it. Loki runs in single-binary mode with filesystem
+storage and 72 hours of retention: distributed mode, object storage and caches
+exist for clusters ingesting terabytes, and the failure mode of a heavy logging
+stack on a small cluster is that it evicts the application it was installed to
+observe.
+
 ### Reliability
 
 | Behaviour | Implementation | Measured |
@@ -225,7 +268,11 @@ up costs users, being hasty to scale down causes thrashing.
   hook Job — not in an init container, where concurrent replicas race on DDL locks.
 - **Configuration changes roll pods** via a `checksum/config` annotation; without
   it a ConfigMap update is invisible to running containers.
-- **Structured JSON logs**, one object per line, ready for any log aggregator.
+- **Logs are collected and queryable**, not just structured. Loki stores them,
+  Grafana Alloy ships them, and the labels are named exactly as the Prometheus
+  metrics name them — so a spike on a dashboard and the lines behind it are one
+  label apart. Promtail would have been the obvious agent; it reached end of
+  life in March 2026, so this uses Alloy.
 - **Application metrics**, not just infrastructure ones: `http_requests_total`,
   `http_request_duration_seconds`, `notes_total`, `database_up`.
 - **Alerts that actually fire.** `up == 0` does *not* fire when every target
@@ -269,6 +316,8 @@ chart/                Helm chart — the single deployment path
   values-public.yaml  GHCR images, TLS, external secret — for a public address
 cluster/              cluster-scoped add-ons, kept out of the chart
   issuers.yaml        a local CA, so the TLS path is exercised not assumed
+  loki-values.yaml    single-binary Loki, filesystem storage, 72h retention
+  alloy-values.yaml   the log collector, labelled to match the metrics
 policies/             cluster policy, kept out of the chart on purpose
   namespace.yaml      Pod Security Admission labels
   admission-*.yaml    ValidatingAdmissionPolicy rules and their bindings
