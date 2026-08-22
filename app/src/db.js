@@ -44,6 +44,13 @@ function createDb(dbConfig, logger) {
       );
       return rows[0];
     },
+    async deleteNote(id) {
+      const { rows } = await pool.query(
+        'DELETE FROM notes WHERE id = $1 RETURNING id, text, created_at',
+        [id],
+      );
+      return rows[0] || null;
+    },
     async countNotes() {
       const { rows } = await pool.query('SELECT count(*)::int AS n FROM notes');
       return rows[0].n;

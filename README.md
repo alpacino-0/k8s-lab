@@ -5,8 +5,8 @@
 ![Kubernetes](https://img.shields.io/badge/kubernetes-1.36-326ce5?logo=kubernetes&logoColor=white)
 ![Helm](https://img.shields.io/badge/helm-3-0f1689?logo=helm&logoColor=white)
 
-A Node.js + PostgreSQL service deployed to Kubernetes the way it would be run in
-production: non-root containers with a read-only root filesystem, default-deny
+A Node.js + PostgreSQL service and its browser interface, deployed to Kubernetes
+the way they would be run in production: non-root containers with a read-only root filesystem, default-deny
 network policies, a schema migration that runs once per release, verified
 nightly backups, autoscaling, disruption budgets, Prometheus metrics, and a CI
 pipeline that deploys to a real cluster on every push.
@@ -32,6 +32,7 @@ flowchart TB
         ING["ingress-nginx<br/>NodePort 30080"]
 
         subgraph NS["namespace: k8s-lab"]
+            WEB["web<br/>Deployment · 2 replicas<br/>nginx, uid 101, read-only"]
             APP["app<br/>Deployment · HPA 3-10 · PDB min 2<br/>non-root · read-only rootfs"]
             PG[("postgres-0<br/>StatefulSet · PVC")]
             MIG["migration Job<br/>Helm post-install hook"]
@@ -46,11 +47,12 @@ flowchart TB
         NP{{"default-deny NetworkPolicy<br/>ingress-nginx + Prometheus in<br/>DNS + PostgreSQL out"}}
     end
 
-    U -->|"app.local"| ING --> NP --> APP
+    U -->|"app.local/"| ING --> WEB
+    U -->|"app.local/api"| ING --> NP --> APP
     APP --> PG
     MIG -.->|once per release| PG
     BK -.->|pg_dump + gzip -t| PG
-    PROM -->|"/metrics · 15s"| APP
+    PROM -->|":9090/metrics · 15s"| APP
     PROM --> GRAF
 ```
 
@@ -64,15 +66,32 @@ Requires Docker, [kind](https://kind.sigs.k8s.io/), kubectl and Helm.
 git clone https://github.com/alpacino-0/k8s-lab.git && cd k8s-lab
 make up                                    # cluster + ingress + build + deploy
 echo "127.0.0.1 app.local" | sudo tee -a /etc/hosts
-curl app.local:8080
-make smoke                                 # 18 end-to-end checks
+open http://app.local:8080                 # the interface
+make smoke                                 # 25 end-to-end checks
 ```
+
+## The interface
+
+`http://app.local:8080` is a working notes application. It is also the quickest
+explanation of what is underneath it.
+
+Every response carries the identity of the replica that produced it, and the
+page keeps a running ledger: each request drops a mark into the lane of the pod
+that answered. Use the app for a few seconds and the load distribution draws
+itself. Below that, each platform decision is stated with the measurement that
+justified it.
+
+The ledger deliberately does **not** query the Kubernetes API. Doing so would
+mean mounting a service-account token into a pod that has no other reason to
+hold one. Pod identity comes from the downward API instead — environment
+variables the kubelet injects — and the browser simply counts what came back.
 
 | Command | What it does |
 |---|---|
-| `make test` | Unit and integration tests (14 tests, no cluster needed) |
+| `make test` | Unit and integration tests (19 tests, no cluster needed) |
 | `make lint` | ESLint + `helm lint` + renders every values profile |
-| `make deploy` | Rebuild the image and upgrade the release |
+| `make deploy` | Rebuild both images and upgrade the release |
+| `make web` | Run the interface locally against a port-forwarded backend |
 | `make smoke` | End-to-end checks against the running deployment |
 | `make monitoring` | Install Prometheus + Grafana |
 | `make down` | Delete the cluster |
@@ -89,7 +108,9 @@ make smoke                                 # 18 end-to-end checks
 | Read-only root filesystem | `containerSecurityContext` + `emptyDir` for `/tmp` | container starts under `--read-only` in CI |
 | All Linux capabilities dropped | `capabilities.drop: [ALL]` | asserted against the running pod spec |
 | No privilege escalation, seccomp `RuntimeDefault` | pod and container security context | rendered manifests validated by kubeconform |
-| No service-account token mounted | `automountServiceAccountToken: false` | the app never calls the Kubernetes API |
+| No service-account token mounted | `automountServiceAccountToken: false` | neither tier calls the Kubernetes API |
+| Scrape endpoint is not publicly routable | metrics on a separate port (9090) | CI asserts `/api/metrics` returns 404 |
+| Interface sends CSP and frame-deny headers | `web/security-headers.conf` | asserted on the running container |
 | Default-deny networking | 3 NetworkPolicies | an unauthorized pod is proven unable to reach the app |
 | Multi-stage image, production deps only | `app/Dockerfile` | Trivy blocks CRITICAL/HIGH findings in CI |
 | npm removed from the runtime image | `app/Dockerfile` | eliminated **every** Node.js package CVE (see below) |
@@ -139,11 +160,11 @@ Five jobs on every push ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
 
 | Job | Gate |
 |---|---|
-| `test` | ESLint, 14 unit and integration tests |
-| `manifests` | `helm lint`, renders all three values profiles, kubeconform schema validation, hadolint |
-| `image` | Builds, asserts the container is non-root, boots it read-only, Trivy scan (fails on CRITICAL/HIGH) |
-| `e2e` | Creates a real kind cluster, installs the chart, runs the 18-check smoke test, then proves an upgrade drops zero requests |
-| `publish` | Pushes to GHCR with SBOM and provenance attestation (main only) |
+| `test` | ESLint and 19 tests for the API; ESLint and a production build for the interface |
+| `manifests` | `helm lint`, renders all three values profiles, kubeconform schema validation, hadolint on both Dockerfiles |
+| `image` | Builds both images, asserts each is non-root, boots each read-only, Trivy scan (fails on CRITICAL/HIGH) |
+| `e2e` | Creates a real kind cluster, installs the chart, checks both ingress routes, runs the 25-check smoke test, then proves an upgrade drops zero requests |
+| `publish` | Pushes both images to GHCR for amd64 and arm64, with SBOM and provenance attestation (main only) |
 
 ---
 
@@ -154,14 +175,17 @@ app/                  Node.js service
   src/                config · logger · metrics · db · app · index
   test/               unit and integration tests (node:test, no framework)
   Dockerfile          multi-stage, pinned base, non-root
+web/                  React interface (Vite), served by unprivileged nginx
+  src/                app · pod ledger · notes · mechanisms
+  nginx.conf          SPA fallback, CSP, writes confined to /tmp
 chart/                Helm chart — the single deployment path
-  templates/          15 resource templates + helpers
+  templates/          16 resource templates + helpers
   values.yaml         documented defaults
   values-dev.yaml     minimal footprint, demo endpoints on
   values-prod.yaml    autoscaling, backups, monitoring, network policies
 scripts/
   bootstrap.sh        idempotent cluster + ingress + deploy
-  smoke-test.sh       18 end-to-end checks including security posture
+  smoke-test.sh       25 end-to-end checks including security posture
   teardown.sh         destroy the cluster
 docs/
   LEARNING-LOG.tr.md  measured results and the bugs found (Turkish)
@@ -217,6 +241,21 @@ take one verified backup during install, which both proves the backup path works
 and binds the volume.
 
 ---
+
+### A fourth bug, found by reading the traffic
+
+Wiring the interface exposed something the manifests had claimed but never
+enforced: the ingress routed `/api` to the service, and `/metrics` sat on that
+same port, so the raw Prometheus scrape endpoint was publicly reachable. The fix
+was not an ingress rule but a second listener — telemetry now serves on port
+9090, which nothing outside the cluster is routed to and which the network
+policy opens only to Prometheus. CI asserts `/api/metrics` returns 404.
+
+Two smaller ones came from the same session: nginx silently drops every
+inherited `add_header` as soon as a nested block sets one of its own, so the
+security headers were never sent; and the interface's Service was carrying the
+API's `app.kubernetes.io/name` label, which made Prometheus try to scrape
+`/metrics` from nginx.
 
 ## Known limitations
 

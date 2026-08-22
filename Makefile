@@ -7,7 +7,7 @@ IMAGE       ?= k8s-lab-app
 IMAGE_TAG   ?= 1.0.0
 
 .DEFAULT_GOAL := help
-.PHONY: help test lint build up down deploy smoke logs monitoring port-forward clean
+.PHONY: help test lint build web up down deploy smoke logs monitoring port-forward clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -18,21 +18,29 @@ test: ## Run unit and integration tests
 
 lint: ## Lint JavaScript and the Helm chart
 	cd app && npm run lint
+	cd web && npm run lint
 	helm lint chart
 	helm template ci chart -f chart/values-prod.yaml > /dev/null
 	helm template ci chart -f chart/values-dev.yaml  > /dev/null
 
-build: ## Build the container image
+build: ## Build both container images
 	docker build -t $(IMAGE):$(IMAGE_TAG) ./app
+	docker build -t $(IMAGE)-web:$(IMAGE_TAG) ./web
+
+web: ## Run the interface locally against a port-forwarded backend
+	@echo "run this in another terminal first:"
+	@echo "  kubectl -n $(NAMESPACE) port-forward svc/$(RELEASE)-k8s-lab-app 18080:80"
+	cd web && npm run dev
 
 up: ## Create the cluster, install ingress, build and deploy
 	./scripts/bootstrap.sh
 
-deploy: build ## Rebuild the image and upgrade the release
-	kind load docker-image $(IMAGE):$(IMAGE_TAG) --name $(CLUSTER)
+deploy: build ## Rebuild the images and upgrade the release
+	kind load docker-image $(IMAGE):$(IMAGE_TAG) $(IMAGE)-web:$(IMAGE_TAG) --name $(CLUSTER)
 	helm upgrade --install $(RELEASE) ./chart \
 	  --namespace $(NAMESPACE) --create-namespace \
 	  --set image.tag=$(IMAGE_TAG) \
+	  --set web.image.tag=$(IMAGE_TAG) \
 	  --set postgres.auth.password=$${PGPASSWORD:-local-dev-password} \
 	  -f chart/values-prod.yaml --timeout 10m
 	kubectl -n $(NAMESPACE) rollout status statefulset/$(RELEASE)-postgres --timeout=300s

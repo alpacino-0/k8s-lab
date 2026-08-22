@@ -34,14 +34,15 @@ spec:
       ports:
         - protocol: TCP
           port: 3000
-    # Prometheus scraping /metrics.
+    # Prometheus scrapes the telemetry port only — it has no reason to reach
+    # the application port, and now it cannot.
     - from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
       ports:
         - protocol: TCP
-          port: 3000
+          port: 9090
   egress:
     # DNS. Forgetting this is the most common way a default-deny policy breaks
     # an application: name resolution fails and every outbound call times out.
