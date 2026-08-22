@@ -1,350 +1,181 @@
-# k8s-lab — Kubernetes Öğrenme Laboratuvarı
+# k8s-lab
 
-Node.js uygulamasını konteynerleyip 3 node'luk yerel bir Kubernetes cluster'ında
-çalıştıran, self-healing / scaling / rolling update / rollback davranışlarını
-gösteren uygulamalı lab.
+Node.js + PostgreSQL uygulamasının konteynerlenip 3 node'luk bir Kubernetes cluster'ında
+üretim pratikleriyle çalıştırıldığı uygulamalı laboratuvar.
+
+Buradaki her sayı ölçülmüştür — kaos testleri yapıldı, sonuçlar kaydedildi, bulunan hatalar
+düzeltildi. Ayrıntılar [ÖLÇÜMLER.md](OLCUMLER.md) dosyasında.
+
+```
+Kubernetes v1.36.1 · kind · containerd · Helm · Prometheus + Grafana · ingress-nginx
+```
+
+---
 
 ## Mimari
 
+```mermaid
+flowchart TB
+    U([kullanıcı])
+
+    subgraph CL["kind cluster — 1 control-plane + 2 worker"]
+        direction TB
+        ING["ingress-nginx<br/>NodePort 30080"]
+
+        subgraph NS["namespace: default"]
+            APP["k8s-lab-app<br/>Deployment · 3 replica<br/>HPA 2-10 · PDB min=2"]
+            API["k8s-lab-api<br/>Deployment · 2 replica"]
+            PG[("pg-0<br/>StatefulSet<br/>PVC 1Gi")]
+        end
+
+        subgraph MON["namespace: izleme"]
+            PROM["Prometheus"]
+            GRAF["Grafana"]
+        end
+
+        NP{{"NetworkPolicy<br/>yalnızca app→pg:5432"}}
+    end
+
+    U -->|"app.local/"| ING
+    U -->|"grafana.local/"| ING
+    ING --> APP
+    ING -->|"/api → rewrite"| API
+    ING --> GRAF
+    APP -->|"pg-0.pg.default.svc"| NP
+    NP --> PG
+    PROM -->|"/metrics · 15sn"| APP
+    PROM --> GRAF
 ```
-curl localhost:8080
-   ↓ kind port mapping (host 8080 → node 30080)
-NodePort Service (k8s-lab-app)
-   ↓ kube-proxy / iptables — selector: app=k8s-lab-app
-Deployment (replicas: 3) → ReplicaSet → Pod → container (k8s-lab-app:1.0)
-```
 
-Cluster: 1 control-plane + 2 worker (kind, Kubernetes v1.36.1, containerd runtime)
+**İstek yolu:** `curl` → kind port mapping (host 8080 → node 30080) → ingress-nginx →
+host/path kuralı → Service → kube-proxy → Pod.
 
-## Dosyalar
+---
 
-| Dosya | Görev |
-|---|---|
-| `app/server.js` | Express uygulaması. `/` hostname döner, `/healthz` sağlık kontrolü |
-| `app/Dockerfile` | Layer caching için bağımlılıklar koddan önce kopyalanır |
-| `kind-config.yaml` | 3 node + NodePort 30080 → host 8080 eşlemesi |
-| `k8s/deployment.yaml` | 3 replica, readiness + liveness probe, resource requests/limits |
-| `k8s/service.yaml` | NodePort Service, etiketle pod seçimi |
+## Neyi gösteriyor
 
-## Kurulum
+| Alan | Uygulanan | Ölçülen sonuç |
+|---|---|---|
+| **Self-healing** | Deployment + ReplicaSet | Pod silindi → **2 saniyede** yenisi, kesinti yok |
+| **Otomatik ölçekleme** | HPA (CPU %50) + metrics-server | 3→10 pod **45 sn** · 10→2 pod **~3 dk** |
+| **Kesintisiz sürüm** | Rolling update + readinessProbe | 250 istek, **0 kesinti** |
+| **Bozuk sürüme direnç** | maxUnavailable + readiness | `ImagePullBackOff` yaşandı, **0 kesinti** |
+| **Geri alma** | ReplicaSet geçmişi / Helm | `rollout undo` **0.04 sn** · `helm rollback` **5.8 sn** |
+| **Kesintisiz bakım** | PDB + topology spread + preStop | drain: preStop'suz **2/200 düştü**, preStop'lu **0/300** |
+| **Kalıcı veri** | StatefulSet + PVC | Pod silindi, IP değişti, **veri ve disk aynı** |
+| **Ağ güvenliği** | NetworkPolicy (default-deny) | Yabancı pod DB'yi okuyordu → **`timeout expired`** |
+| **Yetkilendirme** | ServiceAccount + Role + RoleBinding | pods `200` · secrets **`403 Forbidden`** |
+| **Yapılandırma** | ConfigMap + Secret (`envFrom`) | Aynı imaj, 4 farklı ortam |
+| **Gözlemlenebilirlik** | prom-client + ServiceMonitor + PrometheusRule | Alarm: `inactive`→`pending`→`firing` |
+| **Şablonlama** | Helm chart + values-dev/prod | Tek chart → 2 ortam, sıfır YAML kopyası |
+| **CI/CD** | GitHub Actions | build → duman testi → gerçek kind cluster → GHCR |
+
+---
+
+## Hızlı başlangıç
 
 ```bash
-# 1) imajı üret
-docker build -t k8s-lab-app:1.0 ./app
+# 1) imaj
+docker build -t k8s-lab-app:3.3 ./app
 
-# 2) cluster'ı kur
+# 2) cluster
 kind create cluster --name k8s-lab --config kind-config.yaml
+kind load docker-image k8s-lab-app:3.3 --name k8s-lab
 
-# 3) imajı node'lara yükle (registry kullanmıyoruz)
-kind load docker-image k8s-lab-app:1.0 --name k8s-lab
+# 3) secret'i sablondan uret
+cp k8s/secret.yaml.ornek k8s/secret.yaml   # icindeki degeri doldur
 
 # 4) deploy
 kubectl apply -f k8s/
 
-# 5) doğrula — her istek farklı pod'dan cevap gelir
-for i in $(seq 1 10); do curl -s localhost:8080; done
-```
-
-## Doğrulanmış davranışlar
-
-| Senaryo | Komut | Ölçülen sonuç |
-|---|---|---|
-| Load balancing | 30x `curl` | 3 pod'a 12/11/7 dağılım |
-| Self-healing | `kubectl delete pod <ad>` | Yeni pod **2 saniyede** doğdu, kesinti yok |
-| Ölçekleme | `kubectl scale --replicas=6` | 0.18s, node'lara 3+3 dengeli dağıldı |
-| Rolling update | `kubectl set image ... :1.1` | 250 istek, **0 kesinti**, geçişte iki sürüm birlikte |
-| Bozuk sürüm | eksik imaj → `ImagePullBackOff` | 200 istek, **0 kesinti** — eski pod'lar korundu |
-| Rollback | `kubectl rollout undo` | **0.043s**, eski ReplicaSet 0→3 |
-
-## Hata ayıklama sırası
-
-```bash
-kubectl get pods                 # kim sorunlu?
-kubectl describe pod <ad>        # Events bölümünü oku — sebep burada
-kubectl logs <ad> [--previous]   # uygulama ne diyor?
-```
-
-## Öğrenilen kritik ayrımlar
-
-- **readinessProbe vs livenessProbe** — readiness başarısızsa pod trafik almaz ama yaşar;
-  liveness başarısızsa konteyner öldürülüp yeniden kurulur.
-- **Docker vs containerd** — Docker imaj build eder; cluster'da konteynerleri containerd
-  çalıştırır (Kubernetes 1.24'te dockershim kaldırıldı).
-- **Pod'lar geçicidir** — isim ve IP her doğuşta değişir. Bağlantı her zaman Service üzerinden.
-- **Rolling update sırasında iki sürüm aynı anda çalışır** — DB şeması değişiklikleri
-  geriye dönük uyumlu olmalı.
-
-## Bölüm 5 — Üretim pratikleri
-
-### ConfigMap & Secret
-Ayarlar imaja gömülmez, ortam değişkeni olarak enjekte edilir (`envFrom`).
-Aynı imaj farklı ConfigMap ile dev/staging/prod'da çalışır.
-
-> **Secret şifreleme değildir** — sadece base64. `kubectl get secret -o jsonpath=... | base64 -d`
-> ile herkes okur. Üretimde: etcd encryption-at-rest + RBAC + Vault/Sealed Secrets.
-> Bu repoda `k8s/secret.yaml` **.gitignore'da**; şablonu `k8s/secret.yaml.ornek`.
-
-### Graceful shutdown (PID 1 tuzağı)
-Konteynerde PID 1 olan süreç, handler tanımlamadığı sinyalleri **yok sayar**.
-SIGTERM işleyicisi olmadan her pod kapanışı `terminationGracePeriodSeconds`
-(varsayılan 30s) dolana kadar bekler, sonra SIGKILL yer.
-
-| Durum | Pod'un silinme süresi |
-|---|---|
-| SIGTERM işleyicisi yok | **30 saniye** |
-| `process.on('SIGTERM', ...)` var | **0 saniye** |
-
-### Liveness vs readiness — ölçülmüş davranış
-`/kirilsin` çağrılıp `/healthz` 500 döndürüldüğünde:
-
-| Süre | Olay | Sorumlu |
-|---|---|---|
-| +15s | `READY 1/1 → 0/1`, pod trafikten çıkarıldı | readiness (5s × 3) |
-| +25s | Konteyner öldürülüp yeniden kuruldu | liveness (10s × 3) |
-| +35s | Pod sağlıklı, tekrar trafikte | readiness |
-
-Önce readiness devreye girer → hasta pod'a tek istek bile gitmez.
-
-### Ingress
-NodePort yerine tek giriş noktası, host + path tabanlı yönlendirme.
-
-| İstek | Hedef servis |
-|---|---|
-| `app.local/` | `k8s-lab-app` |
-| `app.local/api` | `k8s-lab-api` (`rewrite-target` ile `/api` öneki soyulur) |
-| `baska.local/` | HTTP 404 |
-
-```bash
+# 5) ingress controller
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.13.0/deploy/static/provider/baremetal/deploy.yaml
+kubectl wait -n ingress-nginx --for=condition=Ready pod \
+  -l app.kubernetes.io/component=controller --timeout=180s
 kubectl patch svc ingress-nginx-controller -n ingress-nginx --type=json \
   -p='[{"op":"replace","path":"/spec/ports/0/nodePort","value":30080}]'
-kubectl apply -f k8s/ingress.yaml
-curl -H "Host: app.local" localhost:8080/api
+
+# 6) dogrula
+echo "127.0.0.1 app.local grafana.local" | sudo tee -a /etc/hosts
+curl app.local:8080          # her istek farkli pod'dan cevaplanir
+curl app.local:8080/notlar   # veritabanindan okur
 ```
 
-### Servis keşfi (CoreDNS)
-Pod içinden `http://k8s-lab-api` çalışır. Tam ad: `<servis>.<namespace>.svc.cluster.local`.
-Mikroservisler birbirine IP ile değil, **servis adıyla** ulaşır.
-
-### Namespace + ResourceQuota + LimitRange
-`staging` namespace'i `default` ile aynı isimli kaynakları barındırır, kotayla sınırlıdır.
-Kota aşımı `kubectl get pods` çıktısında **görünmez** — Deployment koşullarına bakılır:
+Helm ile:
 
 ```bash
-kubectl -n staging get deployment k8s-lab-app -o jsonpath='{.status.conditions}'
-# ReplicaFailure: FailedCreate — exceeded quota: staging-kota, used: pods=4, limited: pods=4
-kubectl -n staging get events --sort-by=.lastTimestamp
+helm upgrade --install prod chart -f chart/values-prod.yaml -n uygulama --create-namespace --wait
 ```
 
-### CI/CD — `.github/workflows/ci.yml`
-| Job | Yaptığı |
-|---|---|
-| `build-test` | İmajı build eder, konteyneri ayağa kaldırıp `/healthz` ve `/` duman testi |
-| `k8s-test` | Gerçek kind cluster kurar, deploy eder, cluster içinden doğrular; hata olursa `describe`+`logs` basar |
-| `publish` | Sadece `main`'de: imajı GHCR'a push eder (`:sha` ve `:latest`), GHA build cache ile |
+---
 
-## Bölüm 6 — Ölçekleme, kalıcı veri, yetkilendirme
-
-### metrics-server + HPA
-```bash
-kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
-kubectl patch deployment metrics-server -n kube-system --type=json \
-  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
-kubectl apply -f k8s/hpa.yaml
-```
-> `--kubelet-insecure-tls` yalnızca kind içindir (self-signed kubelet sertifikası).
-> HPA'nın çalışması için Deployment'ta **`resources.requests.cpu` zorunludur**.
-
-Ölçülen davranış (`/yuk?ms=400` adresine 4 paralel istemci):
-
-| Yön | Süre | Ayar |
-|---|---|---|
-| 3 → 10 replica | **45 saniye** | `scaleUp.stabilizationWindowSeconds: 0` |
-| 10 → 2 replica | **~3 dakika** | `scaleDown.stabilizationWindowSeconds: 60` + metrik gecikmesi |
-
-Asimetri bilinçlidir: büyümede gecikmenin bedelini kullanıcı öder, küçülmede acele
-etmek zikzak (thrashing) yaratır. `maxReplicas` tavana çarptığında (`cpu: 140%/50%`,
-replica 10'da sabit) sıradaki adım node eklemektir — **HPA pod ekler, Cluster Autoscaler node ekler.**
-
-### PVC + StatefulSet (PostgreSQL)
-`k8s/postgres.yaml`: headless Service (`clusterIP: None`) + StatefulSet + `volumeClaimTemplates`.
-
-Pod silme testi:
-
-| | Silmeden önce | Sildikten sonra |
-|---|---|---|
-| Pod adı | `pg-0` | `pg-0` — **aynı** |
-| IP | `10.244.1.29` | `10.244.1.30` — değişti |
-| PVC | `pvc-989aec9f…` | `pvc-989aec9f…` — **aynı disk** |
-| Veri | 2 satır | **2 satır** |
-
-Kalıcı DNS: `pg-0.pg.default.svc.cluster.local`. Deployment rastgele isim verir,
-StatefulSet sıralı ve kalıcı isim + pod başına ayrı disk verir.
-
-> `RECLAIM POLICY: Delete` — PVC silinince veri de silinir. Veritabanı için `Retain` kullan.
-
-**kind tuzağı:** çok-mimarili imajlarda `kind load docker-image` şu hatayı verebilir:
-`ctr: content digest ... not found`. Çözüm: node'ların imajı registry'den çekmesine izin ver.
-
-### RBAC
-`k8s/rbac.yaml`: ServiceAccount `okuyucu` + Role (`pods: get/list/watch`) + RoleBinding.
-
-```bash
-kubectl auth can-i list pods   --as=system:serviceaccount:default:okuyucu -n default   # yes
-kubectl auth can-i delete pods --as=system:serviceaccount:default:okuyucu -n default   # no
-kubectl auth can-i list pods   --as=system:serviceaccount:default:okuyucu -n staging   # no
-```
-
-Pod içinden gerçek API çağrısı (token `/var/run/secrets/kubernetes.io/serviceaccount/` altında
-otomatik montelidir):
-- `GET /api/v1/namespaces/default/pods` → **200**, PodList
-- `GET /api/v1/namespaces/default/secrets` → **403 Forbidden**
-
-Kurallar: Role tek namespace / ClusterRole cluster geneli · API'ye erişmeyen iş yüküne
-`automountServiceAccountToken: false` · `default` ServiceAccount'a asla yetki verme.
-
-### Helm — `chart/`
-```bash
-helm lint chart
-helm template prod chart                       # kurmadan ciktiyi gor
-helm upgrade --install dev  chart -f chart/values-dev.yaml  -n helm-dev  --create-namespace --wait
-helm upgrade --install prod chart -f chart/values-prod.yaml -n helm-prod --create-namespace --wait
-helm history dev -n helm-dev
-helm rollback dev 1 -n helm-dev
-```
-
-Tek chart, iki ortam: `dev` → 1 replica / `ORTAM=dev` / HPA yok,
-`prod` → HPA açık (2-8) / `ORTAM=production`. HPA şablonu `{{ if .Values.autoscaling.enabled }}`
-ile koşullu üretilir.
-
-`checksum/config` anotasyonu: ConfigMap değişince pod'ların yeniden başlaması için standart hile —
-yoksa ConfigMap güncellenir ama pod'lar eski değeri kullanmaya devam eder.
-
-**`kubectl rollout undo` vs `helm rollback`:** ilki sadece imajı, ikincisi tüm manifest setini
-(replica, config, secret, HPA) atomik olarak geri alır — ölçülen süre **5.8 saniye**.
-
-## Bölüm 7 — Gerçek stack: DB bağlantısı, ağ güvenliği, kesintisiz bakım
-
-### Uygulama ↔ PostgreSQL
-`app/server.js` v3.1 · `GET/POST /notlar` · bağlantı bilgileri `k8s-lab-config` (DB_HOST)
-ve `pg-secret` (kullanıcı/parola/db) üzerinden gelir, kodda gömülü değil.
-
-**İki ayrı sağlık ucu — bilinçli tasarım:**
-
-| Uç | DB'ye bakar mı | Başarısız olursa |
-|---|---|---|
-| `/readyz` (readiness) | **evet** | Pod trafikten çıkar, yaşamaya devam eder |
-| `/healthz` (liveness) | **hayır** | Konteyner öldürülür ve yeniden kurulur |
-
-Liveness DB'ye bakarsa, veritabanı 1 dakika yavaşladığında **tüm uygulama pod'ları
-restart döngüsüne girer** — bir arıza ikinci arızayı doğurur.
-
-**Kaos testi gerçek bir hata buldu.** `kubectl scale statefulset pg --replicas=0`
-yapıldığında uygulama komple çöktü:
+## Yapı
 
 ```
-node:events:502  throw er; // Unhandled 'error' event
-error: terminating connection due to administrator command
+app/                  Node.js uygulamasi (Express + pg + prom-client)
+  server.js           / · /notlar · /config · /healthz · /readyz · /metrics
+  Dockerfile          layer caching icin bagimliliklar koddan once kopyalanir
+k8s/                  ham manifestler
+  deployment.yaml     init container'lar + probe'lar + preStop + topology spread
+  service.yaml        ClusterIP (adlandirilmis port — ServiceMonitor icin sart)
+  ingress.yaml        host + path yonlendirme, rewrite-target
+  postgres.yaml       headless Service + StatefulSet + volumeClaimTemplates
+  networkpolicy.yaml  default-deny + yalnizca app→pg
+  rbac.yaml           ServiceAccount + Role + RoleBinding
+  hpa.yaml            asimetrik scaleUp/scaleDown politikalari
+  pdb.yaml            minAvailable: 2
+  servicemonitor.yaml Prometheus kazima tanimi
+  alerts.yaml         PrometheusRule — absent() tuzagi dahil
+  migration.yaml      idempotent SQL semasi
+  namespace.yaml      staging + ResourceQuota + LimitRange
+chart/                ayni sistemin Helm surumu (values-dev / values-prod)
+.github/workflows/    CI: build → duman testi → kind cluster → GHCR
 ```
 
-`node-postgres` havuzu, boştaki bağlantı koparıldığında `Pool` üzerinde `error` yayar;
-dinleyicisi yoksa Node süreci çöker. Düzeltme:
+---
 
-```js
-pool.on('error', (err) => console.error('pg havuz hatasi (yutuldu):', err.message));
-```
+## Tasarım kararları
 
-| | Düzeltmeden önce | Sonra |
-|---|---|---|
-| DB düşünce | 3 pod **çöktü**, restart=3 | restart=**0**, pod'lar `Running` ama `0/2 hazır` |
-| DB dönünce | — | **8 saniyede** hazır, veri eksiksiz |
+**İki ayrı sağlık ucu.** `/readyz` veritabanına bakar, `/healthz` bakmaz. Liveness DB'ye
+bakarsa, veritabanı bir dakika yavaşladığında **tüm pod'lar restart döngüsüne girer** —
+bir arıza ikinci arızayı doğurur. Doğrusu: DB düşerse pod trafikten çıkar ama öldürülmez.
 
-### Init container — `k8s/migration.yaml`
-Sırayla: `db-bekle` (pg_isready döngüsü) → `migration` (psql, `ON_ERROR_STOP=1`) → `web`.
-SQL idempotent (`CREATE TABLE IF NOT EXISTS`) çünkü her pod başlangıcında tekrar çalışır.
+**preStop hook.** Pod silinirken endpoint'lerden çıkarılması ile sürecin ölmesi eşzamanlıdır.
+`sleep 5` bu yarışı çözer. Ölçüm: preStop'suz drain 200 istekten 2'sini düşürdü, preStop'lu
+drain 300 istekten hiçbirini düşürmedi.
 
-> **Uyarı:** Bu yaklaşım basit şemalar içindir. Gerçek migration'lar ayrı bir **Job**
-> (veya Helm `pre-upgrade` hook'u) olarak **bir kez** çalıştırılmalıdır — aynı anda 3 pod
-> aynı `ALTER TABLE`'ı çalıştırırsa kilitlenme olur. Init container'ı yalnızca
-> "DB hazır mı" beklemesi için kullanın.
+**Graceful shutdown.** Konteynerde PID 1, handler tanımlamadığı sinyalleri yok sayar.
+`process.on('SIGTERM')` olmadan her pod kapanışı 30 saniye sürer, sonra SIGKILL yer.
+Ölçüm: **30 saniye → 0 saniye**.
 
-### NetworkPolicy — `k8s/networkpolicy.yaml`
-Varsayılan durumda **her pod her pod'a bağlanabilir**. Alakasız bir pod veritabanının
-tamamını okuyabildi. İki politika ile kapatıldı (default-deny + sadece `app=k8s-lab-app`):
+**Secret git'te değil.** `k8s/secret.yaml` `.gitignore`'da, şablonu `secret.yaml.ornek`.
+Kubernetes Secret'ı şifreleme değildir — `base64 -d` ile okunur.
 
-| Test | Öncesi | Sonrası |
-|---|---|---|
-| `izinsiz` pod → pg:5432 | 3 satır okudu | **`timeout expired`** |
-| uygulama → pg:5432 | OK | **OK** |
-| `izinsiz` pod → api:80 | açık | **hâlâ açık** (o servise politika yok) |
+**Demo uçları kapalı.** `/yuk` yalnızca `DEMO_UCLARI=true` iken açılır (HPA demosunu yeniden
+üretmek için). Varsayılan kapalı — dışarıdan CPU yakılamaz.
 
-> **NetworkPolicy'yi CNI zorlar, Kubernetes değil.** Flannel gibi bazı CNI'lar hiç
-> uygulamaz: `kubectl apply` başarılı olur, kaynak listede görünür, ama hiçbir şey
-> engellenmez. Her zaman gerçekten test edin. (kind'ın `kindnet`'i zorluyor.)
+---
 
-### PDB + topology spread + preStop — kesintisiz node bakımı
-`k8s/pdb.yaml` (`minAvailable: 2`) + `topologySpreadConstraints` (node'lara eşit dağıt)
-+ `lifecycle.preStop: sleep 5`.
+## Bu lab ne değildir
 
-`kubectl drain k8s-lab-worker --ignore-daemonsets --delete-emptydir-data` ölçümü:
+Öğrenme laboratuvarıdır, üretime hazır bir sistem değil. Eksikleri açıkça:
 
-| Senaryo | Sonuç |
-|---|---|
-| `preStop` yok | 200 istekten **2'si düştü** |
-| `preStop: sleep 5` | 300 istekten **0'ı düştü** |
+- **TLS yok** — Ingress düz HTTP. Üretimde cert-manager + Let's Encrypt gerekir.
+- **Secret yönetimi ilkel** — gerçek ortamda Vault / External Secrets / Sealed Secrets ve
+  etcd encryption-at-rest gerekir.
+- **Migration init container'da** — her pod başlangıcında çalışır. Gerçek migration'lar ayrı
+  bir Job (veya Helm `pre-upgrade` hook'u) olarak **bir kez** çalıştırılmalıdır; aynı anda
+  3 pod aynı `ALTER TABLE`'ı çalıştırırsa kilitlenir.
+- **PostgreSQL tek replika** — HA yok, yedekleme yok. PV `RECLAIM POLICY: Delete`, yani PVC
+  silinince veri de gider; üretimde `Retain` olmalı.
+- **NetworkPolicy yalnızca pg'yi koruyor** — `k8s-lab-api` hâlâ herkese açık.
+- **securityContext yok** — konteynerler root çalışıyor, filesystem read-only değil.
 
-Sebep: pod silinirken endpoint'lerden çıkarılması ile sürecin ölmesi **eşzamanlı** olur.
-`preStop` bu yarışı çözer — pod birkaç saniye daha cevap verirken endpoint yayılımı tamamlanır.
-
-> **HPA varken `kubectl scale` kalıcı değildir** — HPA bir sonraki döngüde replica sayısını
-> kendi aralığına geri çeker.
-
-### Gözlemlenebilirlik — Prometheus + Grafana
-```bash
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm upgrade --install izleme prometheus-community/kube-prometheus-stack \
-  -n izleme --create-namespace --set grafana.adminPassword=lab123 \
-  --set prometheus.prometheusSpec.retention=2h --set alertmanager.enabled=false --wait
-kubectl apply -f k8s/servicemonitor.yaml -f k8s/alerts.yaml -f k8s/grafana-ingress.yaml
-```
-
-Grafana: `http://grafana.local:8080` (admin / lab123) — 28 hazır dashboard.
-`/etc/hosts` satırı: `127.0.0.1 app.local grafana.local`
-
-**Uygulama kendi metriklerini yayınlar** (`prom-client`, `GET /metrics`):
-`http_istek_toplam` (Counter) · `http_istek_suresi_saniye` (Histogram) · `notlar_toplam` (Gauge)
-+ Node.js varsayılanları (heap, event loop, GC).
-
-ServiceMonitor eşleşmesi iki şeye bağlı: Service portunun **adı** (`name: http`) ve
-ServiceMonitor'ın `release: izleme` etiketi (kube-prometheus-stack bu etikete bakar).
-
-Doğrulanmış PromQL çıktıları:
-
-| Sorgu | Sonuç |
-|---|---|
-| Prometheus hedefleri | 3 pod, hepsi `up` |
-| `sum by (yol) (http_istek_toplam)` | `/`=25, `/notlar`=9, `/readyz`=23, `/healthz`=9 |
-| `notlar_toplam` | 4 (üç pod da aynı DB'yi okuyor) |
-
-**Alarm yaşam döngüsü** (`replicas=0` yapılarak tetiklendi):
-`inactive` → `pending` (`for: 30s`) → `firing`, geri gelince tekrar `inactive`.
-
-> **Prometheus tuzağı — `up == 0` ateşlemez.** Pod'lar tamamen yok olunca hedef de
-> listeden silinir, `up` serisi hiç var olmaz, karşılaştırma hiçbir zaman doğru olmaz.
-> Aynı koşulda ölçülen sonuç:
-> ```
-> UygulamaKapali (up == 0)         = inactive   ← ateşlemedi
-> HicHedefYok    (absent(up{...})) = firing     ← doğru
-> ```
-> "Alarm kurmuştuk ama çalışmadı" vakalarının en yaygın sebebi budur.
-
-> **CRD'ler strict decoding ile doğrulanır.** `annotations`'ı yanlışlıkla `labels` altına
-> yazınca apply reddedildi (`unknown field spec.groups[0].rules[2].labels.annotations.ozet`) —
-> sessizce yok sayılmadı.
+---
 
 ## Temizlik
 
 ```bash
-helm uninstall dev -n helm-dev; helm uninstall prod -n helm-prod; helm uninstall izleme -n izleme
+helm uninstall izleme -n izleme
 kind delete cluster --name k8s-lab
 ```

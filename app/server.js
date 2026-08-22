@@ -60,8 +60,6 @@ if (pool) {
   });
 }
 
-let saglikli = true;
-
 // Her istegi olc (metrik ucunun kendisi haric)
 app.use((req, res, next) => {
   if (req.path === '/metrics') return next();
@@ -127,7 +125,6 @@ app.post('/notlar', async (req, res) => {
 // --- Saglik uclari ---
 // readiness: veritabanina da bakar. DB yoksa trafik alma.
 app.get('/readyz', async (req, res) => {
-  if (!saglikli) return res.status(500).send('BOZUK\n');
   if (!pool) return res.send('ok (dbsiz)\n');
   try {
     await pool.query('SELECT 1');
@@ -138,25 +135,20 @@ app.get('/readyz', async (req, res) => {
 });
 
 // liveness: SADECE surecin canli olduguna bakar. DB'ye BAKMAZ.
-app.get('/healthz', (req, res) => {
-  if (!saglikli) return res.status(500).send('BOZUK\n');
-  res.send('ok\n');
-});
+app.get('/healthz', (req, res) => res.send('ok\n'));
 
-app.get('/yuk', (req, res) => {
-  const ms = Math.min(parseInt(req.query.ms || '200', 10), 2000);
-  const bitis = Date.now() + ms;
-  let x = 0;
-  while (Date.now() < bitis) { x += Math.sqrt(Math.random()); }
-  res.send(`${ms}ms cpu yakildi (${os.hostname()})\n`);
-});
-
-// DEMO AMACLI — gercek projede olmamali
-app.get('/kirilsin', (req, res) => {
-  saglikli = false;
-  console.log('!!! saglik durumu BOZUK olarak isaretlendi');
-  res.send('artik /healthz 500 donuyor\n');
-});
+// Yalnizca DEMO_UCLARI=true iken acilir (HPA demosu icin).
+// Varsayilan KAPALI — disaridan CPU yakilmasini engeller.
+if (process.env.DEMO_UCLARI === 'true') {
+  app.get('/yuk', (req, res) => {
+    const ms = Math.min(parseInt(req.query.ms || '200', 10), 2000);
+    const bitis = Date.now() + ms;
+    let x = 0;
+    while (Date.now() < bitis) { x += Math.sqrt(Math.random()); }
+    res.send(`${ms}ms cpu yakildi (${os.hostname()})\n`);
+  });
+  console.warn('UYARI: /yuk demo ucu ACIK (DEMO_UCLARI=true)');
+}
 
 const server = app.listen(3000, () =>
   console.log(`3000 portunda dinliyorum (ortam=${ORTAM}, db=${DB_HOST || 'yok'})`));

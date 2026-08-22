@@ -3,7 +3,7 @@ replicaCount: 3
 
 image:
   repository: k8s-lab-app
-  tag: "2.2"
+  tag: "3.3"
   pullPolicy: IfNotPresent
 
 service:

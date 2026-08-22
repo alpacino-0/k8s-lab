@@ -28,10 +28,22 @@ jobs:
           curl -sf localhost:8080/ | grep -q Konteyner
           docker rm -f test
 
+  # 1b) Manifest ve chart dogrulamasi — cluster gerektirmez, hizli
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Helm chart lint
+        run: helm lint chart
+      - name: Chart sablonu uretilebiliyor mu
+        run: |
+          helm template prod chart -f chart/values-prod.yaml > /dev/null
+          helm template dev  chart -f chart/values-dev.yaml  > /dev/null
+
   # 2) Gercek bir kind cluster kurup deploy et — manifestler dogru mu?
   k8s-test:
     runs-on: ubuntu-latest
-    needs: build-test
+    needs: [build-test, lint]
     steps:
       - uses: actions/checkout@v4
 
@@ -42,14 +54,31 @@ jobs:
 
       - name: Imaji build et ve node'lara yukle
         run: |
-          docker build -t k8s-lab-app:2.1 ./app
-          kind load docker-image k8s-lab-app:2.1 --name ci
+          docker build -t k8s-lab-app:3.3 ./app
+          kind load docker-image k8s-lab-app:3.3 --name ci
+
+      # Gercek k8s/secret.yaml .gitignore'da — CI sablondan uretir.
+      # pg-secret'i postgres.yaml zaten tanimliyor.
+      - name: Secret'i sablondan uret
+        run: |
+          sed 's/BURAYA-GERCEK-PAROLA/ci-test-parolasi/' k8s/secret.yaml.ornek > k8s/secret.yaml
+
+      - name: PostgreSQL'i kur
+        run: |
+          kubectl apply -f k8s/postgres.yaml
+          kubectl rollout status statefulset/pg --timeout=300s
 
       - name: Deploy
         run: |
           kubectl apply -f k8s/configmap.yaml -f k8s/secret.yaml
           kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml
-          kubectl rollout status deployment/k8s-lab-app --timeout=180s
+          kubectl rollout status deployment/k8s-lab-app --timeout=300s
+
+      - name: Veritabani ucu gercekten calisiyor mu?
+        run: |
+          kubectl run kontrol --rm -i --restart=Never --image=curlimages/curl -- \
+            curl -sf -X POST -H 'Content-Type: application/json' \
+            -d '{"metin":"ci testi"}' http://k8s-lab-app/notlar | grep -q "ci testi"
 
       - name: Dogrula
         run: |
