@@ -9,7 +9,11 @@ spec:
   selector:
     {{- include "app.selectorLabels" . | nindent 4 }}
   ports:
-    - name: http          # named port — ServiceMonitor matches on the name
+    - name: http
       port: {{ .Values.service.port }}
       targetPort: http
+      protocol: TCP
+    - name: metrics       # named port — the ServiceMonitor matches on the name
+      port: 9090
+      targetPort: metrics
       protocol: TCP

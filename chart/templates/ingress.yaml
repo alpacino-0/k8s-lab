@@ -1,10 +1,56 @@
 {{- if .Values.ingress.enabled }}
+{{- /*
+  Two Ingress objects on one host, on purpose.
+
+  The API needs `rewrite-target` so that /api/notes reaches the backend as
+  /notes. That annotation applies to every rule in the Ingress it is set on, so
+  putting both routes in one object would rewrite the interface's paths too and
+  break the single-page app. Splitting them keeps each annotation scoped to the
+  routes it belongs to.
+*/}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "app.fullname" . }}
+  name: {{ include "app.fullname" . }}-api
   labels:
     {{- include "app.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/proxy-body-size: 64k
+    {{- if .Values.ingress.tls.enabled }}
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts: [{{ .Values.ingress.host | quote }}]
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # /api/notes -> /notes on the backend. Only these paths are exposed;
+          # /metrics stays internal for Prometheus.
+          - path: /api(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: {{ include "app.fullname" . }}
+                port:
+                  number: {{ .Values.service.port }}
+{{- if .Values.web.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "web.fullname" . }}
+  labels:
+    {{- include "web.labels" . | nindent 4 }}
   annotations:
     {{- if .Values.ingress.tls.enabled }}
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
@@ -16,8 +62,7 @@ spec:
   ingressClassName: {{ .Values.ingress.className }}
   {{- if .Values.ingress.tls.enabled }}
   tls:
-    - hosts:
-        - {{ .Values.ingress.host | quote }}
+    - hosts: [{{ .Values.ingress.host | quote }}]
       secretName: {{ .Values.ingress.tls.secretName }}
   {{- end }}
   rules:
@@ -28,7 +73,8 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "app.fullname" . }}
+                name: {{ include "web.fullname" . }}
                 port:
-                  number: {{ .Values.service.port }}
+                  number: 80
+{{- end }}
 {{- end }}

@@ -9,6 +9,16 @@ const os = require('os');
  */
 function createApp({ config, logger, metrics, db }) {
   const app = express();
+  const startedAt = Date.now();
+
+  // Identity of the replica answering this request. os.hostname() is the pod
+  // name; the rest comes from the downward API when running in Kubernetes.
+  const identity = () => ({
+    pod: (config.pod && config.pod.name) || os.hostname(),
+    node: (config.pod && config.pod.node) || null,
+    ip: (config.pod && config.pod.ip) || null,
+    namespace: (config.pod && config.pod.namespace) || null,
+  });
   app.disable('x-powered-by');
   app.use(express.json({ limit: '64kb' }));
 
@@ -56,7 +66,7 @@ function createApp({ config, logger, metrics, db }) {
     if (!db) return res.status(503).json({ error: 'database not configured' });
     try {
       const notes = await db.listNotes();
-      res.json({ servedBy: os.hostname(), count: notes.length, notes });
+      res.json({ servedBy: identity(), count: notes.length, notes });
     } catch (err) {
       logger.error('failed to list notes', { error: err.message });
       res.status(500).json({ error: 'internal error' });
@@ -70,11 +80,51 @@ function createApp({ config, logger, metrics, db }) {
     if (text.length > 500) return res.status(400).json({ error: 'field "text" is too long' });
     try {
       const note = await db.createNote(text);
-      res.status(201).json({ servedBy: os.hostname(), note });
+      res.status(201).json({ servedBy: identity(), note });
     } catch (err) {
       logger.error('failed to create note', { error: err.message });
       res.status(500).json({ error: 'internal error' });
     }
+  });
+
+  app.delete('/notes/:id', async (req, res) => {
+    if (!db) return res.status(503).json({ error: 'database not configured' });
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) {
+      return res.status(400).json({ error: 'id must be a positive integer' });
+    }
+    try {
+      const deleted = await db.deleteNote(id);
+      if (!deleted) return res.status(404).json({ error: 'note not found' });
+      res.json({ servedBy: identity(), deleted });
+    } catch (err) {
+      logger.error('failed to delete note', { error: err.message });
+      res.status(500).json({ error: 'internal error' });
+    }
+  });
+
+  // Curated read-only summary for the UI. The raw /metrics endpoint stays
+  // internal — Prometheus scrapes it, the public ingress does not route to it.
+  app.get('/stats', async (req, res) => {
+    let notes = null;
+    let databaseUp = false;
+    if (db) {
+      try {
+        notes = await db.countNotes();
+        databaseUp = true;
+      } catch {
+        databaseUp = false;
+      }
+    }
+    res.json({
+      servedBy: identity(),
+      environment: config.env,
+      uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
+      notes,
+      databaseUp,
+      nodeVersion: process.version,
+      memoryMb: Math.round(process.memoryUsage().heapUsed / 1048576),
+    });
   });
 
   // Liveness: process-only. It must NOT depend on the database, otherwise a
@@ -93,18 +143,6 @@ function createApp({ config, logger, metrics, db }) {
       metrics.dbUp.set(0);
       res.status(503).type('text/plain').send(`database unreachable: ${err.message}\n`);
     }
-  });
-
-  app.get('/metrics', async (req, res) => {
-    if (db) {
-      try {
-        metrics.notesTotal.set(await db.countNotes());
-      } catch {
-        /* leave the previous value; /readyz reports the failure */
-      }
-    }
-    res.set('Content-Type', metrics.registry.contentType);
-    res.end(await metrics.registry.metrics());
   });
 
   // Load generator used to reproduce the documented HPA measurements.
@@ -131,4 +169,28 @@ function createApp({ config, logger, metrics, db }) {
   return app;
 }
 
-module.exports = { createApp };
+/**
+ * Separate app for the metrics port. Prometheus scrapes this; the ingress does
+ * not route to it, so the scrape endpoint is never publicly reachable.
+ */
+function createMetricsApp({ metrics, db }) {
+  const app = express();
+  app.disable('x-powered-by');
+
+  app.get('/metrics', async (req, res) => {
+    if (db) {
+      try {
+        metrics.notesTotal.set(await db.countNotes());
+      } catch {
+        /* keep the previous value; /readyz reports the failure */
+      }
+    }
+    res.set('Content-Type', metrics.registry.contentType);
+    res.end(await metrics.registry.metrics());
+  });
+
+  app.use((req, res) => res.status(404).end());
+  return app;
+}
+
+module.exports = { createApp, createMetricsApp };

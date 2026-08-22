@@ -5,8 +5,8 @@
 ![Kubernetes](https://img.shields.io/badge/kubernetes-1.36-326ce5?logo=kubernetes&logoColor=white)
 ![Helm](https://img.shields.io/badge/helm-3-0f1689?logo=helm&logoColor=white)
 
-Node.js + PostgreSQL servisinin Kubernetes'e **üretimde çalıştırılacağı gibi**
-kurulduğu proje: root olmayan konteynerler, salt-okunur dosya sistemi,
+Node.js + PostgreSQL servisi ve tarayıcı arayüzünün Kubernetes'e **üretimde
+çalıştırılacağı gibi** kurulduğu proje: root olmayan konteynerler, salt-okunur dosya sistemi,
 varsayılan-reddet ağ politikaları, sürüm başına bir kez çalışan şema migration'ı,
 doğrulanmış gecelik yedekler, otomatik ölçekleme, kesinti bütçesi, Prometheus
 metrikleri ve her push'ta gerçek bir cluster'a deploy eden CI hattı.
@@ -31,6 +31,7 @@ flowchart TB
         ING["ingress-nginx<br/>NodePort 30080"]
 
         subgraph NS["namespace: k8s-lab"]
+            WEB["web<br/>Deployment · 2 replika<br/>nginx, uid 101, salt-okunur"]
             APP["app<br/>Deployment · HPA 3-10 · PDB min 2<br/>root değil · salt-okunur rootfs"]
             PG[("postgres-0<br/>StatefulSet · PVC")]
             MIG["migration Job<br/>Helm post-install hook"]
@@ -45,11 +46,12 @@ flowchart TB
         NP{{"varsayılan-reddet NetworkPolicy<br/>giriş: ingress-nginx + Prometheus<br/>çıkış: DNS + PostgreSQL"}}
     end
 
-    U -->|"app.local"| ING --> NP --> APP
+    U -->|"app.local/"| ING --> WEB
+    U -->|"app.local/api"| ING --> NP --> APP
     APP --> PG
     MIG -.->|sürüm başına bir kez| PG
     BK -.->|pg_dump + gzip -t| PG
-    PROM -->|"/metrics · 15sn"| APP
+    PROM -->|":9090/metrics · 15sn"| APP
     PROM --> GRAF
 ```
 
@@ -63,15 +65,31 @@ Gerekenler: Docker, [kind](https://kind.sigs.k8s.io/), kubectl, Helm.
 git clone https://github.com/alpacino-0/k8s-lab.git && cd k8s-lab
 make up                                    # cluster + ingress + build + deploy
 echo "127.0.0.1 app.local" | sudo tee -a /etc/hosts
-curl app.local:8080
-make smoke                                 # 18 uçtan uca kontrol
+open http://app.local:8080                 # arayüz
+make smoke                                 # 25 uçtan uca kontrol
 ```
+
+## Arayüz
+
+`http://app.local:8080` çalışan bir notlar uygulaması. Aynı zamanda altında ne
+olduğunun en hızlı açıklaması.
+
+Her yanıt, onu üreten replikanın kimliğini taşıyor ve sayfa bunu bir deftere
+işliyor: her istek, cevap veren pod'un şeridine bir çentik düşürüyor. Uygulamayı
+birkaç saniye kullandığında yük dağılımı kendini çiziyor. Altında ise her
+platform kararı, onu haklı çıkaran ölçümle birlikte anlatılıyor.
+
+Defter Kubernetes API'sini **bilerek sorgulamıyor**. Sorgulasaydı, başka hiçbir
+sebebi olmayan bir pod'a ServiceAccount token'ı bağlamak gerekirdi. Pod kimliği
+bunun yerine downward API'den geliyor — kubelet'in enjekte ettiği ortam
+değişkenleri — ve tarayıcı sadece geleni sayıyor.
 
 | Komut | Ne yapar |
 |---|---|
-| `make test` | Birim ve entegrasyon testleri (14 test, cluster gerekmez) |
+| `make test` | Birim ve entegrasyon testleri (19 test, cluster gerekmez) |
 | `make lint` | ESLint + `helm lint` + tüm values profillerini üretir |
-| `make deploy` | İmajı yeniden derler ve sürümü günceller |
+| `make deploy` | İki imajı da yeniden derler ve sürümü günceller |
+| `make web` | Arayüzü yerelde, port-forward edilmiş backend'e karşı çalıştırır |
 | `make smoke` | Çalışan deployment'a karşı uçtan uca kontroller |
 | `make monitoring` | Prometheus + Grafana kurar |
 | `make down` | Cluster'ı siler |
@@ -88,7 +106,9 @@ make smoke                                 # 18 uçtan uca kontrol
 | Salt-okunur kök dosya sistemi | `containerSecurityContext` + `/tmp` için `emptyDir` | CI'da konteyner `--read-only` ile başlatılır |
 | Tüm Linux capability'leri düşürülmüş | `capabilities.drop: [ALL]` | çalışan pod spec'i üzerinden doğrulanır |
 | Yetki yükseltme kapalı, seccomp `RuntimeDefault` | pod ve konteyner security context | üretilen manifest'ler kubeconform ile denetlenir |
-| ServiceAccount token'ı monte edilmez | `automountServiceAccountToken: false` | uygulama Kubernetes API'sini hiç kullanmaz |
+| ServiceAccount token'ı monte edilmez | `automountServiceAccountToken: false` | iki katman da Kubernetes API'sini kullanmaz |
+| Kazıma ucu dışarıya yönlendirilmez | metrikler ayrı portta (9090) | CI `/api/metrics` için 404 doğrular |
+| Arayüz CSP ve frame-deny başlıkları gönderir | `web/security-headers.conf` | çalışan konteyner üzerinde doğrulanır |
 | Varsayılan-reddet ağ | 3 NetworkPolicy | yetkisiz bir pod'un erişemediği **kanıtlanır** |
 | Multi-stage imaj, yalnız üretim bağımlılıkları | `app/Dockerfile` | CI'da Trivy CRITICAL/HIGH bulguda durdurur |
 | npm runtime imajından çıkarıldı | `app/Dockerfile` | **tüm** Node.js paket CVE'lerini sıfırladı (aşağıda) |
@@ -137,11 +157,11 @@ Her push'ta beş job ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
 
 | Job | Neyi denetler |
 |---|---|
-| `test` | ESLint, 14 birim ve entegrasyon testi |
-| `manifests` | `helm lint`, üç values profilinin üretimi, kubeconform şema denetimi, hadolint |
-| `image` | Derler, konteynerin root olmadığını doğrular, salt-okunur başlatır, Trivy taraması |
-| `e2e` | Gerçek kind cluster kurar, chart'ı yükler, 18 kontrolü çalıştırır, ardından bir upgrade'in **sıfır istek düşürdüğünü** kanıtlar |
-| `publish` | GHCR'a SBOM ve provenance ile push eder (yalnız main) |
+| `test` | API için ESLint + 19 test; arayüz için ESLint + üretim derlemesi |
+| `manifests` | `helm lint`, üç values profili, kubeconform şema denetimi, iki Dockerfile için hadolint |
+| `image` | İki imajı derler, ikisinin de root olmadığını doğrular, salt-okunur başlatır, Trivy taraması |
+| `e2e` | Gerçek kind cluster kurar, chart'ı yükler, iki ingress yolunu da denetler, 25 kontrolü çalıştırır, ardından bir upgrade'in **sıfır istek düşürdüğünü** kanıtlar |
+| `publish` | İki imajı da amd64 + arm64 için GHCR'a, SBOM ve provenance ile push eder (yalnız main) |
 
 ---
 
@@ -152,14 +172,17 @@ app/                  Node.js servisi
   src/                config · logger · metrics · db · app · index
   test/               birim ve entegrasyon testleri (node:test, framework yok)
   Dockerfile          multi-stage, sabit sürüm, root değil
+web/                  React arayüzü (Vite), yetkisiz nginx ile servis edilir
+  src/                app · pod defteri · notlar · mekanizmalar
+  nginx.conf          SPA fallback, CSP, yazma işlemleri /tmp ile sınırlı
 chart/                Helm chart — tek deploy yolu
-  templates/          15 kaynak şablonu + helper'lar
+  templates/          16 kaynak şablonu + helper'lar
   values.yaml         açıklamalı varsayılanlar
   values-dev.yaml     minimum ayak izi, demo uçları açık
   values-prod.yaml    otomatik ölçekleme, yedekleme, izleme, ağ politikaları
 scripts/
   bootstrap.sh        idempotent cluster + ingress + deploy
-  smoke-test.sh       güvenlik duruşu dahil 18 uçtan uca kontrol
+  smoke-test.sh       güvenlik duruşu dahil 25 uçtan uca kontrol
   teardown.sh         cluster'ı siler
 docs/
   LEARNING-LOG.tr.md  ölçümler ve bulunan hatalar
@@ -215,6 +238,21 @@ beklemek, ve kurulum sırasında bir kez doğrulanmış yedek almak — bu hem y
 yolunun çalıştığını kanıtlar hem de volume'ü bağlar.
 
 ---
+
+### Trafiği okurken çıkan dördüncü hata
+
+Arayüzü bağlamak, manifest'lerin iddia ettiği ama hiç uygulamadığı bir açığı
+ortaya çıkardı: ingress `/api`'yi servise yönlendiriyordu ve `/metrics` aynı
+portta duruyordu — yani ham Prometheus kazıma ucu dışarıdan erişilebilirdi.
+Çözüm bir ingress kuralı değil, ikinci bir dinleyici oldu: telemetri artık 9090
+portunda, dışarıdan hiçbir yönlendirme almıyor ve ağ politikası o portu yalnızca
+Prometheus'a açıyor. CI `/api/metrics` için 404 bekliyor.
+
+Aynı oturumda iki küçük hata daha çıktı: nginx, bir alt blok kendi `add_header`
+direktifini koyar koymaz miras alınan **tüm** başlıkları sessizce düşürüyor —
+güvenlik başlıkları hiç gönderilmiyordu. Ve arayüzün Service'i, API'nin
+`app.kubernetes.io/name` etiketini taşıdığı için Prometheus nginx'ten `/metrics`
+kazımaya çalışıyordu.
 
 ## Bilinen sınırlar
 

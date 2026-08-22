@@ -1,0 +1,24 @@
+{
+  "name": "k8s-lab-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Interface for the k8s-lab service: a working notes app that also shows the platform underneath it",
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.1.0",
+    "eslint": "^10.9.0",
+    "vite": "^7.2.2"
+  }
+}

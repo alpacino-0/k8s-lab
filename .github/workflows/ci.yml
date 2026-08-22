@@ -36,6 +36,18 @@ jobs:
       - run: npm test
         working-directory: app
 
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run lint
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+
   # ------------------------------------------------------- static analysis
   manifests:
     name: Validate manifests
@@ -65,10 +77,16 @@ jobs:
           helm template ci chart -f chart/values-prod.yaml --set postgres.auth.password=ci \
             | ./kubeconform -strict -summary -ignore-missing-schemas -
 
-      - name: Lint the Dockerfile
+      - name: Lint the API Dockerfile
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: app/Dockerfile
+          failure-threshold: warning
+
+      - name: Lint the web Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: web/Dockerfile
           failure-threshold: warning
 
   # ------------------------------------------------------------- container
@@ -96,10 +114,39 @@ jobs:
           curl -sf localhost:8080/healthz | grep -q ok
           docker rm -f ro
 
-      - name: Scan image for known vulnerabilities
+      - name: Scan the API image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: k8s-lab-app:${{ env.IMAGE_TAG }}
+          format: table
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Build the web image
+        run: docker build -t "k8s-lab-web:${IMAGE_TAG}" ./web
+
+      - name: Web container must not run as root
+        run: |
+          uid=$(docker run --rm --entrypoint id "k8s-lab-web:${IMAGE_TAG}" -u)
+          echo "web container uid: $uid"
+          [ "$uid" != "0" ] || { echo "web image runs as root"; exit 1; }
+
+      - name: Web container must start with a read-only root filesystem
+        run: |
+          docker run -d --name web-ro --read-only --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp --tmpfs /var/cache/nginx --tmpfs /var/run \
+            -p 8081:8080 "k8s-lab-web:${IMAGE_TAG}"
+          for _ in $(seq 1 20); do curl -sf localhost:8081/healthz && break || sleep 1; done
+          curl -sf localhost:8081/healthz | grep -q ok
+          curl -s -D - -o /dev/null localhost:8081/ | grep -qi 'content-security-policy'
+          docker rm -f web-ro
+
+      - name: Scan the web image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: k8s-lab-web:${{ env.IMAGE_TAG }}
           format: table
           exit-code: '1'
           severity: CRITICAL,HIGH
@@ -133,28 +180,37 @@ jobs:
           kubectl patch svc ingress-nginx-controller -n ingress-nginx --type=json \
             -p='[{"op":"replace","path":"/spec/ports/0/nodePort","value":30080}]'
 
-      - name: Build and load the image
+      - name: Build and load the images
         run: |
           docker build -t "k8s-lab-app:${IMAGE_TAG}" ./app
-          kind load docker-image "k8s-lab-app:${IMAGE_TAG}" --name ci
+          docker build -t "k8s-lab-web:${IMAGE_TAG}" ./web
+          kind load docker-image "k8s-lab-app:${IMAGE_TAG}" "k8s-lab-web:${IMAGE_TAG}" --name ci
 
       - name: Install the chart
         run: |
           helm upgrade --install app ./chart \
             --namespace k8s-lab --create-namespace \
             --set image.tag="${IMAGE_TAG}" \
+            --set web.image.tag="${IMAGE_TAG}" \
             --set postgres.auth.password=ci-password \
             --set networkPolicy.enabled=true \
             --timeout 10m
           kubectl -n k8s-lab rollout status statefulset/app-postgres --timeout=300s
           kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app --timeout=300s
+          kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app-web --timeout=300s
 
-      - name: Ingress must serve the app
+      - name: Ingress must route both tiers
         run: |
           for _ in $(seq 1 30); do
-            curl -sf -H 'Host: app.local' http://localhost:8080/healthz && break || sleep 2
+            curl -sf -H 'Host: app.local' http://localhost:8080/api/healthz && break || sleep 2
           done
-          curl -sf -H 'Host: app.local' http://localhost:8080/ | grep -q 'Served by'
+          # / goes to the interface, /api to the service behind it
+          curl -sf -H 'Host: app.local' http://localhost:8080/ | grep -q '<div id="root"'
+          curl -sf -H 'Host: app.local' http://localhost:8080/api/stats | grep -q servedBy
+          # the scrape endpoint must not be publicly routable
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: app.local' http://localhost:8080/api/metrics)
+          echo "GET /api/metrics -> $code"
+          [ "$code" = "404" ]
 
       - name: Smoke test
         run: ./scripts/smoke-test.sh
@@ -170,6 +226,7 @@ jobs:
           LOOP=$!
           helm upgrade app ./chart -n k8s-lab \
             --set image.tag="${IMAGE_TAG}" \
+            --set web.image.tag="${IMAGE_TAG}" \
             --set postgres.auth.password=ci-password \
             --set config.GREETING=Upgraded --timeout 10m
           kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app --timeout=300s
@@ -205,7 +262,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v7
+      - name: Publish the API image
+        uses: docker/build-push-action@v7
         with:
           context: ./app
           push: true
@@ -217,6 +275,21 @@ jobs:
             ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
             ${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      - name: Publish the web image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./web
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.IMAGE_NAME }}-web:${{ env.IMAGE_TAG }}
+            ${{ env.IMAGE_NAME }}-web:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}-web:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: true

@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { createApp } = require('../src/app');
+const { createApp, createMetricsApp } = require('../src/app');
 const { createMetrics } = require('../src/metrics');
 const { loadConfig } = require('../src/config');
 const { createLogger } = require('../src/logger');
@@ -107,12 +107,77 @@ test('demo endpoint is unreachable unless enabled', async () => {
   });
 });
 
-test('metrics endpoint exposes the custom series', async () => {
+test('the application port does not serve metrics', async () => {
   await withServer({ db: { countNotes: async () => 7 } }, async (base) => {
-    await fetch(`${base}/`);
-    const body = await (await fetch(`${base}/metrics`)).text();
+    const res = await fetch(`${base}/metrics`);
+    assert.strictEqual(res.status, 404, 'metrics must live on the telemetry port only');
+  });
+});
+
+test('the telemetry port serves the custom series', async () => {
+  const metrics = createMetrics();
+  const app = createMetricsApp({ metrics, db: { countNotes: async () => 7 } });
+  metrics.httpRequests.inc({ route: '/', method: 'GET', status: 200 });
+  const server = app.listen(0);
+  await new Promise((r) => server.once('listening', r));
+  try {
+    const body = await (
+      await fetch(`http://127.0.0.1:${server.address().port}/metrics`)
+    ).text();
     assert.match(body, /http_requests_total/);
     assert.match(body, /notes_total\{[^}]*\} 7/);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('the telemetry port serves nothing else', async () => {
+  const app = createMetricsApp({ metrics: createMetrics(), db: null });
+  const server = app.listen(0);
+  await new Promise((r) => server.once('listening', r));
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/notes`);
+    assert.strictEqual(res.status, 404);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('responses identify the replica that served them', async () => {
+  await withServer(
+    { config: { pod: { name: 'app-abc', node: 'worker-2', ip: '10.0.0.9', namespace: 'k8s-lab' } },
+      db: { countNotes: async () => 3 } },
+    async (base) => {
+      const body = await (await fetch(`${base}/stats`)).json();
+      assert.strictEqual(body.servedBy.pod, 'app-abc');
+      assert.strictEqual(body.servedBy.node, 'worker-2');
+      assert.strictEqual(body.notes, 3);
+      assert.strictEqual(body.databaseUp, true);
+    },
+  );
+});
+
+test('stats reports the database as down without failing the request', async () => {
+  const db = { countNotes: async () => { throw new Error('unreachable'); } };
+  await withServer({ db }, async (base) => {
+    const res = await fetch(`${base}/stats`);
+    assert.strictEqual(res.status, 200, 'stats must stay available when the DB is not');
+    assert.strictEqual((await res.json()).databaseUp, false);
+  });
+});
+
+test('deleting a note validates the id and reports a missing note', async () => {
+  const db = {
+    deleteNote: async (id) => (id === 1 ? { id: 1, text: 'gone', created_at: 'now' } : null),
+  };
+  await withServer({ db }, async (base) => {
+    assert.strictEqual((await fetch(`${base}/notes/abc`, { method: 'DELETE' })).status, 400);
+    assert.strictEqual((await fetch(`${base}/notes/-3`, { method: 'DELETE' })).status, 400);
+    assert.strictEqual((await fetch(`${base}/notes/99`, { method: 'DELETE' })).status, 404);
+
+    const ok = await fetch(`${base}/notes/1`, { method: 'DELETE' });
+    assert.strictEqual(ok.status, 200);
+    assert.strictEqual((await ok.json()).deleted.id, 1);
   });
 });
 

@@ -16,8 +16,19 @@ function loadConfig(env = process.env) {
     logLevel: env.LOG_LEVEL || 'info',
     greeting: env.GREETING || 'Hello',
     port: num(env.PORT, 3000, 'PORT'),
+    // Telemetry listens on its own port so the public ingress, which only
+    // routes to the application port, cannot reach the scrape endpoint.
+    metricsPort: num(env.METRICS_PORT, 9090, 'METRICS_PORT'),
     shutdownTimeoutMs: num(env.SHUTDOWN_TIMEOUT_MS, 10000, 'SHUTDOWN_TIMEOUT_MS'),
     demoEndpoints: env.DEMO_ENDPOINTS === 'true',
+    // Filled by the Kubernetes downward API. Reading these needs no API access
+    // and no service-account token — the kubelet injects them into the pod.
+    pod: {
+      name: env.POD_NAME || null,
+      namespace: env.POD_NAMESPACE || null,
+      ip: env.POD_IP || null,
+      node: env.NODE_NAME || null,
+    },
     db: env.DB_HOST
       ? {
           host: env.DB_HOST,

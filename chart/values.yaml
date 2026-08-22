@@ -56,6 +56,27 @@ service:
   type: ClusterIP
   port: 80
 
+# The browser interface. A separate image, Deployment and Service: it scales,
+# fails and is released independently of the API, which is the point of running
+# two services rather than serving static files from the API container.
+web:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: k8s-lab-web
+    tag: ""              # defaults to .Chart.AppVersion
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 10m
+      memory: 24Mi
+    limits:
+      cpu: 100m
+      memory: 96Mi
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
 ingress:
   enabled: true
   className: nginx

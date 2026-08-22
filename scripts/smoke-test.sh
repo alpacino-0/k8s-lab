@@ -10,12 +10,21 @@ set -uo pipefail
 NAMESPACE="${NAMESPACE:-k8s-lab}"
 RELEASE="${RELEASE:-app}"
 SVC="${RELEASE}-k8s-lab-app"
+WEB_SVC="${RELEASE}-k8s-lab-app-web"
 PORT="${PORT:-18080}"
+WEB_PORT="${WEB_PORT:-18090}"
+METRICS_PORT="${METRICS_PORT:-18091}"
 BASE="http://127.0.0.1:${PORT}"
 FAILED=0
 PF_PID=""
 
-cleanup() { [[ -n "$PF_PID" ]] && kill "$PF_PID" 2>/dev/null; }
+WEB_PF_PID=""
+METRICS_PF_PID=""
+cleanup() {
+  for pid in "$PF_PID" "$WEB_PF_PID" "$METRICS_PF_PID"; do
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null
+  done
+}
 trap cleanup EXIT
 
 pass() { printf '  \033[0;32mPASS\033[0m  %s\n' "$1"; }
@@ -34,8 +43,21 @@ for _ in $(seq 1 30); do curl -sf "${BASE}/healthz" >/dev/null 2>&1 && break; sl
 check "liveness responds"        sh -c "curl -sf ${BASE}/healthz | grep -q ok"
 check "readiness responds"       sh -c "curl -sf ${BASE}/readyz  | grep -q ok"
 check "index responds"           sh -c "curl -sf ${BASE}/ | grep -q 'Served by'"
-check "metrics are exposed"      sh -c "curl -sf ${BASE}/metrics | grep -q http_requests_total"
-check "database gauge is healthy" sh -c "curl -sf ${BASE}/metrics | grep -q '^database_up{[^}]*} 1'"
+check "app port does not serve metrics" \
+  sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' ${BASE}/metrics)\" = 404 ]"
+# Telemetry lives on its own port; the public ingress never routes to it.
+kubectl -n "$NAMESPACE" port-forward "svc/${SVC}" "${METRICS_PORT}:9090" >/dev/null 2>&1 &
+METRICS_PF_PID=$!
+METRICS="http://127.0.0.1:${METRICS_PORT}"
+for _ in $(seq 1 30); do curl -sf "${METRICS}/metrics" >/dev/null 2>&1 && break; sleep 1; done
+
+check "telemetry port exposes metrics" \
+  sh -c "curl -sf ${METRICS}/metrics | grep -q http_requests_total"
+check "database gauge is healthy" \
+  sh -c "curl -sf ${METRICS}/metrics | grep -qE '^database_up\{[^}]*\} 1'"
+check "telemetry port serves nothing else" \
+  sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' ${METRICS}/notes)\" = 404 ]"
+
 check "note can be written"      sh -c "curl -sf -X POST -H 'Content-Type: application/json' \
                                    -d '{\"text\":\"smoke-test\"}' ${BASE}/notes | grep -q smoke-test"
 check "note can be read back"    sh -c "curl -sf ${BASE}/notes | grep -q smoke-test"
@@ -54,6 +76,21 @@ check "root filesystem read-only" sh -c "[ \"$(q '{.spec.containers[0].securityC
 check "all capabilities dropped"  sh -c "[ \"$(q '{.spec.containers[0].securityContext.capabilities.drop[0]}')\" = ALL ]"
 check "no service-account token"  sh -c "[ \"$(q '{.spec.automountServiceAccountToken}')\" = false ]"
 check "effective uid is not 0"    sh -c "[ \"$(kubectl -n $NAMESPACE exec $POD -- id -u 2>/dev/null)\" != 0 ]"
+
+# ---- interface tier -------------------------------------------------------
+kubectl -n "$NAMESPACE" rollout status "deployment/${WEB_SVC}" --timeout=300s >/dev/null \
+  && pass "interface rolled out" || fail "interface rolled out"
+
+kubectl -n "$NAMESPACE" port-forward "svc/${WEB_SVC}" "${WEB_PORT}:80" >/dev/null 2>&1 &
+WEB_PF_PID=$!
+WEB="http://127.0.0.1:${WEB_PORT}"
+for _ in $(seq 1 30); do curl -sf "${WEB}/healthz" >/dev/null 2>&1 && break; sleep 1; done
+
+check "interface serves the app shell" sh -c "curl -sf ${WEB}/ | grep -q '<div id=\"root\"'"
+check "unknown paths return the shell" sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' ${WEB}/any/deep/route)\" = 200 ]"
+check "security headers are present"   sh -c "curl -s -D - -o /dev/null ${WEB}/ | grep -qi 'content-security-policy'"
+check "interface runs as non-root"     sh -c "[ \"\$(kubectl -n $NAMESPACE get pod -l app.kubernetes.io/name=k8s-lab-web \
+                                          -o jsonpath='{.items[0].spec.securityContext.runAsNonRoot}')\" = true ]"
 
 # NetworkPolicy: an unrelated pod must NOT be able to reach the app or the database.
 echo "  ...verifying network isolation (takes ~20s)"

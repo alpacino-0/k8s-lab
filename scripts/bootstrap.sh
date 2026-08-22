@@ -23,11 +23,12 @@ else
   log "cluster '$CLUSTER' already exists"
 fi
 
-log "building image k8s-lab-app:$IMAGE_TAG"
+log "building images"
 docker build -q -t "k8s-lab-app:$IMAGE_TAG" "$ROOT/app" >/dev/null
+docker build -q -t "k8s-lab-web:$IMAGE_TAG" "$ROOT/web" >/dev/null
 
-log "loading image into cluster nodes"
-kind load docker-image "k8s-lab-app:$IMAGE_TAG" --name "$CLUSTER" >/dev/null
+log "loading images into cluster nodes"
+kind load docker-image "k8s-lab-app:$IMAGE_TAG" "k8s-lab-web:$IMAGE_TAG" --name "$CLUSTER" >/dev/null
 
 if ! kubectl get ns ingress-nginx >/dev/null 2>&1; then
   log "installing ingress-nginx"
@@ -48,12 +49,14 @@ log "deploying release '$RELEASE' to namespace '$NAMESPACE'"
 helm upgrade --install "$RELEASE" "$ROOT/chart" \
   --namespace "$NAMESPACE" --create-namespace \
   --set image.tag="$IMAGE_TAG" \
+  --set web.image.tag="$IMAGE_TAG" \
   --set postgres.auth.password="${PGPASSWORD:-local-dev-password}" \
   --timeout 10m "$@"
 
 log "waiting for workloads"
 kubectl -n "$NAMESPACE" rollout status "statefulset/${RELEASE}-postgres" --timeout=300s
 kubectl -n "$NAMESPACE" rollout status "deployment/${RELEASE}-k8s-lab-app" --timeout=300s
+kubectl -n "$NAMESPACE" rollout status "deployment/${RELEASE}-k8s-lab-app-web" --timeout=300s
 
 log "done"
 kubectl -n "$NAMESPACE" get deploy,sts,svc,ingress,hpa

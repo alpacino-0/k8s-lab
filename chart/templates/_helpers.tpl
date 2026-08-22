@@ -44,3 +44,26 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "postgres.host" -}}
 {{- printf "%s-0.%s.%s.svc.cluster.local" (include "postgres.fullname" .) (include "postgres.fullname" .) .Release.Namespace -}}
 {{- end -}}
+
+{{- define "web.fullname" -}}
+{{- printf "%s-web" (include "app.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+  The web tier needs its own label set. Reusing app.labels would stamp
+  app.kubernetes.io/name: k8s-lab-app onto the interface, and the ServiceMonitor
+  selects on exactly that — Prometheus would try to scrape /metrics from nginx.
+*/}}
+{{- define "web.labels" -}}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+{{ include "web.selectorLabels" . }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/part-of: k8s-lab
+app.kubernetes.io/component: web
+{{- end -}}
+
+{{- define "web.selectorLabels" -}}
+app.kubernetes.io/name: k8s-lab-web
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end -}}

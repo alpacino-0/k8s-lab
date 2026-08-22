@@ -57,12 +57,25 @@ spec:
             - name: http
               containerPort: 3000
               protocol: TCP
+            - name: metrics          # scraped by Prometheus, never routed publicly
+              containerPort: 9090
+              protocol: TCP
           {{- if gt (int .Values.lifecycle.preStopSleepSeconds) 0 }}
           lifecycle:
             preStop:
               sleep:
                 seconds: {{ .Values.lifecycle.preStopSleepSeconds }}
           {{- end }}
+          env:
+            # Downward API: pod identity without any Kubernetes API access.
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
           envFrom:
             - configMapRef:
                 name: {{ include "app.fullname" . }}

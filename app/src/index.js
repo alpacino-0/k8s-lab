@@ -4,19 +4,24 @@ const { loadConfig } = require('./config');
 const { createLogger } = require('./logger');
 const { createMetrics } = require('./metrics');
 const { createDb } = require('./db');
-const { createApp } = require('./app');
+const { createApp, createMetricsApp } = require('./app');
 
 const config = loadConfig();
 const logger = createLogger({ level: config.logLevel, base: { env: config.env } });
 const metrics = createMetrics();
 const db = createDb(config.db, logger);
 const app = createApp({ config, logger, metrics, db });
+const metricsApp = createMetricsApp({ metrics, db });
 
 const server = app.listen(config.port, () => {
   logger.info('listening', {
     port: config.port,
     database: config.db ? config.db.host : null,
   });
+});
+
+const metricsServer = metricsApp.listen(config.metricsPort, () => {
+  logger.info('metrics listening', { port: config.metricsPort });
 });
 
 let shuttingDown = false;
@@ -38,6 +43,7 @@ async function shutdown(signal) {
   }, config.shutdownTimeoutMs);
   force.unref();
 
+  metricsServer.close();
   server.close(async () => {
     try {
       if (db) await db.close();
