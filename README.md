@@ -223,6 +223,82 @@ yoksa ConfigMap güncellenir ama pod'lar eski değeri kullanmaya devam eder.
 **`kubectl rollout undo` vs `helm rollback`:** ilki sadece imajı, ikincisi tüm manifest setini
 (replica, config, secret, HPA) atomik olarak geri alır — ölçülen süre **5.8 saniye**.
 
+## Bölüm 7 — Gerçek stack: DB bağlantısı, ağ güvenliği, kesintisiz bakım
+
+### Uygulama ↔ PostgreSQL
+`app/server.js` v3.1 · `GET/POST /notlar` · bağlantı bilgileri `k8s-lab-config` (DB_HOST)
+ve `pg-secret` (kullanıcı/parola/db) üzerinden gelir, kodda gömülü değil.
+
+**İki ayrı sağlık ucu — bilinçli tasarım:**
+
+| Uç | DB'ye bakar mı | Başarısız olursa |
+|---|---|---|
+| `/readyz` (readiness) | **evet** | Pod trafikten çıkar, yaşamaya devam eder |
+| `/healthz` (liveness) | **hayır** | Konteyner öldürülür ve yeniden kurulur |
+
+Liveness DB'ye bakarsa, veritabanı 1 dakika yavaşladığında **tüm uygulama pod'ları
+restart döngüsüne girer** — bir arıza ikinci arızayı doğurur.
+
+**Kaos testi gerçek bir hata buldu.** `kubectl scale statefulset pg --replicas=0`
+yapıldığında uygulama komple çöktü:
+
+```
+node:events:502  throw er; // Unhandled 'error' event
+error: terminating connection due to administrator command
+```
+
+`node-postgres` havuzu, boştaki bağlantı koparıldığında `Pool` üzerinde `error` yayar;
+dinleyicisi yoksa Node süreci çöker. Düzeltme:
+
+```js
+pool.on('error', (err) => console.error('pg havuz hatasi (yutuldu):', err.message));
+```
+
+| | Düzeltmeden önce | Sonra |
+|---|---|---|
+| DB düşünce | 3 pod **çöktü**, restart=3 | restart=**0**, pod'lar `Running` ama `0/2 hazır` |
+| DB dönünce | — | **8 saniyede** hazır, veri eksiksiz |
+
+### Init container — `k8s/migration.yaml`
+Sırayla: `db-bekle` (pg_isready döngüsü) → `migration` (psql, `ON_ERROR_STOP=1`) → `web`.
+SQL idempotent (`CREATE TABLE IF NOT EXISTS`) çünkü her pod başlangıcında tekrar çalışır.
+
+> **Uyarı:** Bu yaklaşım basit şemalar içindir. Gerçek migration'lar ayrı bir **Job**
+> (veya Helm `pre-upgrade` hook'u) olarak **bir kez** çalıştırılmalıdır — aynı anda 3 pod
+> aynı `ALTER TABLE`'ı çalıştırırsa kilitlenme olur. Init container'ı yalnızca
+> "DB hazır mı" beklemesi için kullanın.
+
+### NetworkPolicy — `k8s/networkpolicy.yaml`
+Varsayılan durumda **her pod her pod'a bağlanabilir**. Alakasız bir pod veritabanının
+tamamını okuyabildi. İki politika ile kapatıldı (default-deny + sadece `app=k8s-lab-app`):
+
+| Test | Öncesi | Sonrası |
+|---|---|---|
+| `izinsiz` pod → pg:5432 | 3 satır okudu | **`timeout expired`** |
+| uygulama → pg:5432 | OK | **OK** |
+| `izinsiz` pod → api:80 | açık | **hâlâ açık** (o servise politika yok) |
+
+> **NetworkPolicy'yi CNI zorlar, Kubernetes değil.** Flannel gibi bazı CNI'lar hiç
+> uygulamaz: `kubectl apply` başarılı olur, kaynak listede görünür, ama hiçbir şey
+> engellenmez. Her zaman gerçekten test edin. (kind'ın `kindnet`'i zorluyor.)
+
+### PDB + topology spread + preStop — kesintisiz node bakımı
+`k8s/pdb.yaml` (`minAvailable: 2`) + `topologySpreadConstraints` (node'lara eşit dağıt)
++ `lifecycle.preStop: sleep 5`.
+
+`kubectl drain k8s-lab-worker --ignore-daemonsets --delete-emptydir-data` ölçümü:
+
+| Senaryo | Sonuç |
+|---|---|
+| `preStop` yok | 200 istekten **2'si düştü** |
+| `preStop: sleep 5` | 300 istekten **0'ı düştü** |
+
+Sebep: pod silinirken endpoint'lerden çıkarılması ile sürecin ölmesi **eşzamanlı** olur.
+`preStop` bu yarışı çözer — pod birkaç saniye daha cevap verirken endpoint yayılımı tamamlanır.
+
+> **HPA varken `kubectl scale` kalıcı değildir** — HPA bir sonraki döngüde replica sayısını
+> kendi aralığına geri çeker.
+
 ## Temizlik
 
 ```bash

@@ -12,20 +12,93 @@ spec:
       labels:
         app: k8s-lab-app
     spec:
+      topologySpreadConstraints:
+        # pod'lari node'lara esit dagit; olmuyorsa yine de calistir
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: k8s-lab-app
+      initContainers:
+        # 1) Veritabani hazir olana kadar bekle
+        - name: db-bekle
+          image: postgres:17-alpine
+          envFrom:
+            - secretRef:
+                name: pg-secret
+          env:
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: k8s-lab-config
+                  key: DB_HOST
+          command:
+            - sh
+            - -c
+            - |
+              echo "veritabani bekleniyor: $DB_HOST"
+              until pg_isready -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q; do
+                echo "  henuz hazir degil, 2sn..."
+                sleep 2
+              done
+              echo "veritabani hazir"
+        # 2) Semayi uygula (idempotent)
+        - name: migration
+          image: postgres:17-alpine
+          envFrom:
+            - secretRef:
+                name: pg-secret
+          env:
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: k8s-lab-config
+                  key: DB_HOST
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pg-secret
+                  key: POSTGRES_PASSWORD
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              for f in /migration/*.sql; do
+                echo "uygulanıyor: $f"
+                psql -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f "$f"
+              done
+              echo "migration tamam"
+          volumeMounts:
+            - name: migration
+              mountPath: /migration
+      volumes:
+        - name: migration
+          configMap:
+            name: db-migration
       containers:
         - name: web
-          image: k8s-lab-app:2.0
+          image: k8s-lab-app:3.0
           imagePullPolicy: IfNotPresent   # yerel imaji kullan, Docker Hub'a gitme
           ports:
             - containerPort: 3000
+          lifecycle:
+            preStop:
+              exec:
+                # SIGTERM'den ONCE 5sn bekle: bu surede endpoint'lerden cikariliriz
+                # ama hala cevap verebiliyoruz. Kesintisiz drain'in anahtari.
+                command: ["sh","-c","sleep 5"]
           envFrom:                 # tum anahtarlari ortam degiskeni olarak al
             - configMapRef:
                 name: k8s-lab-config
             - secretRef:
                 name: k8s-lab-secret
-          readinessProbe:        # "trafik alabilir mi?"
+            - secretRef:
+                name: pg-secret          # POSTGRES_USER/PASSWORD/DB buradan
+          readinessProbe:        # "trafik alabilir mi?" — DB'ye de bakar
             httpGet:
-              path: /healthz
+              path: /readyz
               port: 3000
             initialDelaySeconds: 2
             periodSeconds: 5

@@ -1,0 +1,32 @@
+# 1) pg'ye gelen TUM trafigi varsayilan olarak REDDET
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pg-varsayilan-reddet
+spec:
+  podSelector:
+    matchLabels:
+      app: pg
+  policyTypes:
+    - Ingress
+  # ingress kurali YOK = hicbir sey giremez
+---
+# 2) SADECE uygulama pod'larindan 5432'ye izin ver
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pg-sadece-uygulamadan
+spec:
+  podSelector:
+    matchLabels:
+      app: pg
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: k8s-lab-app     # sadece bu etiketli pod'lar
+      ports:
+        - protocol: TCP
+          port: 5432

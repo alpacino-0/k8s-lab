@@ -6,3 +6,4 @@ data:
   ORTAM: "production"
   LOG_SEVIYE: "warn"
   KARSILAMA: "Selam"
+  DB_HOST: "pg-0.pg.default.svc.cluster.local"   # StatefulSet'in kalici DNS adi

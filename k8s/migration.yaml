@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-migration
+data:
+  001-notlar.sql: |
+    CREATE TABLE IF NOT EXISTS notlar (
+      id     serial PRIMARY KEY,
+      metin  text NOT NULL,
+      zaman  timestamptz NOT NULL DEFAULT now()
+    );
+    -- idempotent olmali: her pod baslangicinda tekrar calisacak
+    CREATE INDEX IF NOT EXISTS notlar_zaman_idx ON notlar (zaman DESC);
