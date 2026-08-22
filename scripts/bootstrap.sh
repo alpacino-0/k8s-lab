@@ -7,12 +7,11 @@ CLUSTER="${CLUSTER:-k8s-lab}"
 NAMESPACE="${NAMESPACE:-k8s-lab}"
 RELEASE="${RELEASE:-app}"
 IMAGE_TAG="${IMAGE_TAG:-1.0.0}"
-INGRESS_VERSION="${INGRESS_VERSION:-controller-v1.13.0}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
-for tool in docker kind kubectl helm; do
+for tool in docker kind kubectl helm terraform; do
   command -v "$tool" >/dev/null || { echo "missing required tool: $tool" >&2; exit 1; }
 done
 
@@ -30,23 +29,21 @@ docker build -q -t "k8s-lab-web:$IMAGE_TAG" "$ROOT/web" >/dev/null
 log "loading images into cluster nodes"
 kind load docker-image "k8s-lab-app:$IMAGE_TAG" "k8s-lab-web:$IMAGE_TAG" --name "$CLUSTER" >/dev/null
 
-if ! kubectl get ns ingress-nginx >/dev/null 2>&1; then
-  log "installing ingress-nginx"
-  kubectl apply -f "https://raw.githubusercontent.com/kubernetes/ingress-nginx/${INGRESS_VERSION}/deploy/static/provider/baremetal/deploy.yaml"
-  kubectl wait -n ingress-nginx --for=condition=Ready pod \
-    -l app.kubernetes.io/component=controller --timeout=300s
-  # Pin the controller to the ports kind maps to the host.
-  kubectl patch svc ingress-nginx-controller -n ingress-nginx --type=json \
-    -p='[{"op":"replace","path":"/spec/ports/0/nodePort","value":30080},{"op":"replace","path":"/spec/ports/1/nodePort","value":30443}]'
-else
-  log "ingress-nginx already installed"
-fi
+# The platform layer — ingress controller, cert-manager, Argo CD, the admission
+# policies and the namespace they apply to — is Terraform's. Installing the
+# same components from a shell script as well would be two sources of truth
+# disagreeing at the worst possible moment.
+log "applying the platform with terraform"
+terraform -chdir="$ROOT/terraform" init -input=false >/dev/null
+terraform -chdir="$ROOT/terraform" apply -input=false -auto-approve \
+  -var "kube_context=kind-${CLUSTER}"
 
-log "applying cluster policies"
-# The namespace carries the Pod Security Admission labels, so it is created
-# here rather than by --create-namespace.
-kubectl apply -f "$ROOT/policies/namespace.yaml"
-kubectl apply -f "$ROOT/policies/admission-policies.yaml" -f "$ROOT/policies/admission-bindings.yaml"
+# Custom resources whose CRDs are installed by the releases above. Terraform's
+# kubernetes_manifest resolves a schema at plan time and cannot plan against a
+# CRD that does not exist yet, so these are applied afterwards.
+log "applying certificate issuers"
+kubectl apply -f "$ROOT/cluster/issuers.yaml"
+kubectl wait --for=condition=Ready clusterissuer/selfsigned-ca --timeout=180s
 
 log "deploying release '$RELEASE' to namespace '$NAMESPACE'"
 # Deliberately no --wait: it also waits for the backup PVC, which stays Pending

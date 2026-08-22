@@ -7,7 +7,7 @@ IMAGE       ?= k8s-lab-app
 IMAGE_TAG   ?= 1.0.0
 
 .DEFAULT_GOAL := help
-.PHONY: help test lint build web up down deploy smoke policies policy-test tls logs logging gitops monitoring port-forward clean
+.PHONY: help test lint build web up down deploy smoke policies policy-test platform platform-plan tls logs logging gitops monitoring port-forward clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -16,10 +16,13 @@ help: ## Show this help
 test: ## Run unit and integration tests
 	cd app && npm ci --silent && npm test
 
-lint: ## Lint JavaScript and the Helm chart
+lint: ## Lint JavaScript, the Helm chart and the Terraform
 	cd app && npm run lint
 	cd web && npm run lint
 	helm lint chart
+	terraform -chdir=terraform fmt -check -diff
+	terraform -chdir=terraform init -backend=false -input=false >/dev/null
+	terraform -chdir=terraform validate
 	helm template ci chart -f chart/values-prod.yaml > /dev/null
 	helm template ci chart -f chart/values-dev.yaml  > /dev/null
 
@@ -114,3 +117,12 @@ gitops: ## Install Argo CD and let it reconcile the release from git
 	@echo "  Watch it converge:  kubectl -n argocd get application k8s-lab -w"
 	@echo "  Then break it:      kubectl -n k8s-lab-gitops scale deploy/k8s-lab-k8s-lab-app --replicas=5"
 	@echo "  UI password:        kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+
+platform: ## Apply the platform layer with Terraform (ingress, cert-manager, Argo CD, policies)
+	terraform -chdir=terraform init -input=false
+	terraform -chdir=terraform apply -input=false -var kube_context=kind-$(CLUSTER)
+	kubectl apply -f cluster/issuers.yaml
+
+platform-plan: ## Show what Terraform would change, without changing it
+	terraform -chdir=terraform init -input=false -backend=false
+	terraform -chdir=terraform plan -input=false -var kube_context=kind-$(CLUSTER)
