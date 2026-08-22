@@ -7,7 +7,7 @@ IMAGE       ?= k8s-lab-app
 IMAGE_TAG   ?= 1.0.0
 
 .DEFAULT_GOAL := help
-.PHONY: help test lint build web up down deploy smoke policies policy-test logs monitoring port-forward clean
+.PHONY: help test lint build web up down deploy smoke policies policy-test tls logs monitoring port-forward clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -74,3 +74,17 @@ down: ## Delete the kind cluster
 
 clean: ## Remove local build artefacts
 	rm -rf app/node_modules app/coverage
+
+tls: ## Install cert-manager, issue from a local CA, serve HTTPS on :8443
+	kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+	kubectl wait -n cert-manager --for=condition=Available deployment --all --timeout=300s
+	kubectl apply -f cluster/issuers.yaml
+	helm upgrade --install $(RELEASE) ./chart -n $(NAMESPACE) \
+	  -f chart/values-prod.yaml --set image.tag=$(IMAGE_TAG) --set web.image.tag=$(IMAGE_TAG) \
+	  --set postgres.auth.password=$${PGPASSWORD:-local-dev-password} \
+	  --set 'ingress.extraHosts[0]=localhost' \
+	  --set ingress.tls.enabled=true --set ingress.tls.clusterIssuer=selfsigned-ca \
+	  --set config.SECURE_COOKIE=true --timeout 10m
+	@echo ""
+	@echo "  https://localhost:8443 — the browser warns because the CA is local."
+	@echo "  Everything else is real: Certificate, secret, TLS listener, 308 redirect, Secure cookie."

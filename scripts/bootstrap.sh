@@ -35,9 +35,9 @@ if ! kubectl get ns ingress-nginx >/dev/null 2>&1; then
   kubectl apply -f "https://raw.githubusercontent.com/kubernetes/ingress-nginx/${INGRESS_VERSION}/deploy/static/provider/baremetal/deploy.yaml"
   kubectl wait -n ingress-nginx --for=condition=Ready pod \
     -l app.kubernetes.io/component=controller --timeout=300s
-  # Pin the controller to the port kind maps to the host.
+  # Pin the controller to the ports kind maps to the host.
   kubectl patch svc ingress-nginx-controller -n ingress-nginx --type=json \
-    -p='[{"op":"replace","path":"/spec/ports/0/nodePort","value":30080}]'
+    -p='[{"op":"replace","path":"/spec/ports/0/nodePort","value":30080},{"op":"replace","path":"/spec/ports/1/nodePort","value":30443}]'
 else
   log "ingress-nginx already installed"
 fi

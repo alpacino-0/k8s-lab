@@ -97,6 +97,7 @@ variables the kubelet injects — and the browser simply counts what came back.
 | `make smoke` | End-to-end checks against the running deployment |
 | `make policies` | Apply the admission policies |
 | `make policy-test` | Prove each policy rejects what it is supposed to |
+| `make tls` | Install cert-manager and serve HTTPS from a local CA |
 | `make monitoring` | Install Prometheus + Grafana |
 | `make down` | Delete the cluster |
 
@@ -119,6 +120,7 @@ variables the kubelet injects — and the browser simply counts what came back.
 | Multi-stage image, production deps only | `app/Dockerfile` | Trivy blocks CRITICAL/HIGH findings in CI |
 | npm removed from the runtime image | `app/Dockerfile` | eliminated **every** Node.js package CVE (see below) |
 | No secrets in git | `.gitignore` + chart values | password is a required chart value |
+| TLS, the redirect and the Secure cookie | cert-manager + explicit Certificate | verified on every push against a certificate a real CA issued |
 | Security settings are enforced, not just set | Pod Security Admission + ValidatingAdmissionPolicy | 8 policy tests: one compliant manifest admitted, seven broken ones each rejected |
 | Notes isolated per visitor | anonymous cookie, owner-scoped queries | a second visitor cannot read or delete the first one's notes |
 | Writes bounded | ingress `limit-rps` + a shared window + a note cap | oversized and over-quota writes are rejected |
@@ -163,6 +165,43 @@ engine, which runs in the API server:
 A policy engine earns its keep for mutation, cross-namespace generation, or
 image signature verification. None of those are needed yet — see
 [policies/README.md](policies/README.md).
+
+### TLS
+
+cert-manager issues the certificate; the chart creates the `Certificate` and
+both Ingress objects consume the secret it produces.
+
+It would have been easy to prepare this and never run it — a public
+deployment needs a domain, and there is no domain. So CI issues a real
+certificate from a local certificate authority instead, and checks the whole
+path on every push:
+
+| | |
+|---|---|
+| `https://…/api/healthz` | 200, certificate issued by the expected CA |
+| `http://…/api/healthz` | **308** — redirected, never served |
+| `Set-Cookie` | carries `Secure` |
+
+The only difference from a public deployment is who signed the certificate.
+The `Certificate` resource, the secret, the nginx TLS listener, the redirect
+and the cookie flag are the same objects doing the same work. Switching to
+Let's Encrypt is one value: `--set ingress.tls.clusterIssuer=letsencrypt-prod`.
+
+The `Certificate` is created by the chart rather than by cert-manager's Ingress
+annotation, because two Ingress objects share one hostname and one secret. With
+the annotation, cert-manager makes the first Ingress the owner and then refuses
+to act for the second:
+
+```
+certificate resource is not owned by this object.
+refusing to update non-owned certificate resource
+```
+
+It works until the owning Ingress is deleted, at which point the certificate is
+garbage-collected and the other Ingress quietly loses it.
+
+Locally: `make tls`, then `https://localhost:8443`. The browser warns, because
+the CA is local — that is the one thing that is not real.
 
 ### Reliability
 
@@ -228,13 +267,15 @@ chart/                Helm chart — the single deployment path
   values-dev.yaml     minimal footprint, demo endpoints on
   values-prod.yaml    autoscaling, backups, monitoring, network policies
   values-public.yaml  GHCR images, TLS, external secret — for a public address
+cluster/              cluster-scoped add-ons, kept out of the chart
+  issuers.yaml        a local CA, so the TLS path is exercised not assumed
 policies/             cluster policy, kept out of the chart on purpose
   namespace.yaml      Pod Security Admission labels
   admission-*.yaml    ValidatingAdmissionPolicy rules and their bindings
 scripts/
   bootstrap.sh        idempotent cluster + ingress + policies + deploy
   policy-test.sh      8 checks that each rule rejects what it should
-  smoke-test.sh       35 end-to-end checks including security posture
+  smoke-test.sh       35 end-to-end checks including security posture and isolation
   teardown.sh         destroy the cluster
 docs/
   DEPLOY.md           runbook for putting this on a public address

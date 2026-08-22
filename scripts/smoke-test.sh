@@ -24,10 +24,57 @@ cleanup() {
   for pid in "$PF_PID" "$WEB_PF_PID" "$METRICS_PF_PID"; do
     [[ -n "$pid" ]] && kill "$pid" 2>/dev/null
   done
+  kubectl delete namespace "${PROBE_NS:-k8s-lab-probes}" --wait=false >/dev/null 2>&1
 }
 trap cleanup EXIT
 
 pass() { printf '  \033[0;32mPASS\033[0m  %s\n' "$1"; }
+
+# Probes run in a namespace of their own.
+#
+# The application namespace deliberately refuses anything that is not a
+# compliant, pinned, probed workload from a known registry — including a
+# throwaway curl pod. That is the policy working, but it also means an
+# isolation probe cannot live there. Running it elsewhere is the more faithful
+# test anyway: an unrelated workload is in another namespace, not this one.
+#
+# Each probe prints a sentinel because a pod refused at admission and a pod
+# blocked by the NetworkPolicy look identical from the outside — one of them
+# proves isolation, the other proves nothing.
+PROBE_NS="${PROBE_NS:-k8s-lab-probes}"
+
+# A namespace deleted at the end of the previous run can still be Terminating,
+# and pods cannot be created in one. Wait it out rather than racing it.
+ensure_probe_namespace() {
+  for _ in $(seq 1 60); do
+    local phase
+    phase=$(kubectl get namespace "$PROBE_NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    case "$phase" in
+      Active) return 0 ;;
+      Terminating) sleep 2 ;;
+      *) kubectl create namespace "$PROBE_NS" >/dev/null 2>&1 && sleep 1 ;;
+    esac
+  done
+  return 1
+}
+ensure_probe_namespace || { echo "could not prepare the probe namespace"; exit 1; }
+PROBE_SPEC='{"apiVersion":"v1","spec":{"automountServiceAccountToken":false,
+"securityContext":{"runAsNonRoot":true,"runAsUser":1000,
+"seccompProfile":{"type":"RuntimeDefault"}},
+"containers":[{"name":"probe","image":"IMAGE_PLACEHOLDER",
+"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,
+"capabilities":{"drop":["ALL"]}},
+"resources":{"requests":{"cpu":"10m","memory":"16Mi"},"limits":{"memory":"32Mi"}},
+"command":COMMAND_PLACEHOLDER}]}}'
+
+# run_probe <image> <json command array> -> stdout of the pod
+run_probe() {
+  local image="$1" command="$2" name="probe-$RANDOM"
+  local overrides="${PROBE_SPEC//IMAGE_PLACEHOLDER/$image}"
+  overrides="${overrides//COMMAND_PLACEHOLDER/$command}"
+  kubectl -n "$PROBE_NS" run "$name" --rm -i --restart=Never --quiet \
+    --image="$image" --overrides="$overrides" 2>&1
+}
 fail() { printf '  \033[0;31mFAIL\033[0m  %s\n' "$1"; FAILED=1; }
 check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$name"; else fail "$name"; fi; }
 
@@ -107,9 +154,15 @@ if kubectl -n "$NAMESPACE" get deploy "${RELEASE}-redis" >/dev/null 2>&1; then
     sh -c "curl -sf ${METRICS}/metrics | grep -q 'rate_limiter_decisions_total{backend=\"redis\"'"
   check "the note count is served from cache" \
     sh -c "curl -sf -b '$JAR' ${BASE}/stats >/dev/null; curl -sf -b '$JAR' ${BASE}/stats | grep -q '\"cached\":true'"
-  check "redis refuses connections from unrelated pods" \
-    sh -c "! kubectl -n '$NAMESPACE' run redisprobe-$RANDOM --rm -i --restart=Never --quiet \
-       --image=redis:7.4-alpine --command -- redis-cli -h ${RELEASE}-redis -t 5 ping 2>/dev/null | grep -q PONG"
+  REDIS_OUT=$(run_probe "redis:7.4-alpine" \
+    '["sh","-c","out=$(redis-cli -h '"${RELEASE}-redis.${NAMESPACE}"' -t 5 ping 2>&1); echo PROBE_RAN:$out"]')
+  if [[ "$REDIS_OUT" != *"PROBE_RAN:"* ]]; then
+    fail "the redis isolation probe never ran: ${REDIS_OUT:0:140}"
+  elif [[ "$REDIS_OUT" == *"PONG"* ]]; then
+    fail "an unrelated pod reached redis — NetworkPolicy not enforced"
+  else
+    pass "redis refuses connections from unrelated pods"
+  fi
 fi
 
 # Security posture, read straight from the running pod spec.
@@ -137,14 +190,21 @@ check "security headers are present"   sh -c "curl -s -D - -o /dev/null ${WEB}/ 
 check "interface runs as non-root"     sh -c "[ \"\$(kubectl -n $NAMESPACE get pod -l app.kubernetes.io/name=k8s-lab-web \
                                           -o jsonpath='{.items[0].spec.securityContext.runAsNonRoot}')\" = true ]"
 
-# NetworkPolicy: an unrelated pod must NOT be able to reach the app or the database.
+# NetworkPolicy: an unrelated pod must NOT be able to reach the app or the
+# database. The sentinel proves the probe actually ran; without it a pod that
+# was refused at admission looks identical to one that was blocked by the
+# network policy.
 echo "  ...verifying network isolation (takes ~20s)"
-BLOCKED=$(kubectl -n "$NAMESPACE" run "netpol-$RANDOM" --rm -i --restart=Never --quiet \
-  --image=curlimages/curl:8.11.1 --command -- \
-  curl -s -m 8 -o /dev/null -w '%{http_code}' "http://${SVC}/healthz" 2>/dev/null)
-[[ "$BLOCKED" == "000" || -z "$BLOCKED" ]] \
-  && pass "unauthorized pod cannot reach the app" \
-  || fail "unauthorized pod reached the app (got HTTP $BLOCKED) — NetworkPolicy not enforced"
+NETPOL_OUT=$(run_probe "curlimages/curl:8.11.1" \
+  '["sh","-c","code=$(curl -s -m 8 -o /dev/null -w %{http_code} http://'"${SVC}.${NAMESPACE}"'/healthz); echo PROBE_RAN:$code"]')
+
+if [[ "$NETPOL_OUT" != *"PROBE_RAN:"* ]]; then
+  fail "the isolation probe never ran, so nothing was proved: ${NETPOL_OUT:0:140}"
+elif [[ "$NETPOL_OUT" == *"PROBE_RAN:000"* ]]; then
+  pass "unauthorized pod cannot reach the app"
+else
+  fail "unauthorized pod reached the app (${NETPOL_OUT##*PROBE_RAN:}) — NetworkPolicy not enforced"
+fi
 
 echo
 [[ "$FAILED" -eq 0 ]] && echo "all checks passed" || echo "some checks failed"

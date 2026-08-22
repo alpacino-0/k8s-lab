@@ -95,6 +95,7 @@ değişkenleri — ve tarayıcı sadece geleni sayıyor.
 | `make smoke` | Çalışan deployment'a karşı uçtan uca kontroller |
 | `make policies` | Kabul politikalarını uygular |
 | `make policy-test` | Her politikanın doğru şeyi reddettiğini kanıtlar |
+| `make tls` | cert-manager kurar, yerel CA ile HTTPS sunar |
 | `make monitoring` | Prometheus + Grafana kurar |
 | `make down` | Cluster'ı siler |
 
@@ -117,6 +118,7 @@ değişkenleri — ve tarayıcı sadece geleni sayıyor.
 | Multi-stage imaj, yalnız üretim bağımlılıkları | `app/Dockerfile` | CI'da Trivy CRITICAL/HIGH bulguda durdurur |
 | npm runtime imajından çıkarıldı | `app/Dockerfile` | **tüm** Node.js paket CVE'lerini sıfırladı (aşağıda) |
 | Git'te secret yok | `.gitignore` + chart values | parola zorunlu bir chart değeri |
+| TLS, yönlendirme ve Secure çerez | cert-manager + açık Certificate | gerçek bir CA'nın verdiği sertifikayla her push'ta doğrulanır |
 | Güvenlik ayarları zorunlu, sadece yazılı değil | Pod Security Admission + ValidatingAdmissionPolicy | 8 politika testi: bir uyumlu manifest kabul, yedi bozuk manifest ayrı ayrı red |
 | Notlar ziyaretçi başına izole | anonim çerez, owner'a göre filtrelenmiş sorgular | ikinci bir ziyaretçi ilkinin notunu ne görür ne siler |
 | Yazma sınırlı | ingress `limit-rps` + paylaşımlı pencere + not tavanı | uzun ve kota aşan yazmalar reddedilir |
@@ -161,6 +163,41 @@ içinde çalışan yerleşik motorla ifade edilebiliyordu:
 Politika motoru; mutasyon, namespace'ler arası üretim veya imaj imzası
 doğrulaması gerektiğinde hak eder. Henüz hiçbirine ihtiyaç yok —
 [policies/README.md](policies/README.md).
+
+### TLS
+
+Sertifikayı cert-manager veriyor; `Certificate` kaynağını chart oluşturuyor ve
+iki Ingress de ürettiği secret'ı tüketiyor.
+
+Bunu hazırlayıp hiç çalıştırmamak kolay olurdu — herkese açık kurulum bir alan
+adı ister, alan adı yok. Bu yüzden CI, yerel bir sertifika otoritesinden
+**gerçek bir sertifika** aldırıyor ve tüm yolu her push'ta denetliyor:
+
+| | |
+|---|---|
+| `https://…/api/healthz` | 200, sertifikayı beklenen CA vermiş |
+| `http://…/api/healthz` | **308** — yönlendiriliyor, servis edilmiyor |
+| `Set-Cookie` | `Secure` taşıyor |
+
+Herkese açık bir kurulumdan tek farkı sertifikayı kimin imzaladığı. `Certificate`
+kaynağı, secret, nginx TLS dinleyicisi, yönlendirme ve çerez bayrağı aynı işi
+yapan aynı nesneler. Let's Encrypt'e geçiş tek değer:
+`--set ingress.tls.clusterIssuer=letsencrypt-prod`.
+
+`Certificate`'ı cert-manager'ın Ingress anotasyonu yerine chart oluşturuyor,
+çünkü iki Ingress aynı host ve aynı secret'ı paylaşıyor. Anotasyonla,
+cert-manager ilk Ingress'i sahip yapıyor ve ikincisi için çalışmayı reddediyor:
+
+```
+certificate resource is not owned by this object.
+refusing to update non-owned certificate resource
+```
+
+Sahip Ingress silinene kadar çalışır; silindiğinde sertifika çöp toplanır ve
+diğer Ingress sessizce sertifikasız kalır.
+
+Yerelde: `make tls`, sonra `https://localhost:8443`. Tarayıcı uyarır — CA yerel
+olduğu için. Gerçek olmayan tek şey o.
 
 ### Dayanıklılık
 
@@ -225,13 +262,15 @@ chart/                Helm chart — tek deploy yolu
   values-dev.yaml     minimum ayak izi, demo uçları açık
   values-prod.yaml    otomatik ölçekleme, yedekleme, izleme, ağ politikaları
   values-public.yaml  GHCR imajları, TLS, harici secret — herkese açık adres için
+cluster/              cluster kapsamlı eklentiler, chart'ın dışında
+  issuers.yaml        yerel CA — TLS yolu varsayılmıyor, çalıştırılıyor
 policies/             cluster politikası, bilerek chart'ın dışında
   namespace.yaml      Pod Security Admission etiketleri
   admission-*.yaml    ValidatingAdmissionPolicy kuralları ve bağlamaları
 scripts/
   bootstrap.sh        idempotent cluster + ingress + politikalar + deploy
   policy-test.sh      her kuralın doğru şeyi reddettiğini kanıtlayan 8 kontrol
-  smoke-test.sh       güvenlik duruşu dahil 35 uçtan uca kontrol
+  smoke-test.sh       güvenlik duruşu ve izolasyon dahil 35 uçtan uca kontrol
   teardown.sh         cluster'ı siler
 docs/
   DEPLOY.md           herkese açık bir adrese alma kılavuzu
