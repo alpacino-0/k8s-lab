@@ -1,0 +1,93 @@
+# The cluster's copy of this release is whatever is in git.
+#
+# CI and Argo CD do different jobs and the split is deliberate: CI proves a
+# change in a cluster it throws away, Argo CD applies it to one that persists.
+# A pipeline that runs `helm upgrade` against a long-lived cluster works right
+# up until someone runs kubectl by hand at 2am, and then the manifests in git
+# and the objects in the cluster disagree with nobody noticing.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: k8s-lab
+  namespace: argocd
+  finalizers:
+    # Deleting the Application should take its resources with it rather than
+    # orphaning them.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/alpacino-0/k8s-lab.git
+    targetRevision: main
+    path: chart
+    helm:
+      valueFiles:
+        - values-public.yaml
+      # Overrides for this cluster. In a real deployment these live in a second
+      # values file in git; kept inline here so the file reads as one unit.
+      values: |
+        ingress:
+          host: gitops.local
+          tls:
+            enabled: true
+            clusterIssuer: selfsigned-ca
+            secretName: gitops-tls
+        # A demo of drift correction does not need six replicas.
+        replicaCount: 2
+        autoscaling:
+          enabled: false
+        podDisruptionBudget:
+          enabled: false
+        web:
+          replicaCount: 1
+        postgres:
+          persistence:
+            size: 1Gi
+          backup:
+            enabled: false
+        config:
+          APP_ENV: gitops
+          GREETING: Synced
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: k8s-lab-gitops
+
+  # StatefulSet volumeClaimTemplates come back from the API server carrying
+  # apiVersion, kind and a status block that no manifest can set. Without this
+  # the Application sits at OutOfSync forever while being perfectly in sync,
+  # which trains everyone to ignore the one signal GitOps exists to give.
+  #
+  # Scoped to the three fields the server owns rather than the whole
+  # volumeClaimTemplates block, so a real change to storage size is still seen.
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      jqPathExpressions:
+        - '.spec.volumeClaimTemplates[]?.apiVersion'
+        - '.spec.volumeClaimTemplates[]?.kind'
+        - '.spec.volumeClaimTemplates[]?.status'
+
+  syncPolicy:
+    automated:
+      prune: true      # something deleted from git is deleted from the cluster
+      selfHeal: true   # something changed by hand is changed back
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    managedNamespaceMetadata:
+      labels:
+        # The namespace joins the admission policies by carrying the label,
+        # so a GitOps-managed release is held to the same rules as a
+        # hand-deployed one.
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/audit: restricted
+        pod-security.kubernetes.io/warn: restricted
+        k8s-lab.dev/policies: enforced
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

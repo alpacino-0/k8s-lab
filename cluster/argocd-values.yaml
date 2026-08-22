@@ -1,0 +1,40 @@
+# Argo CD, trimmed to what a single-tenant cluster needs.
+#
+# Dex (SSO), notifications and the ApplicationSet controller are all off: they
+# solve problems this cluster does not have, and each is another pod competing
+# for memory with the application it is supposed to deploy.
+global:
+  domain: argocd.local
+
+dex:
+  enabled: false
+notifications:
+  enabled: false
+applicationSet:
+  enabled: false
+
+configs:
+  params:
+    server.insecure: true          # TLS terminates at the ingress, not here
+    application.namespaces: "k8s-lab-*"
+  cm:
+    # Reconcile more often than the 3-minute default so drift correction is
+    # observable in a demo rather than something you wait out.
+    timeout.reconciliation: 30s
+
+controller:
+  resources:
+    requests: { cpu: 50m, memory: 192Mi }
+    limits: { memory: 640Mi }
+repoServer:
+  resources:
+    requests: { cpu: 25m, memory: 96Mi }
+    limits: { memory: 320Mi }
+server:
+  resources:
+    requests: { cpu: 25m, memory: 64Mi }
+    limits: { memory: 192Mi }
+redis:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { memory: 128Mi }
