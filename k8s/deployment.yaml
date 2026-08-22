@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-lab-app
+spec:
+  replicas: 3                    # ISTEDIGIM DURUM: her zaman 3 kopya
+  selector:
+    matchLabels:
+      app: k8s-lab-app           # bu etikete sahip pod'lar benim
+  template:                      # asagisi = pod'un tarifi
+    metadata:
+      labels:
+        app: k8s-lab-app
+    spec:
+      containers:
+        - name: web
+          image: k8s-lab-app:1.0
+          imagePullPolicy: IfNotPresent   # yerel imaji kullan, Docker Hub'a gitme
+          ports:
+            - containerPort: 3000
+          readinessProbe:        # "trafik alabilir mi?"
+            httpGet:
+              path: /healthz
+              port: 3000
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:         # "hala hayatta mi? degilse oldur ve yeniden kur"
+            httpGet:
+              path: /healthz
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:            # scheduler bu degere gore node secer
+              cpu: 50m
+              memory: 64Mi
+            limits:              # bu siniri asarsa mudahale edilir
+              cpu: 200m
+              memory: 128Mi
