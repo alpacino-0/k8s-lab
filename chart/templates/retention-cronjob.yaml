@@ -62,6 +62,8 @@ spec:
                     "DELETE FROM notes WHERE created_at < now() - interval '${RETENTION_HOURS} hours';"
                   psql -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -c \
                     "SELECT 'remaining notes: ' || count(*) FROM notes;"
+              resources:
+                {{- toYaml .Values.jobResources | nindent 16 }}
               volumeMounts:
                 - name: tmp
                   mountPath: /tmp

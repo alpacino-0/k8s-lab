@@ -42,6 +42,12 @@ else
   log "ingress-nginx already installed"
 fi
 
+log "applying cluster policies"
+# The namespace carries the Pod Security Admission labels, so it is created
+# here rather than by --create-namespace.
+kubectl apply -f "$ROOT/policies/namespace.yaml"
+kubectl apply -f "$ROOT/policies/admission-policies.yaml" -f "$ROOT/policies/admission-bindings.yaml"
+
 log "deploying release '$RELEASE' to namespace '$NAMESPACE'"
 # Deliberately no --wait: it also waits for the backup PVC, which stays Pending
 # under a WaitForFirstConsumer StorageClass until its first consumer runs.

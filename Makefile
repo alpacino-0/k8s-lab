@@ -7,7 +7,7 @@ IMAGE       ?= k8s-lab-app
 IMAGE_TAG   ?= 1.0.0
 
 .DEFAULT_GOAL := help
-.PHONY: help test lint build web up down deploy smoke logs monitoring port-forward clean
+.PHONY: help test lint build web up down deploy smoke policies policy-test logs monitoring port-forward clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -48,6 +48,13 @@ deploy: build ## Rebuild the images and upgrade the release
 
 smoke: ## Run the end-to-end smoke test against the deployed release
 	NAMESPACE=$(NAMESPACE) RELEASE=$(RELEASE) ./scripts/smoke-test.sh
+
+policies: ## Apply Pod Security Admission labels and the admission policies
+	kubectl apply -f policies/namespace.yaml
+	kubectl apply -f policies/admission-policies.yaml -f policies/admission-bindings.yaml
+
+policy-test: ## Prove each policy rejects what it is supposed to
+	NAMESPACE=$(NAMESPACE) ./scripts/policy-test.sh
 
 logs: ## Tail application logs
 	kubectl -n $(NAMESPACE) logs -l app.kubernetes.io/name=k8s-lab-app -f --tail=50

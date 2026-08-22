@@ -95,6 +95,8 @@ variables the kubelet injects — and the browser simply counts what came back.
 | `make deploy` | Rebuild both images and upgrade the release |
 | `make web` | Run the interface locally against a port-forwarded backend |
 | `make smoke` | End-to-end checks against the running deployment |
+| `make policies` | Apply the admission policies |
+| `make policy-test` | Prove each policy rejects what it is supposed to |
 | `make monitoring` | Install Prometheus + Grafana |
 | `make down` | Delete the cluster |
 
@@ -117,6 +119,7 @@ variables the kubelet injects — and the browser simply counts what came back.
 | Multi-stage image, production deps only | `app/Dockerfile` | Trivy blocks CRITICAL/HIGH findings in CI |
 | npm removed from the runtime image | `app/Dockerfile` | eliminated **every** Node.js package CVE (see below) |
 | No secrets in git | `.gitignore` + chart values | password is a required chart value |
+| Security settings are enforced, not just set | Pod Security Admission + ValidatingAdmissionPolicy | 8 policy tests: one compliant manifest admitted, seven broken ones each rejected |
 | Notes isolated per visitor | anonymous cookie, owner-scoped queries | a second visitor cannot read or delete the first one's notes |
 | Writes bounded | ingress `limit-rps` + a shared window + a note cap | oversized and over-quota writes are rejected |
 | Rate limits bind across replicas | Redis sliding window | 60 requests against a limit of 30: **29 allowed** shared, **60 allowed** per replica |
@@ -125,6 +128,41 @@ variables the kubelet injects — and the browser simply counts what came back.
 The egress policy explicitly allows DNS. Forgetting that rule is the most common
 way a default-deny policy silently breaks an application: name resolution fails
 and every outbound call times out with no obvious cause.
+
+### Enforcement
+
+The chart sets a careful security context on every workload. Until recently
+nothing stopped a careless one from being deployed next to it — the settings
+were a convention, not a rule.
+
+Two layers close that, both built into Kubernetes:
+
+- **Pod Security Admission** at `restricted` on the namespace: no root, no
+  privilege escalation, no capabilities, no host namespaces, no hostPath, seccomp
+  required. Everything here already passed it, including PostgreSQL and every
+  hook Job.
+- **ValidatingAdmissionPolicy** for what PSA has no opinion about: resource
+  requests and limits, pinned image tags, a registry allowlist, read-only root
+  filesystems, no service-account tokens, and probes on anything long-running.
+
+Turning them on found two real gaps in this repository on the first apply: the
+PostgreSQL StatefulSet was not disabling its service-account token, and none of
+the migration or backup Jobs had resource bounds. Both are fixed; the policies
+are what would have caught them earlier.
+
+These began as Kyverno policies and were rewritten. Kyverno had deprecated the
+API in question, and every rule turned out to be expressible in the built-in
+engine, which runs in the API server:
+
+| | Kyverno | ValidatingAdmissionPolicy |
+|---|---|---|
+| Pods to run | 2 | 0 |
+| Memory, measured | 122 Mi | none |
+| API status | `ClusterPolicy` deprecated | GA since 1.30 |
+
+A policy engine earns its keep for mutation, cross-namespace generation, or
+image signature verification. None of those are needed yet — see
+[policies/README.md](policies/README.md).
 
 ### Reliability
 
@@ -169,7 +207,7 @@ Five jobs on every push ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
 | `test` | ESLint and 27 tests for the API; ESLint and a production build for the interface |
 | `manifests` | `helm lint`, renders all three values profiles, kubeconform schema validation, hadolint on both Dockerfiles |
 | `image` | Builds both images, asserts each is non-root, boots each read-only, Trivy scan (fails on CRITICAL/HIGH) |
-| `e2e` | Creates a real kind cluster, installs the chart, checks both ingress routes, runs the 35-check smoke test, then proves an upgrade drops zero requests |
+| `e2e` | Creates a real kind cluster, applies the policies **before** the chart so the release has to satisfy them, runs the 8 policy checks and the 35-check smoke test, then proves an upgrade drops zero requests |
 | `publish` | Pushes both images to GHCR for amd64 and arm64, with SBOM and provenance attestation (main only) |
 
 ---
@@ -190,8 +228,12 @@ chart/                Helm chart — the single deployment path
   values-dev.yaml     minimal footprint, demo endpoints on
   values-prod.yaml    autoscaling, backups, monitoring, network policies
   values-public.yaml  GHCR images, TLS, external secret — for a public address
+policies/             cluster policy, kept out of the chart on purpose
+  namespace.yaml      Pod Security Admission labels
+  admission-*.yaml    ValidatingAdmissionPolicy rules and their bindings
 scripts/
-  bootstrap.sh        idempotent cluster + ingress + deploy
+  bootstrap.sh        idempotent cluster + ingress + policies + deploy
+  policy-test.sh      8 checks that each rule rejects what it should
   smoke-test.sh       35 end-to-end checks including security posture
   teardown.sh         destroy the cluster
 docs/

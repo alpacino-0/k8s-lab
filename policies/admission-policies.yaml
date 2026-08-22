@@ -1,0 +1,152 @@
+# Validation rules enforced by Kubernetes itself.
+#
+# These were first written as Kyverno ClusterPolicies. Kyverno deprecated that
+# API, but the more interesting problem was that none of these rules need a
+# policy engine at all: ValidatingAdmissionPolicy has been GA since 1.30, runs
+# inside the API server, and costs no pods, no memory and no upgrade path.
+#
+# Kyverno stays for the one thing this cannot do — verifying image signatures.
+#
+# Each policy binds to both the Pod and its controller. Binding to the Pod is
+# what actually enforces; binding to the controller is what makes `kubectl
+# apply` fail immediately instead of leaving a Deployment that quietly never
+# produces a pod.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: k8s-lab-resource-bounds
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments", "statefulsets", "daemonsets"]
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["jobs"]
+  variables:
+    - name: containers
+      expression: >-
+        has(object.spec.template) ? object.spec.template.spec.containers : object.spec.containers
+  validations:
+    - expression: >-
+        variables.containers.all(c,
+          has(c.resources) && has(c.resources.requests)
+          && 'cpu' in c.resources.requests && 'memory' in c.resources.requests
+          && has(c.resources.limits) && 'memory' in c.resources.limits)
+      message: >-
+        Every container needs CPU and memory requests and a memory limit.
+        Without requests the scheduler is guessing and the autoscaler cannot
+        work; without a memory limit one container can take down its node.
+      reason: Invalid
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: k8s-lab-image-provenance
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments", "statefulsets", "daemonsets"]
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["jobs"]
+  variables:
+    - name: containers
+      expression: >-
+        has(object.spec.template) ? object.spec.template.spec.containers : object.spec.containers
+  validations:
+    - expression: >-
+        variables.containers.all(c, c.image.contains(':') && !c.image.endsWith(':latest'))
+      message: >-
+        Images must carry an explicit version. ":latest" and a bare repository
+        name both mean "whatever is there today", which makes a rollback
+        restore something other than what was rolled back from.
+      reason: Invalid
+    - expression: >-
+        variables.containers.all(c,
+          c.image.startsWith('ghcr.io/alpacino-0/')
+          || c.image.startsWith('k8s-lab-')
+          || c.image.startsWith('postgres:')
+          || c.image.startsWith('redis:'))
+      message: >-
+        Images must come from ghcr.io/alpacino-0, the official postgres or
+        redis repositories, or be one of this project's locally built
+        k8s-lab-* images.
+      reason: Invalid
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: k8s-lab-workload-hygiene
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments", "statefulsets", "daemonsets"]
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["jobs"]
+  variables:
+    - name: podSpec
+      expression: >-
+        has(object.spec.template) ? object.spec.template.spec : object.spec
+    - name: isTask
+      expression: >-
+        (has(object.spec.template)
+          ? (has(object.spec.template.metadata) && has(object.spec.template.metadata.labels)
+             && object.spec.template.metadata.labels['app.kubernetes.io/component'] == 'database-job')
+          : (has(object.metadata.labels)
+             && object.metadata.labels['app.kubernetes.io/component'] == 'database-job'))
+  validations:
+    - expression: >-
+        variables.podSpec.containers.all(c,
+          has(c.securityContext) && has(c.securityContext.readOnlyRootFilesystem)
+          && c.securityContext.readOnlyRootFilesystem == true)
+      message: >-
+        Containers must run with a read-only root filesystem. Mount an emptyDir
+        wherever the process genuinely needs to write — every workload here
+        does, PostgreSQL included.
+      reason: Invalid
+    - expression: >-
+        has(variables.podSpec.automountServiceAccountToken)
+        && variables.podSpec.automountServiceAccountToken == false
+      message: >-
+        Set automountServiceAccountToken to false. A token mounted into a pod
+        that never calls the Kubernetes API is a credential waiting to be
+        stolen; opt in explicitly where one is genuinely needed.
+      reason: Invalid
+    # A task that runs once and exits has nothing to probe, so it is exempt.
+    - expression: >-
+        variables.isTask
+        || variables.podSpec.containers.all(c, has(c.readinessProbe) && has(c.livenessProbe))
+      message: >-
+        Long-running containers need a readiness and a liveness probe. Without
+        readiness a pod takes traffic before it can serve it; without liveness a
+        wedged process is never noticed.
+      reason: Invalid

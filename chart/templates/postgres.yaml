@@ -45,6 +45,7 @@ spec:
       labels:
         {{- include "postgres.selectorLabels" . | nindent 8 }}
     spec:
+      automountServiceAccountToken: false   # PostgreSQL never calls the API
       terminationGracePeriodSeconds: 60     # let PostgreSQL checkpoint cleanly
       securityContext:
         runAsNonRoot: true
@@ -58,7 +59,11 @@ spec:
           image: {{ .Values.postgres.image | quote }}
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: false     # PostgreSQL writes to its data dir
+            # PostgreSQL writes only to its data directory, its socket
+            # directory and /tmp — all mounted volumes. The root filesystem
+            # can stay read-only, which was verified before the policy that
+            # requires it was written.
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           envFrom:
@@ -75,6 +80,8 @@ spec:
               mountPath: /var/lib/postgresql/data
             - name: run
               mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
           readinessProbe:
             exec:
               command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB -q"]
@@ -91,6 +98,9 @@ spec:
       volumes:
         - name: run
           emptyDir: {}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
   volumeClaimTemplates:
     - metadata:
         name: data

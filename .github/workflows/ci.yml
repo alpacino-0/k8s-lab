@@ -69,11 +69,15 @@ jobs:
             echo "::endgroup::"
           done
 
-      - name: Validate rendered manifests against the Kubernetes schema
+      - name: Validate the policy manifests
         run: |
           curl -sSLo kubeconform.tar.gz \
             https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
           tar xf kubeconform.tar.gz kubeconform
+          ./kubeconform -strict -summary policies/
+
+      - name: Validate rendered manifests against the Kubernetes schema
+        run: |
           helm template ci chart -f chart/values-prod.yaml --set postgres.auth.password=ci \
             | ./kubeconform -strict -summary -ignore-missing-schemas -
 
@@ -186,10 +190,20 @@ jobs:
           docker build -t "k8s-lab-web:${IMAGE_TAG}" ./web
           kind load docker-image "k8s-lab-app:${IMAGE_TAG}" "k8s-lab-web:${IMAGE_TAG}" --name ci
 
+      # Applied before the chart, so the release has to satisfy them rather than
+      # being grandfathered in.
+      - name: Apply cluster policies
+        run: |
+          kubectl apply -f policies/namespace.yaml
+          kubectl apply -f policies/admission-policies.yaml -f policies/admission-bindings.yaml
+
+      - name: Policies must reject what they are meant to
+        run: NAMESPACE=k8s-lab IMAGE="k8s-lab-app:${IMAGE_TAG}" ./scripts/policy-test.sh
+
       - name: Install the chart
         run: |
           helm upgrade --install app ./chart \
-            --namespace k8s-lab --create-namespace \
+            --namespace k8s-lab \
             --set image.tag="${IMAGE_TAG}" \
             --set web.image.tag="${IMAGE_TAG}" \
             --set postgres.auth.password=ci-password \

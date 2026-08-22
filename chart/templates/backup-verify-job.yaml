@@ -65,6 +65,8 @@ spec:
               SIZE=$(wc -c < "$OUT")
               [ "$SIZE" -gt 100 ] || { echo "backup suspiciously small: $SIZE bytes"; exit 1; }
               echo "verified backup $OUT ($SIZE bytes)"
+          resources:
+            {{- toYaml .Values.jobResources | nindent 12 }}
           volumeMounts:
             - name: backup
               mountPath: /backup

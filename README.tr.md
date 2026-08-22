@@ -93,6 +93,8 @@ değişkenleri — ve tarayıcı sadece geleni sayıyor.
 | `make deploy` | İki imajı da yeniden derler ve sürümü günceller |
 | `make web` | Arayüzü yerelde, port-forward edilmiş backend'e karşı çalıştırır |
 | `make smoke` | Çalışan deployment'a karşı uçtan uca kontroller |
+| `make policies` | Kabul politikalarını uygular |
+| `make policy-test` | Her politikanın doğru şeyi reddettiğini kanıtlar |
 | `make monitoring` | Prometheus + Grafana kurar |
 | `make down` | Cluster'ı siler |
 
@@ -115,6 +117,7 @@ değişkenleri — ve tarayıcı sadece geleni sayıyor.
 | Multi-stage imaj, yalnız üretim bağımlılıkları | `app/Dockerfile` | CI'da Trivy CRITICAL/HIGH bulguda durdurur |
 | npm runtime imajından çıkarıldı | `app/Dockerfile` | **tüm** Node.js paket CVE'lerini sıfırladı (aşağıda) |
 | Git'te secret yok | `.gitignore` + chart values | parola zorunlu bir chart değeri |
+| Güvenlik ayarları zorunlu, sadece yazılı değil | Pod Security Admission + ValidatingAdmissionPolicy | 8 politika testi: bir uyumlu manifest kabul, yedi bozuk manifest ayrı ayrı red |
 | Notlar ziyaretçi başına izole | anonim çerez, owner'a göre filtrelenmiş sorgular | ikinci bir ziyaretçi ilkinin notunu ne görür ne siler |
 | Yazma sınırlı | ingress `limit-rps` + paylaşımlı pencere + not tavanı | uzun ve kota aşan yazmalar reddedilir |
 | Limitler replikalar arası bağlayıcı | Redis kayan pencere | limit 30 iken 60 istek: paylaşımlı **29 geçti**, replika başına **60 geçti** |
@@ -123,6 +126,41 @@ değişkenleri — ve tarayıcı sadece geleni sayıyor.
 Egress politikası **DNS'e açıkça izin verir**. Bu kuralı unutmak, varsayılan-reddet
 politikasının uygulamayı sessizce bozmasının en yaygın yoludur: isim çözümlemesi
 başarısız olur ve her dış çağrı sebebi belli olmayan bir zaman aşımına düşer.
+
+### Zorlama
+
+Chart her iş yüküne özenli bir güvenlik bağlamı yazıyor. Ama yakın zamana kadar
+hiçbir şey, yanına özensiz bir iş yükünün kurulmasını engellemiyordu — ayarlar
+bir teamüldü, kural değil.
+
+İkisi de Kubernetes'in içinde olan iki katman bunu kapatıyor:
+
+- **Pod Security Admission**, namespace'te `restricted`: root yok, yetki
+  yükseltme yok, capability yok, host namespace yok, hostPath yok, seccomp
+  zorunlu. Buradaki her şey zaten geçiyordu — PostgreSQL ve tüm hook Job'ları dahil.
+- **ValidatingAdmissionPolicy**, PSA'nın görüş bildirmediği konular için: kaynak
+  istek ve limitleri, sabitlenmiş imaj etiketleri, registry beyaz listesi,
+  salt-okunur kök dosya sistemi, ServiceAccount token'ı yasağı ve uzun çalışan
+  her şeyde probe zorunluluğu.
+
+Bunları açmak, ilk uygulamada bu repoda **iki gerçek açık buldu**: PostgreSQL
+StatefulSet'i ServiceAccount token'ını kapatmıyordu ve migration/yedekleme
+Job'larının hiçbirinde kaynak sınırı yoktu. İkisi de düzeltildi; politikalar
+zaten bunları daha erken yakalayacak olan şey.
+
+Bunlar Kyverno politikası olarak başladı ve yeniden yazıldı. Kyverno ilgili
+API'yi kullanımdan kaldırmıştı ve daha önemlisi, her kural API sunucusunun
+içinde çalışan yerleşik motorla ifade edilebiliyordu:
+
+| | Kyverno | ValidatingAdmissionPolicy |
+|---|---|---|
+| Çalışan pod | 2 | 0 |
+| Ölçülen bellek | 122 Mi | yok |
+| API durumu | `ClusterPolicy` kullanımdan kalkıyor | 1.30'dan beri GA |
+
+Politika motoru; mutasyon, namespace'ler arası üretim veya imaj imzası
+doğrulaması gerektiğinde hak eder. Henüz hiçbirine ihtiyaç yok —
+[policies/README.md](policies/README.md).
 
 ### Dayanıklılık
 
@@ -166,7 +204,7 @@ Her push'ta beş job ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
 | `test` | API için ESLint + 27 test; arayüz için ESLint + üretim derlemesi |
 | `manifests` | `helm lint`, üç values profili, kubeconform şema denetimi, iki Dockerfile için hadolint |
 | `image` | İki imajı derler, ikisinin de root olmadığını doğrular, salt-okunur başlatır, Trivy taraması |
-| `e2e` | Gerçek kind cluster kurar, chart'ı yükler, iki ingress yolunu da denetler, 35 kontrolü çalıştırır, ardından bir upgrade'in **sıfır istek düşürdüğünü** kanıtlar |
+| `e2e` | Gerçek kind cluster kurar, politikaları **chart'tan önce** uygular (yani sürüm onlara uymak zorunda), 8 politika kontrolünü ve 35 duman kontrolünü çalıştırır, ardından bir upgrade'in **sıfır istek düşürdüğünü** kanıtlar |
 | `publish` | İki imajı da amd64 + arm64 için GHCR'a, SBOM ve provenance ile push eder (yalnız main) |
 
 ---
@@ -187,8 +225,12 @@ chart/                Helm chart — tek deploy yolu
   values-dev.yaml     minimum ayak izi, demo uçları açık
   values-prod.yaml    otomatik ölçekleme, yedekleme, izleme, ağ politikaları
   values-public.yaml  GHCR imajları, TLS, harici secret — herkese açık adres için
+policies/             cluster politikası, bilerek chart'ın dışında
+  namespace.yaml      Pod Security Admission etiketleri
+  admission-*.yaml    ValidatingAdmissionPolicy kuralları ve bağlamaları
 scripts/
-  bootstrap.sh        idempotent cluster + ingress + deploy
+  bootstrap.sh        idempotent cluster + ingress + politikalar + deploy
+  policy-test.sh      her kuralın doğru şeyi reddettiğini kanıtlayan 8 kontrol
   smoke-test.sh       güvenlik duruşu dahil 35 uçtan uca kontrol
   teardown.sh         cluster'ı siler
 docs/

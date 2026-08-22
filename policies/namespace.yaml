@@ -1,0 +1,18 @@
+# Pod Security Admission, enforced at the namespace.
+#
+# enforce  — rejects the pod
+# audit    — records a violation in the audit log
+# warn     — returns a warning to whoever submitted it
+#
+# All three are set to restricted: enforcement blocks, and the other two make
+# violations visible for anything that bypasses the check (existing pods,
+# subresources).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8s-lab
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
