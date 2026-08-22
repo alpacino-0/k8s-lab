@@ -1,0 +1,97 @@
+{{- if .Values.networkPolicy.enabled }}
+# 1) Deny everything to and from the app pods, then open only what is needed.
+#    Kubernetes has no built-in default-deny: without this, every pod in the
+#    cluster can reach every other pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "app.fullname" . }}-default-deny
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "app.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "app.fullname" . }}-allow
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "app.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Traffic from the ingress controller.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+      ports:
+        - protocol: TCP
+          port: 3000
+    # Prometheus scraping /metrics.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - protocol: TCP
+          port: 3000
+  egress:
+    # DNS. Forgetting this is the most common way a default-deny policy breaks
+    # an application: name resolution fails and every outbound call times out.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- if .Values.postgres.enabled }}
+    # PostgreSQL.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "postgres.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- end }}
+{{- if .Values.postgres.enabled }}
+---
+# 2) The database accepts connections only from the application and the
+#    migration job — nothing else in the cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "postgres.fullname" . }}-allow
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "postgres.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "app.selectorLabels" . | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: database-job
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
+{{- end }}

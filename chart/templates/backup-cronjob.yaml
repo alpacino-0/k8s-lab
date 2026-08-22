@@ -1,0 +1,92 @@
+{{- if and .Values.postgres.enabled .Values.postgres.backup.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "postgres.fullname" . }}-backup
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.postgres.backup.size }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "postgres.fullname" . }}-backup
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.postgres.backup.schedule | quote }}
+  concurrencyPolicy: Forbid       # never let two dumps overlap
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels:
+            {{- include "app.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: database-job
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            fsGroup: 70
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: dump
+              image: {{ .Values.postgres.image | quote }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: DB_HOST
+                  value: {{ include "postgres.host" . | quote }}
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "postgres.fullname" . }}
+                      key: POSTGRES_PASSWORD
+                - name: RETAIN_DAYS
+                  value: {{ .Values.postgres.backup.retainDays | quote }}
+              envFrom:
+                - secretRef:
+                    name: {{ include "postgres.fullname" . }}
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  STAMP=$(date +%Y%m%d-%H%M%S)
+                  OUT="/backup/${POSTGRES_DB}-${STAMP}.sql.gz"
+                  echo "dumping to $OUT"
+                  pg_dump -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+                    --no-owner --no-privileges | gzip > "$OUT"
+                  # A dump that cannot be read is not a backup — verify it.
+                  gzip -t "$OUT"
+                  echo "size: $(wc -c < "$OUT") bytes"
+                  find /backup -name '*.sql.gz' -mtime "+${RETAIN_DAYS}" -delete
+                  echo "retained backups:"; ls -1 /backup
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: backup
+              persistentVolumeClaim:
+                claimName: {{ include "postgres.fullname" . }}-backup
+            - name: tmp
+              emptyDir: {}
+{{- end }}

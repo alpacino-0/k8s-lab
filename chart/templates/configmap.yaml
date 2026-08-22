@@ -5,6 +5,9 @@ metadata:
   labels:
     {{- include "app.labels" . | nindent 4 }}
 data:
-  {{- range $anahtar, $deger := .Values.config }}
-  {{ $anahtar }}: {{ $deger | quote }}
+  {{- range $key, $value := .Values.config }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+  {{- if .Values.postgres.enabled }}
+  DB_HOST: {{ include "postgres.host" . | quote }}
   {{- end }}

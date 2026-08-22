@@ -1,8 +1,38 @@
+# Local development: minimal footprint, demo endpoints on, no autoscaling.
 replicaCount: 1
+
 config:
-  ORTAM: "dev"
-  LOG_SEVIYE: "debug"
-  KARSILAMA: "Naber"
+  APP_ENV: development
+  LOG_LEVEL: debug
+  GREETING: Hi
+  DEMO_ENDPOINTS: "true"      # enables /burn so the HPA measurements can be reproduced
+
+autoscaling:
+  enabled: false
+
+podDisruptionBudget:
+  enabled: false
+
 resources:
-  requests: { cpu: 25m, memory: 32Mi }
-  limits:   { cpu: 100m, memory: 64Mi }
+  requests:
+    cpu: 25m
+    memory: 48Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+ingress:
+  host: dev.local
+
+postgres:
+  auth:
+    password: dev-only-password
+  backup:
+    enabled: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi

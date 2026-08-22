@@ -1,3 +1,21 @@
-node_modules
+# dependencies
+node_modules/
+.npm
+
+# local secrets — never commit real values
+*.secret.yaml
+secrets/
+.env
+.env.*
+
+# build artefacts
+coverage/
+*.tgz
+*.tar
+kubeconform
+
+# editors / OS
 .DS_Store
-k8s/secret.yaml
+.idea/
+.vscode/
+*.swp

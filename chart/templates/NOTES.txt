@@ -1,8 +1,23 @@
-{{ .Chart.Name }} kuruldu — release: {{ .Release.Name }}, namespace: {{ .Release.Namespace }}
+{{ .Chart.Name }} {{ .Chart.AppVersion }} deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
 
-Replica: {{ if .Values.autoscaling.enabled }}HPA ({{ .Values.autoscaling.minReplicas }}-{{ .Values.autoscaling.maxReplicas }}){{ else }}{{ .Values.replicaCount }}{{ end }}
-Ortam  : {{ .Values.config.ORTAM }}
+  Replicas   : {{ if .Values.autoscaling.enabled }}HPA {{ .Values.autoscaling.minReplicas }}-{{ .Values.autoscaling.maxReplicas }} (target {{ .Values.autoscaling.targetCPUUtilizationPercentage }}% CPU){{ else }}{{ .Values.replicaCount }} (fixed){{ end }}
+  Environment: {{ .Values.config.APP_ENV }}
+  Database   : {{ if .Values.postgres.enabled }}{{ include "postgres.host" . }}{{ else }}disabled{{ end }}
+  Backups    : {{ if and .Values.postgres.enabled .Values.postgres.backup.enabled }}{{ .Values.postgres.backup.schedule }}, kept {{ .Values.postgres.backup.retainDays }} days{{ else }}disabled{{ end }}
+  NetworkPol.: {{ if .Values.networkPolicy.enabled }}default-deny + explicit allows{{ else }}DISABLED{{ end }}
 
-Test icin:
-  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "app.fullname" . }} 8081:{{ .Values.service.port }}
-  curl localhost:8081
+Check the rollout:
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "app.fullname" . }}
+
+Reach the service:
+{{- if .Values.ingress.enabled }}
+  http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}/
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "app.fullname" . }} 8080:{{ .Values.service.port }}
+{{- end }}
+
+{{- if eq .Values.postgres.auth.password "change-me" }}
+
+WARNING: the database password is still the chart default. Override it:
+  helm upgrade {{ .Release.Name }} ... --set postgres.auth.password=<strong-password>
+{{- end }}
