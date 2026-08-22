@@ -8,4 +8,4 @@ keywords: [kubernetes, nodejs, postgresql, observability]
 maintainers:
   - name: orhan
 sources:
-  - https://github.com/orhan/k8s-lab
+  - https://github.com/alpacino-0/k8s-lab

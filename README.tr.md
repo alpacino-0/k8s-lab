@@ -1,5 +1,10 @@
 # k8s-lab
 
+[![CI](https://github.com/alpacino-0/k8s-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/alpacino-0/k8s-lab/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Kubernetes](https://img.shields.io/badge/kubernetes-1.36-326ce5?logo=kubernetes&logoColor=white)
+![Helm](https://img.shields.io/badge/helm-3-0f1689?logo=helm&logoColor=white)
+
 Node.js + PostgreSQL servisinin Kubernetes'e **üretimde çalıştırılacağı gibi**
 kurulduğu proje: root olmayan konteynerler, salt-okunur dosya sistemi,
 varsayılan-reddet ağ politikaları, sürüm başına bir kez çalışan şema migration'ı,
@@ -55,7 +60,7 @@ flowchart TB
 Gerekenler: Docker, [kind](https://kind.sigs.k8s.io/), kubectl, Helm.
 
 ```bash
-git clone https://github.com/<kullanici>/k8s-lab.git && cd k8s-lab
+git clone https://github.com/alpacino-0/k8s-lab.git && cd k8s-lab
 make up                                    # cluster + ingress + build + deploy
 echo "127.0.0.1 app.local" | sudo tee -a /etc/hosts
 curl app.local:8080
