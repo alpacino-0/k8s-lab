@@ -237,6 +237,49 @@ jobs:
           kubectl -n k8s-lab set env deployment/app-k8s-lab-app READS_PER_MINUTE-
           kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app --timeout=300s
 
+      # TLS is exercised, not just prepared. The only difference from a public
+      # deployment is who signed the certificate: the Certificate resource, the
+      # secret, the nginx TLS listener, the redirect and the Secure cookie are
+      # the same objects doing the same work.
+      - name: Issue a certificate and serve HTTPS
+        run: |
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+          kubectl wait -n cert-manager --for=condition=Available deployment --all --timeout=300s
+          kubectl apply -f cluster/issuers.yaml
+          kubectl wait --for=condition=Ready clusterissuer/selfsigned-ca --timeout=120s
+
+          helm upgrade app ./chart -n k8s-lab \
+            --set image.tag="${IMAGE_TAG}" --set web.image.tag="${IMAGE_TAG}" \
+            --set postgres.auth.password=ci-password \
+            --set ingress.tls.enabled=true \
+            --set ingress.tls.clusterIssuer=selfsigned-ca \
+            --set config.SECURE_COOKIE=true --timeout 10m
+          kubectl -n k8s-lab wait --for=condition=Ready certificate/k8s-lab-app-tls --timeout=180s
+          kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app --timeout=300s
+
+      - name: HTTPS, the redirect and the Secure cookie must all work
+        run: |
+          for _ in $(seq 1 30); do
+            curl -sk -o /dev/null https://localhost:8443/api/healthz -H 'Host: app.local' && break || sleep 2
+          done
+          # served over TLS
+          curl -sk -H 'Host: app.local' https://localhost:8443/api/healthz | grep -q ok
+          # the certificate is the one cert-manager issued
+          echo | openssl s_client -connect localhost:8443 -servername app.local 2>/dev/null \
+            | openssl x509 -noout -issuer | grep -q 'k8s-lab local CA'
+          # plain HTTP is redirected, not served
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: app.local' http://localhost:8080/api/healthz)
+          echo "http -> $code"; [ "$code" = "308" ]
+          # and the visitor cookie is only sent over TLS
+          curl -sk -D - -o /dev/null -H 'Host: app.local' https://localhost:8443/api/stats | grep -i 'set-cookie' | grep -q 'Secure'
+
+      - name: Back to plain HTTP for the remaining checks
+        run: |
+          helm upgrade app ./chart -n k8s-lab \
+            --set image.tag="${IMAGE_TAG}" --set web.image.tag="${IMAGE_TAG}" \
+            --set postgres.auth.password=ci-password --timeout 10m
+          kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app --timeout=300s
+
       - name: Ingress must route both tiers
         run: |
           for _ in $(seq 1 30); do

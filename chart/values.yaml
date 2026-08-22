@@ -137,10 +137,15 @@ ingress:
   tls:
     enabled: false
     secretName: k8s-lab-app-tls
-    # Name of a cert-manager ClusterIssuer. When set, cert-manager watches the
-    # Ingress and issues the certificate into secretName on its own — no
-    # Certificate resource to maintain here.
+    # Name of a cert-manager ClusterIssuer. When set, the chart creates a
+    # Certificate that both Ingress objects consume. Leave empty to supply the
+    # secret yourself.
     clusterIssuer: ""
+    # Let's Encrypt issues for 90 days and cert-manager renews at two thirds of
+    # the lifetime by default; stating both makes the intent explicit and lets
+    # a private CA use a longer one.
+    duration: 2160h        # 90 days
+    renewBefore: 720h      # 30 days
   annotations: {}
 
 resources:

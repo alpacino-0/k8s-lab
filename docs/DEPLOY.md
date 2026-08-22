@@ -75,26 +75,17 @@ kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/
 kubectl wait -n cert-manager --for=condition=Available deployment --all --timeout=300s
 ```
 
-Create the issuer — replace the email, it receives expiry warnings:
+Create the issuers from the template — set the email, it receives expiry
+warnings:
 
 ```bash
-kubectl apply -f - <<'EOF'
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
-metadata:
-  name: letsencrypt-prod
-spec:
-  acme:
-    server: https://acme-v02.api.letsencrypt.org/directory
-    email: you@example.com
-    privateKeySecretRef:
-      name: letsencrypt-prod-account
-    solvers:
-      - http01:
-          ingress:
-            ingressClassName: nginx
-EOF
+cp cluster/issuers-letsencrypt.yaml.example cluster/issuers-letsencrypt.yaml
+# edit the email address, then
+kubectl apply -f cluster/issuers-letsencrypt.yaml
 ```
+
+Rehearse against staging first (`--set ingress.tls.clusterIssuer=letsencrypt-staging`),
+confirm a certificate is issued, then switch to `letsencrypt-prod`.
 
 > Let's Encrypt rate-limits failed attempts hard. Point the DNS record at the
 > server and confirm it resolves *before* creating the issuer, and use

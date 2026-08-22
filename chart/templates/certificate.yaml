@@ -1,0 +1,35 @@
+{{- if and .Values.ingress.enabled .Values.ingress.tls.enabled .Values.ingress.tls.clusterIssuer }}
+# Created explicitly rather than through cert-manager's ingress annotation.
+#
+# Two Ingress objects share one hostname and one TLS secret. With the
+# annotation, cert-manager's ingress-shim makes the first Ingress the owner of
+# the Certificate and then refuses to manage it on behalf of the second:
+#
+#   certificate resource is not owned by this object.
+#   refusing to update non-owned certificate resource
+#
+# It works until the owning Ingress is deleted, at which point the Certificate
+# is garbage-collected and the other one silently loses its certificate. An
+# explicit Certificate owned by the release has one owner and no race.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.ingress.tls.secretName }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.ingress.tls.secretName }}
+  dnsNames:
+    {{- range concat (list .Values.ingress.host) .Values.ingress.extraHosts }}
+    - {{ . | quote }}
+    {{- end }}
+  issuerRef:
+    name: {{ .Values.ingress.tls.clusterIssuer }}
+    kind: ClusterIssuer
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always     # a renewal should mint a new key, not reuse one
+  duration: {{ .Values.ingress.tls.duration }}
+  renewBefore: {{ .Values.ingress.tls.renewBefore }}
+{{- end }}
