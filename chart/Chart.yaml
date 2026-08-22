@@ -1,6 +1,11 @@
 apiVersion: v2
 name: k8s-lab-app
-description: k8s-lab ornek uygulamasi icin Helm chart
+description: Production-oriented Helm chart for the k8s-lab sample service and its PostgreSQL backend
 type: application
-version: 0.2.0          # chart'in surumu
-appVersion: "3.3"       # uygulamanin surumu
+version: 1.0.0
+appVersion: "1.0.0"
+keywords: [kubernetes, nodejs, postgresql, observability]
+maintainers:
+  - name: orhan
+sources:
+  - https://github.com/orhan/k8s-lab

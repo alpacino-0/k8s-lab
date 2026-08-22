@@ -1,9 +1,0 @@
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: k8s-lab-app
-spec:
-  minAvailable: 2          # bakim sirasinda en az 2 pod ayakta kalsin
-  selector:
-    matchLabels:
-      app: k8s-lab-app

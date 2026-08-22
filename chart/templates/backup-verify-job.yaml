@@ -1,0 +1,79 @@
+{{- if and .Values.postgres.enabled .Values.postgres.backup.enabled .Values.postgres.backup.verifyOnInstall }}
+# Takes one backup immediately after install/upgrade instead of waiting for the
+# nightly schedule. Two reasons:
+#   1. An untested backup is not a backup — this proves the path works on day one.
+#   2. It binds the backup PVC, which a WaitForFirstConsumer StorageClass would
+#      otherwise leave Pending until 02:00.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "postgres.fullname" . }}-backup-verify
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "5"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "app.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: database-job
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: verify
+          image: {{ .Values.postgres.image | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: DB_HOST
+              value: {{ include "postgres.host" . | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "postgres.fullname" . }}
+                  key: POSTGRES_PASSWORD
+          envFrom:
+            - secretRef:
+                name: {{ include "postgres.fullname" . }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              until pg_isready -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q; do sleep 2; done
+              OUT="/backup/${POSTGRES_DB}-install-$(date +%Y%m%d-%H%M%S).sql.gz"
+              pg_dump -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+                --no-owner --no-privileges | gzip > "$OUT"
+              gzip -t "$OUT"                       # the archive must be readable
+              SIZE=$(wc -c < "$OUT")
+              [ "$SIZE" -gt 100 ] || { echo "backup suspiciously small: $SIZE bytes"; exit 1; }
+              echo "verified backup $OUT ($SIZE bytes)"
+          volumeMounts:
+            - name: backup
+              mountPath: /backup
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: backup
+          persistentVolumeClaim:
+            claimName: {{ include "postgres.fullname" . }}-backup
+        - name: tmp
+          emptyDir: {}
+{{- end }}

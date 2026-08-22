@@ -9,5 +9,7 @@ spec:
   selector:
     {{- include "app.selectorLabels" . | nindent 4 }}
   ports:
-    - port: {{ .Values.service.port }}
-      targetPort: 3000
+    - name: http          # named port — ServiceMonitor matches on the name
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP

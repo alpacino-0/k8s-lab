@@ -1,9 +1,45 @@
+# Production profile: autoscaling, disruption budget, backups, monitoring.
+# The database password must come from outside this file:
+#   helm upgrade ... --set postgres.auth.password="$PGPASSWORD"
+
+config:
+  APP_ENV: production
+  LOG_LEVEL: info
+  GREETING: Hello
+  DEMO_ENDPOINTS: "false"
+
 autoscaling:
   enabled: true
-  minReplicas: 2
-  maxReplicas: 8
+  minReplicas: 3
+  maxReplicas: 10
   targetCPUUtilizationPercentage: 60
-config:
-  ORTAM: "production"
-  LOG_SEVIYE: "warn"
-  KARSILAMA: "Selam"
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+ingress:
+  host: app.local
+  tls:
+    enabled: false            # set true once cert-manager issues the secret
+
+serviceMonitor:
+  enabled: true
+  labels:
+    release: monitoring       # kube-prometheus-stack selects on this label
+
+prometheusRule:
+  enabled: true
+
+networkPolicy:
+  enabled: true
+  ingressControllerNamespace: ingress-nginx
+  monitoringNamespace: monitoring
+
+postgres:
+  backup:
+    enabled: true
+    schedule: "0 2 * * *"
+    retainDays: 7
+  persistence:
+    size: 2Gi

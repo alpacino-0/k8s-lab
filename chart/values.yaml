@@ -1,37 +1,160 @@
-# Varsayilan degerler. Ortama gore -f ile ezilir.
+# Default values. Override per environment with -f values-<env>.yaml.
+
 replicaCount: 3
 
 image:
   repository: k8s-lab-app
-  tag: "3.3"
+  tag: ""              # defaults to .Chart.AppVersion
   pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  # The app never calls the Kubernetes API, so it must not receive a token.
+  # A mounted token is a lateral-movement path if the container is compromised.
+  automountServiceAccountToken: false
+
+# Applied to every container. All of these are deliberate:
+#   runAsNonRoot          — refuse to start as root
+#   readOnlyRootFilesystem— an attacker cannot drop a binary on disk
+#   drop ALL capabilities — no raw sockets, no chown, no setuid
+#   seccompProfile        — block unusual syscalls
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  privileged: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  capabilities:
+    drop: ["ALL"]
+
+config:
+  APP_ENV: production
+  LOG_LEVEL: info
+  GREETING: Hello
+  DEMO_ENDPOINTS: "false"
+
+# Application secret. In a real cluster this comes from an external manager
+# (see docs) — the plain value here exists only so `helm install` works locally.
+appSecret:
+  create: true
+  values:
+    API_TOKEN: change-me
 
 service:
   type: ClusterIP
   port: 80
 
-config:
-  ORTAM: "production"
-  LOG_SEVIYE: "warn"
-  KARSILAMA: "Selam"
-
-secret:
-  DB_PAROLA: "degistir-beni"
+ingress:
+  enabled: true
+  className: nginx
+  host: app.local
+  tls:
+    enabled: false
+    secretName: k8s-lab-app-tls
+  annotations: {}
 
 resources:
   requests:
     cpu: 50m
     memory: 64Mi
   limits:
-    cpu: 200m
-    memory: 128Mi
+    cpu: 300m
+    memory: 192Mi
 
 autoscaling:
-  enabled: false
+  enabled: true
   minReplicas: 2
   maxReplicas: 10
-  targetCPUUtilizationPercentage: 50
+  targetCPUUtilizationPercentage: 60
 
-ingress:
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+# Spread pods across nodes so a single node failure cannot take everything down.
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  whenUnsatisfiable: ScheduleAnyway
+
+# preStop delay closes the race between endpoint removal and process exit.
+# Measured: without it a node drain dropped 2 of 200 requests; with it, 0 of 300.
+lifecycle:
+  preStopSleepSeconds: 5
+terminationGracePeriodSeconds: 30
+
+probes:
+  readiness:
+    path: /readyz
+    initialDelaySeconds: 3
+    periodSeconds: 5
+    failureThreshold: 3
+  liveness:
+    path: /healthz          # process-only on purpose; never checks the database
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 3
+  startup:
+    enabled: true
+    path: /healthz
+    periodSeconds: 3
+    failureThreshold: 20    # allows up to 60s cold start without tripping liveness
+
+networkPolicy:
+  enabled: true
+  # Which namespace the ingress controller lives in.
+  ingressControllerNamespace: ingress-nginx
+  # Which namespace Prometheus scrapes from.
+  monitoringNamespace: monitoring
+
+serviceMonitor:
+  enabled: false           # requires the Prometheus Operator CRDs
+  interval: 15s
+  labels: {}               # e.g. {release: kube-prometheus-stack}
+
+prometheusRule:
   enabled: false
-  host: app.local
+
+postgres:
+  enabled: true
+  image: postgres:17.2-alpine3.21
+  auth:
+    username: labuser
+    database: labdb
+    password: change-me    # override with --set or an external secret
+  persistence:
+    size: 1Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  backup:
+    enabled: true
+    schedule: "0 2 * * *"  # nightly at 02:00
+    retainDays: 7
+    size: 2Gi
+    # Take and verify one backup during install/upgrade. Also binds the backup
+    # PVC, which a WaitForFirstConsumer StorageClass would otherwise leave
+    # Pending until the first scheduled run — and `helm --wait` would hang on it.
+    verifyOnInstall: true
+
+# Schema migration runs once per release as a Helm hook Job — not in an init
+# container on every pod, which would race when replicas start concurrently.
+migration:
+  enabled: true

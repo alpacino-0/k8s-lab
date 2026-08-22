@@ -1,9 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: k8s-lab-config
-data:
-  ORTAM: "production"
-  LOG_SEVIYE: "warn"
-  KARSILAMA: "Selam"
-  DB_HOST: "pg-0.pg.default.svc.cluster.local"   # StatefulSet'in kalici DNS adi

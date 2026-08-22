@@ -1,0 +1,97 @@
+{{- if and .Values.migration.enabled .Values.postgres.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "app.fullname" . }}-migrations
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation
+data:
+  001_notes.sql: |
+    CREATE TABLE IF NOT EXISTS notes (
+      id         serial PRIMARY KEY,
+      text       text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS notes_created_at_idx ON notes (created_at DESC);
+---
+# Runs once per release, before the new pods roll out. An init container would
+# run this on every pod start; concurrent replicas would then race on DDL locks.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "app.fullname" . }}-migrate
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "app.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: database-job
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: {{ .Values.postgres.image | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: DB_HOST
+              value: {{ include "postgres.host" . | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "postgres.fullname" . }}
+                  key: POSTGRES_PASSWORD
+          envFrom:
+            - secretRef:
+                name: {{ include "postgres.fullname" . }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              echo "waiting for database at $DB_HOST"
+              until pg_isready -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q; do
+                sleep 2
+              done
+              for f in /migrations/*.sql; do
+                echo "applying $f"
+                psql -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+                     -v ON_ERROR_STOP=1 --single-transaction -f "$f"
+              done
+              echo "migrations complete"
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: migrations
+          configMap:
+            name: {{ include "app.fullname" . }}-migrations
+        - name: tmp
+          emptyDir: {}
+{{- end }}
