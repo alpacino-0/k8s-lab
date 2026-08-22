@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars and adjust.
+kubeconfig_path = "~/.kube/config"
+kube_context    = "kind-k8s-lab"
+
+# On a cluster with a real load balancer the ports are assigned, not pinned:
+# ingress_node_ports = null

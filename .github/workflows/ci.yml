@@ -81,6 +81,20 @@ jobs:
           helm template ci chart -f chart/values-prod.yaml --set postgres.auth.password=ci \
             | ./kubeconform -strict -summary -ignore-missing-schemas -
 
+      # Terraform is validated, never applied: this pipeline has no cluster it
+      # is entitled to change, and a plan against one it does not own would be
+      # either meaningless or dangerous.
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.1
+          terraform_wrapper: false
+
+      - name: Terraform formatting and validity
+        run: |
+          terraform -chdir=terraform fmt -check -diff
+          terraform -chdir=terraform init -backend=false -input=false
+          terraform -chdir=terraform validate
+
       - name: Lint the API Dockerfile
         uses: hadolint/hadolint-action@v3.1.0
         with:

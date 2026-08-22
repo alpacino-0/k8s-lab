@@ -100,6 +100,8 @@ variables the kubelet injects — and the browser simply counts what came back.
 | `make tls` | Install cert-manager and serve HTTPS from a local CA |
 | `make logging` | Install Loki and Alloy, and wire Loki into Grafana |
 | `make gitops` | Install Argo CD and let it reconcile the release from git |
+| `make platform` | Apply the platform layer with Terraform |
+| `make platform-plan` | Show what Terraform would change, without changing it |
 | `make monitoring` | Install Prometheus + Grafana |
 | `make down` | Delete the cluster |
 
@@ -277,6 +279,37 @@ everyone to ignore the one thing GitOps exists to tell you. `volumeMode` is now
 stated explicitly, and the three fields the server owns are ignored by jq path
 rather than the whole block — so a real change to storage size is still seen.
 
+### The platform, as code
+
+`bootstrap.sh` installed the ingress controller, cert-manager and the policies
+with a sequence of `kubectl` and `helm` commands. It worked. What it could not
+do was tell you what it had created, take one thing back, or express that
+cert-manager has to exist before an issuer does — the ordering lived in the
+order of the lines.
+
+[`terraform/`](terraform/) manages that layer now, and `make up` calls it
+rather than duplicating it. Cluster creation stays out: it comes from `kind`
+locally and from a cloud provider or k3s remotely, so the only thing that
+differs between them is `kube_context`.
+
+Two things surfaced while moving a live cluster onto it, both worth knowing
+before doing this to something that matters:
+
+**A shell script and a Terraform configuration installing the same components
+is two sources of truth.** The releases `bootstrap.sh` had installed from static
+manifests could not be imported at all — there was no Helm release to adopt, so
+Terraform would have installed a second copy beside them. `bootstrap.sh` now
+calls Terraform.
+
+**`kubernetes_manifest` cannot plan against a CRD that does not exist yet.** It
+resolves a schema at plan time, so cert-manager's `ClusterIssuer`s and the Argo
+CD `Application` stay as plain YAML applied afterwards. The admission policies
+do not have the problem: `ValidatingAdmissionPolicy` is a built-in API.
+
+A side effect worth having: the ingress NodePorts are chart values now instead
+of a `kubectl patch` applied after install. The patch worked and left nothing
+that would put the ports back if the Service were ever recreated.
+
 ### Reliability
 
 | Behaviour | Implementation | Measured |
@@ -322,7 +355,7 @@ Five jobs on every push ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
 | Job | Gate |
 |---|---|
 | `test` | ESLint and 27 tests for the API; ESLint and a production build for the interface |
-| `manifests` | `helm lint`, renders all three values profiles, kubeconform schema validation, hadolint on both Dockerfiles |
+| `manifests` | `helm lint`, renders all values profiles, kubeconform schema validation, `terraform fmt -check` and `validate`, hadolint on both Dockerfiles |
 | `image` | Builds both images, asserts each is non-root, boots each read-only, Trivy scan (fails on CRITICAL/HIGH) |
 | `e2e` | Creates a real kind cluster, applies the policies **before** the chart so the release has to satisfy them, runs the 8 policy checks and the 35-check smoke test, then proves an upgrade drops zero requests |
 | `publish` | Pushes both images to GHCR for amd64 and arm64, with SBOM and provenance attestation (main only) |
@@ -345,6 +378,7 @@ chart/                Helm chart — the single deployment path
   values-dev.yaml     minimal footprint, demo endpoints on
   values-prod.yaml    autoscaling, backups, monitoring, network policies
   values-public.yaml  GHCR images, TLS, external secret — for a public address
+terraform/            the platform layer: ingress, cert-manager, Argo CD, policies
 gitops/               the Argo CD Application: what the cluster should contain
 cluster/              cluster-scoped add-ons, kept out of the chart
   issuers.yaml        a local CA, so the TLS path is exercised not assumed

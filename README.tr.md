@@ -98,6 +98,8 @@ değişkenleri — ve tarayıcı sadece geleni sayıyor.
 | `make tls` | cert-manager kurar, yerel CA ile HTTPS sunar |
 | `make logging` | Loki + Alloy kurar, Loki'yi Grafana'ya bağlar |
 | `make gitops` | Argo CD kurar, sürümü git'ten senkronlar |
+| `make platform` | Platform katmanını Terraform ile uygular |
+| `make platform-plan` | Terraform'un ne değiştireceğini gösterir, değiştirmez |
 | `make monitoring` | Prometheus + Grafana kurar |
 | `make down` | Cluster'ı siler |
 
@@ -273,6 +275,36 @@ herkesi GitOps'un var olma sebebi olan tek uyarıyı görmezden gelmeye alışt�
 yerine jq yoluyla yok sayılıyor — yani depolama boyutundaki gerçek bir değişim
 hâlâ görülüyor.
 
+### Platform, kod olarak
+
+`bootstrap.sh` ingress controller'ı, cert-manager'ı ve politikaları bir dizi
+`kubectl` ve `helm` komutuyla kuruyordu. Çalışıyordu. Yapamadığı şey: ne
+oluşturduğunu söylemek, tek bir şeyi geri almak, ve cert-manager'ın issuer'dan
+önce var olması gerektiğini ifade etmek — sıralama satırların sırasına gömülüydü.
+
+[`terraform/`](terraform/) artık o katmanı yönetiyor ve `make up` onu
+tekrarlamak yerine çağırıyor. Cluster oluşturma dışarıda kalıyor: yerelde
+`kind`'dan, uzakta bulut sağlayıcı veya k3s'ten geliyor — yani ikisi arasındaki
+tek fark `kube_context`.
+
+Çalışan bir cluster'ı buna taşırken iki şey ortaya çıktı; ikisi de gerçek bir
+sisteme uygulamadan önce bilinmeli:
+
+**Bir kabuk betiği ile bir Terraform yapılandırmasının aynı bileşenleri
+kurması, iki doğruluk kaynağı demektir.** `bootstrap.sh`'ın statik manifestle
+kurduğu sürümler hiç import edilemedi — devralınacak bir Helm sürümü yoktu,
+yani Terraform yanlarına ikinci bir kopya kuracaktı. `bootstrap.sh` artık
+Terraform'u çağırıyor.
+
+**`kubernetes_manifest`, henüz var olmayan bir CRD'ye karşı plan yapamaz.**
+Şemayı plan zamanında çözüyor; bu yüzden cert-manager `ClusterIssuer`'ları ve
+Argo CD `Application`'ı sonradan uygulanan düz YAML olarak kalıyor. Kabul
+politikalarında bu sorun yok: `ValidatingAdmissionPolicy` yerleşik bir API.
+
+Yan kazanç: ingress NodePort'ları artık kurulumdan sonra atılan bir
+`kubectl patch` değil, chart değeri. Patch çalışıyordu ama Service yeniden
+oluşturulsa portları geri koyacak hiçbir şey bırakmıyordu.
+
 ### Dayanıklılık
 
 | Davranış | Uygulama | Ölçüm |
@@ -317,7 +349,7 @@ Her push'ta beş job ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
 | Job | Neyi denetler |
 |---|---|
 | `test` | API için ESLint + 27 test; arayüz için ESLint + üretim derlemesi |
-| `manifests` | `helm lint`, üç values profili, kubeconform şema denetimi, iki Dockerfile için hadolint |
+| `manifests` | `helm lint`, values profilleri, kubeconform şema denetimi, `terraform fmt -check` ve `validate`, iki Dockerfile için hadolint |
 | `image` | İki imajı derler, ikisinin de root olmadığını doğrular, salt-okunur başlatır, Trivy taraması |
 | `e2e` | Gerçek kind cluster kurar, politikaları **chart'tan önce** uygular (yani sürüm onlara uymak zorunda), 8 politika kontrolünü ve 35 duman kontrolünü çalıştırır, ardından bir upgrade'in **sıfır istek düşürdüğünü** kanıtlar |
 | `publish` | İki imajı da amd64 + arm64 için GHCR'a, SBOM ve provenance ile push eder (yalnız main) |
@@ -340,6 +372,7 @@ chart/                Helm chart — tek deploy yolu
   values-dev.yaml     minimum ayak izi, demo uçları açık
   values-prod.yaml    otomatik ölçekleme, yedekleme, izleme, ağ politikaları
   values-public.yaml  GHCR imajları, TLS, harici secret — herkese açık adres için
+terraform/            platform katmanı: ingress, cert-manager, Argo CD, politikalar
 gitops/               Argo CD Application'ı: cluster'da ne olmalı
 cluster/              cluster kapsamlı eklentiler, chart'ın dışında
   issuers.yaml        yerel CA — TLS yolu varsayılmıyor, çalıştırılıyor
