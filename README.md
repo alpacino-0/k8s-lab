@@ -143,8 +143,89 @@ kubectl -n staging get events --sort-by=.lastTimestamp
 | `k8s-test` | Gerçek kind cluster kurar, deploy eder, cluster içinden doğrular; hata olursa `describe`+`logs` basar |
 | `publish` | Sadece `main`'de: imajı GHCR'a push eder (`:sha` ve `:latest`), GHA build cache ile |
 
+## Bölüm 6 — Ölçekleme, kalıcı veri, yetkilendirme
+
+### metrics-server + HPA
+```bash
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+kubectl patch deployment metrics-server -n kube-system --type=json \
+  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+kubectl apply -f k8s/hpa.yaml
+```
+> `--kubelet-insecure-tls` yalnızca kind içindir (self-signed kubelet sertifikası).
+> HPA'nın çalışması için Deployment'ta **`resources.requests.cpu` zorunludur**.
+
+Ölçülen davranış (`/yuk?ms=400` adresine 4 paralel istemci):
+
+| Yön | Süre | Ayar |
+|---|---|---|
+| 3 → 10 replica | **45 saniye** | `scaleUp.stabilizationWindowSeconds: 0` |
+| 10 → 2 replica | **~3 dakika** | `scaleDown.stabilizationWindowSeconds: 60` + metrik gecikmesi |
+
+Asimetri bilinçlidir: büyümede gecikmenin bedelini kullanıcı öder, küçülmede acele
+etmek zikzak (thrashing) yaratır. `maxReplicas` tavana çarptığında (`cpu: 140%/50%`,
+replica 10'da sabit) sıradaki adım node eklemektir — **HPA pod ekler, Cluster Autoscaler node ekler.**
+
+### PVC + StatefulSet (PostgreSQL)
+`k8s/postgres.yaml`: headless Service (`clusterIP: None`) + StatefulSet + `volumeClaimTemplates`.
+
+Pod silme testi:
+
+| | Silmeden önce | Sildikten sonra |
+|---|---|---|
+| Pod adı | `pg-0` | `pg-0` — **aynı** |
+| IP | `10.244.1.29` | `10.244.1.30` — değişti |
+| PVC | `pvc-989aec9f…` | `pvc-989aec9f…` — **aynı disk** |
+| Veri | 2 satır | **2 satır** |
+
+Kalıcı DNS: `pg-0.pg.default.svc.cluster.local`. Deployment rastgele isim verir,
+StatefulSet sıralı ve kalıcı isim + pod başına ayrı disk verir.
+
+> `RECLAIM POLICY: Delete` — PVC silinince veri de silinir. Veritabanı için `Retain` kullan.
+
+**kind tuzağı:** çok-mimarili imajlarda `kind load docker-image` şu hatayı verebilir:
+`ctr: content digest ... not found`. Çözüm: node'ların imajı registry'den çekmesine izin ver.
+
+### RBAC
+`k8s/rbac.yaml`: ServiceAccount `okuyucu` + Role (`pods: get/list/watch`) + RoleBinding.
+
+```bash
+kubectl auth can-i list pods   --as=system:serviceaccount:default:okuyucu -n default   # yes
+kubectl auth can-i delete pods --as=system:serviceaccount:default:okuyucu -n default   # no
+kubectl auth can-i list pods   --as=system:serviceaccount:default:okuyucu -n staging   # no
+```
+
+Pod içinden gerçek API çağrısı (token `/var/run/secrets/kubernetes.io/serviceaccount/` altında
+otomatik montelidir):
+- `GET /api/v1/namespaces/default/pods` → **200**, PodList
+- `GET /api/v1/namespaces/default/secrets` → **403 Forbidden**
+
+Kurallar: Role tek namespace / ClusterRole cluster geneli · API'ye erişmeyen iş yüküne
+`automountServiceAccountToken: false` · `default` ServiceAccount'a asla yetki verme.
+
+### Helm — `chart/`
+```bash
+helm lint chart
+helm template prod chart                       # kurmadan ciktiyi gor
+helm upgrade --install dev  chart -f chart/values-dev.yaml  -n helm-dev  --create-namespace --wait
+helm upgrade --install prod chart -f chart/values-prod.yaml -n helm-prod --create-namespace --wait
+helm history dev -n helm-dev
+helm rollback dev 1 -n helm-dev
+```
+
+Tek chart, iki ortam: `dev` → 1 replica / `ORTAM=dev` / HPA yok,
+`prod` → HPA açık (2-8) / `ORTAM=production`. HPA şablonu `{{ if .Values.autoscaling.enabled }}`
+ile koşullu üretilir.
+
+`checksum/config` anotasyonu: ConfigMap değişince pod'ların yeniden başlaması için standart hile —
+yoksa ConfigMap güncellenir ama pod'lar eski değeri kullanmaya devam eder.
+
+**`kubectl rollout undo` vs `helm rollback`:** ilki sadece imajı, ikincisi tüm manifest setini
+(replica, config, secret, HPA) atomik olarak geri alır — ölçülen süre **5.8 saniye**.
+
 ## Temizlik
 
 ```bash
+helm uninstall dev -n helm-dev; helm uninstall prod -n helm-prod
 kind delete cluster --name k8s-lab
 ```

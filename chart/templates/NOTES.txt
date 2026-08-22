@@ -1,0 +1,8 @@
+{{ .Chart.Name }} kuruldu — release: {{ .Release.Name }}, namespace: {{ .Release.Namespace }}
+
+Replica: {{ if .Values.autoscaling.enabled }}HPA ({{ .Values.autoscaling.minReplicas }}-{{ .Values.autoscaling.maxReplicas }}){{ else }}{{ .Values.replicaCount }}{{ end }}
+Ortam  : {{ .Values.config.ORTAM }}
+
+Test icin:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "app.fullname" . }} 8081:{{ .Values.service.port }}
+  curl localhost:8081

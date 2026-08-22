@@ -1,0 +1,31 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: k8s-lab-app
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: k8s-lab-app
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50    # requests'in %50'sini asarsa buyu
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0     # hizli buyu
+      policies:
+        - type: Percent
+          value: 100                     # her 15sn'de en fazla 2 katina
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 60     # kuculurken 60sn bekle (zikzak olmasin)
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 30

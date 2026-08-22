@@ -1,0 +1,6 @@
+apiVersion: v2
+name: k8s-lab-app
+description: k8s-lab ornek uygulamasi icin Helm chart
+type: application
+version: 0.1.0          # chart'in surumu
+appVersion: "2.2"       # uygulamanin surumu

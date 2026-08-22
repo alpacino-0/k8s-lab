@@ -1,0 +1,8 @@
+replicaCount: 1
+config:
+  ORTAM: "dev"
+  LOG_SEVIYE: "debug"
+  KARSILAMA: "Naber"
+resources:
+  requests: { cpu: 25m, memory: 32Mi }
+  limits:   { cpu: 100m, memory: 64Mi }

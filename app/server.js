@@ -29,6 +29,15 @@ app.get('/healthz', (req, res) => {
   res.send('ok\n');
 });
 
+// HPA demosu: CPU yakan adres
+app.get('/yuk', (req, res) => {
+  const ms = Math.min(parseInt(req.query.ms || '200', 10), 2000);
+  const bitis = Date.now() + ms;
+  let x = 0;
+  while (Date.now() < bitis) { x += Math.sqrt(Math.random()); }
+  res.send(`${ms}ms cpu yakildi (${os.hostname()})\n`);
+});
+
 // Liveness probe demosu: bu adrese girince uygulama "hasta" olur
 app.get('/kirilsin', (req, res) => {
   saglikli = false;

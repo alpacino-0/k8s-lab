@@ -1,0 +1,9 @@
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 8
+  targetCPUUtilizationPercentage: 60
+config:
+  ORTAM: "production"
+  LOG_SEVIYE: "warn"
+  KARSILAMA: "Selam"
