@@ -299,9 +299,52 @@ Sebep: pod silinirken endpoint'lerden çıkarılması ile sürecin ölmesi **eş
 > **HPA varken `kubectl scale` kalıcı değildir** — HPA bir sonraki döngüde replica sayısını
 > kendi aralığına geri çeker.
 
+### Gözlemlenebilirlik — Prometheus + Grafana
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm upgrade --install izleme prometheus-community/kube-prometheus-stack \
+  -n izleme --create-namespace --set grafana.adminPassword=lab123 \
+  --set prometheus.prometheusSpec.retention=2h --set alertmanager.enabled=false --wait
+kubectl apply -f k8s/servicemonitor.yaml -f k8s/alerts.yaml -f k8s/grafana-ingress.yaml
+```
+
+Grafana: `http://grafana.local:8080` (admin / lab123) — 28 hazır dashboard.
+`/etc/hosts` satırı: `127.0.0.1 app.local grafana.local`
+
+**Uygulama kendi metriklerini yayınlar** (`prom-client`, `GET /metrics`):
+`http_istek_toplam` (Counter) · `http_istek_suresi_saniye` (Histogram) · `notlar_toplam` (Gauge)
++ Node.js varsayılanları (heap, event loop, GC).
+
+ServiceMonitor eşleşmesi iki şeye bağlı: Service portunun **adı** (`name: http`) ve
+ServiceMonitor'ın `release: izleme` etiketi (kube-prometheus-stack bu etikete bakar).
+
+Doğrulanmış PromQL çıktıları:
+
+| Sorgu | Sonuç |
+|---|---|
+| Prometheus hedefleri | 3 pod, hepsi `up` |
+| `sum by (yol) (http_istek_toplam)` | `/`=25, `/notlar`=9, `/readyz`=23, `/healthz`=9 |
+| `notlar_toplam` | 4 (üç pod da aynı DB'yi okuyor) |
+
+**Alarm yaşam döngüsü** (`replicas=0` yapılarak tetiklendi):
+`inactive` → `pending` (`for: 30s`) → `firing`, geri gelince tekrar `inactive`.
+
+> **Prometheus tuzağı — `up == 0` ateşlemez.** Pod'lar tamamen yok olunca hedef de
+> listeden silinir, `up` serisi hiç var olmaz, karşılaştırma hiçbir zaman doğru olmaz.
+> Aynı koşulda ölçülen sonuç:
+> ```
+> UygulamaKapali (up == 0)         = inactive   ← ateşlemedi
+> HicHedefYok    (absent(up{...})) = firing     ← doğru
+> ```
+> "Alarm kurmuştuk ama çalışmadı" vakalarının en yaygın sebebi budur.
+
+> **CRD'ler strict decoding ile doğrulanır.** `annotations`'ı yanlışlıkla `labels` altına
+> yazınca apply reddedildi (`unknown field spec.groups[0].rules[2].labels.annotations.ozet`) —
+> sessizce yok sayılmadı.
+
 ## Temizlik
 
 ```bash
-helm uninstall dev -n helm-dev; helm uninstall prod -n helm-prod
+helm uninstall dev -n helm-dev; helm uninstall prod -n helm-prod; helm uninstall izleme -n izleme
 kind delete cluster --name k8s-lab
 ```

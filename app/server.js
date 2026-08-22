@@ -1,7 +1,32 @@
 const express = require('express');
 const os = require('os');
 const { Pool } = require('pg');
+const client = require('prom-client');
 const app = express();
+
+// --- Prometheus metrikleri ---
+const kayit = new client.Registry();
+kayit.setDefaultLabels({ uygulama: 'k8s-lab-app' });
+client.collectDefaultMetrics({ register: kayit });   // cpu, bellek, event loop vb.
+
+const istekSayaci = new client.Counter({
+  name: 'http_istek_toplam',
+  help: 'Toplam HTTP istegi',
+  labelNames: ['yol', 'yontem', 'durum'],
+  registers: [kayit],
+});
+const istekSuresi = new client.Histogram({
+  name: 'http_istek_suresi_saniye',
+  help: 'HTTP istek suresi',
+  labelNames: ['yol', 'yontem'],
+  buckets: [0.005, 0.01, 0.05, 0.1, 0.3, 0.5, 1, 2, 5],
+  registers: [kayit],
+});
+const notSayaci = new client.Gauge({
+  name: 'notlar_toplam',
+  help: 'Veritabanindaki not sayisi',
+  registers: [kayit],
+});
 app.use(express.json());
 
 // --- Ayarlar: hepsi ortam degiskeninden, hicbiri kodda gomulu degil ---
@@ -36,6 +61,29 @@ if (pool) {
 }
 
 let saglikli = true;
+
+// Her istegi olc (metrik ucunun kendisi haric)
+app.use((req, res, next) => {
+  if (req.path === '/metrics') return next();
+  const bitir = istekSuresi.startTimer({ yol: req.path, yontem: req.method });
+  res.on('finish', () => {
+    bitir();
+    istekSayaci.inc({ yol: req.path, yontem: req.method, durum: res.statusCode });
+  });
+  next();
+});
+
+// Prometheus'un kazidigi uc
+app.get('/metrics', async (req, res) => {
+  if (pool) {
+    try {
+      const r = await pool.query('SELECT count(*)::int AS n FROM notlar');
+      notSayaci.set(r.rows[0].n);
+    } catch (e) { /* DB yoksa metrigi guncelleme */ }
+  }
+  res.set('Content-Type', kayit.contentType);
+  res.end(await kayit.metrics());
+});
 
 app.get('/', (req, res) => {
   res.send(`${KARSILAMA}! Konteyner: ${os.hostname()} | ortam: ${ORTAM}\n`);

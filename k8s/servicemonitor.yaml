@@ -1,0 +1,16 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: k8s-lab-app
+  labels:
+    release: izleme          # kube-prometheus-stack bu etikete bakar
+spec:
+  selector:
+    matchLabels:
+      app: k8s-lab-app       # hangi Service'i kazisin
+  namespaceSelector:
+    matchNames: ["default"]
+  endpoints:
+    - port: http             # Service'teki port ADI
+      path: /metrics
+      interval: 15s

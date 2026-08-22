@@ -79,7 +79,7 @@ spec:
             name: db-migration
       containers:
         - name: web
-          image: k8s-lab-app:3.0
+          image: k8s-lab-app:3.2
           imagePullPolicy: IfNotPresent   # yerel imaji kullan, Docker Hub'a gitme
           ports:
             - containerPort: 3000
