@@ -91,6 +91,7 @@ make smoke                                 # 18 uçtan uca kontrol
 | ServiceAccount token'ı monte edilmez | `automountServiceAccountToken: false` | uygulama Kubernetes API'sini hiç kullanmaz |
 | Varsayılan-reddet ağ | 3 NetworkPolicy | yetkisiz bir pod'un erişemediği **kanıtlanır** |
 | Multi-stage imaj, yalnız üretim bağımlılıkları | `app/Dockerfile` | CI'da Trivy CRITICAL/HIGH bulguda durdurur |
+| npm runtime imajından çıkarıldı | `app/Dockerfile` | **tüm** Node.js paket CVE'lerini sıfırladı (aşağıda) |
 | Git'te secret yok | `.gitignore` + chart values | parola zorunlu bir chart değeri |
 
 Egress politikası **DNS'e açıkça izin verir**. Bu kuralı unutmak, varsayılan-reddet
@@ -165,6 +166,28 @@ docs/
 ```
 
 ---
+
+### Saldırı yüzeyini küçültmek
+
+İlk Trivy taraması yaklaşık otuz CRITICAL/HIGH bulgu verdi. Neredeyse hiçbiri
+uygulamanın kendi bağımlılıklarından değildi — **npm**'den geliyorlardı. Temel
+imaj npm'i taşıyor, ama çalışma anında hiç kullanılmıyor: giriş noktası
+`node src/index.js`. npm ve bağımlılık ağacı (`tar`, `minimatch`, `glob`,
+`sigstore`, ...) derleme zamanı araçları, üretime gönderilmemeliydi.
+
+```dockerfile
+RUN apk upgrade --no-cache
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
+           /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg
+```
+
+| | Öncesi | Sonrası |
+|---|---|---|
+| Node.js paket bulgusu | ~20 HIGH, 1 CRITICAL | **0** |
+| OS paket bulgusu | 11 HIGH/CRITICAL | **0** |
+| İmaj boyutu | 205 MB | 206 MB |
+
+Temel imajı sabitlemek build'leri tekrarlanabilir tutar; `apk upgrade` yamalı tutar.
 
 ## Bu projenin bulduğu iki hata
 

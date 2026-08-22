@@ -92,6 +92,7 @@ make smoke                                 # 18 end-to-end checks
 | No service-account token mounted | `automountServiceAccountToken: false` | the app never calls the Kubernetes API |
 | Default-deny networking | 3 NetworkPolicies | an unauthorized pod is proven unable to reach the app |
 | Multi-stage image, production deps only | `app/Dockerfile` | Trivy blocks CRITICAL/HIGH findings in CI |
+| npm removed from the runtime image | `app/Dockerfile` | eliminated **every** Node.js package CVE (see below) |
 | No secrets in git | `.gitignore` + chart values | password is a required chart value |
 
 The egress policy explicitly allows DNS. Forgetting that rule is the most common
@@ -167,6 +168,28 @@ docs/
 ```
 
 ---
+
+### Shrinking the attack surface
+
+The first Trivy scan reported roughly thirty CRITICAL/HIGH findings. Almost none
+of them came from the application's own dependencies — they came from **npm**,
+which the base image ships and the runtime never uses. The entrypoint is
+`node src/index.js`; npm and its dependency tree (`tar`, `minimatch`, `glob`,
+`sigstore`, ...) are build-time tools that were being shipped to production.
+
+```dockerfile
+RUN apk upgrade --no-cache
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
+           /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg
+```
+
+| | Before | After |
+|---|---|---|
+| Node.js package findings | ~20 HIGH, 1 CRITICAL | **0** |
+| OS package findings | 11 HIGH/CRITICAL | **0** |
+| Image size | 205 MB | 206 MB |
+
+Pinning the base tag keeps builds reproducible; `apk upgrade` keeps them patched.
 
 ## Two bugs this project found
 
