@@ -268,16 +268,39 @@ jobs:
           for _ in $(seq 1 30); do
             curl -sk -o /dev/null https://localhost:8443/api/healthz -H 'Host: app.local' && break || sleep 2
           done
+
           # served over TLS
           curl -sk -H 'Host: app.local' https://localhost:8443/api/healthz | grep -q ok
+          echo "tls: ok"
+
           # the certificate is the one cert-manager issued
           echo | openssl s_client -connect localhost:8443 -servername app.local 2>/dev/null \
             | openssl x509 -noout -issuer | grep -q 'k8s-lab local CA'
+          echo "issuer: ok"
+
           # plain HTTP is redirected, not served
           code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: app.local' http://localhost:8080/api/healthz)
           echo "http -> $code"; [ "$code" = "308" ]
-          # and the visitor cookie is only sent over TLS
-          curl -sk -D - -o /dev/null -H 'Host: app.local' https://localhost:8443/api/stats | grep -i 'set-cookie' | grep -q 'Secure'
+
+          # The visitor cookie must be marked Secure. Retried, because the
+          # release that turned it on has just rolled: the preStop delay keeps
+          # replaced pods in the endpoint list for a few more seconds, and one
+          # of them still answers with the old configuration. That window is
+          # the feature working, not a flake to paper over — so the check waits
+          # it out rather than asserting once and hoping.
+          for attempt in $(seq 1 20); do
+            headers=$(curl -sk -D - -o /dev/null -H 'Host: app.local' https://localhost:8443/api/stats)
+            if grep -i 'set-cookie' <<<"$headers" | grep -q 'Secure'; then
+              echo "secure cookie: ok (attempt $attempt)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the visitor cookie never came back marked Secure. Last headers:"
+          echo "$headers"
+          kubectl -n k8s-lab get pods -l app.kubernetes.io/name=k8s-lab-app \
+            -o custom-columns=NAME:.metadata.name,AGE:.metadata.creationTimestamp
+          exit 1
 
       - name: Back to plain HTTP for the remaining checks
         run: |
