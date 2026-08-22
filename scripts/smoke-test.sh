@@ -68,12 +68,35 @@ PROBE_SPEC='{"apiVersion":"v1","spec":{"automountServiceAccountToken":false,
 "command":COMMAND_PLACEHOLDER}]}}'
 
 # run_probe <image> <json command array> -> stdout of the pod
+#
+# Creates the pod, waits for it to finish, then reads its logs. Attaching with
+# `kubectl run -i` looked simpler and lost the output whenever the image had to
+# be pulled first: the probe reported "never ran" for a pod that ran fine.
 run_probe() {
   local image="$1" command="$2" name="probe-$RANDOM"
   local overrides="${PROBE_SPEC//IMAGE_PLACEHOLDER/$image}"
   overrides="${overrides//COMMAND_PLACEHOLDER/$command}"
-  kubectl -n "$PROBE_NS" run "$name" --rm -i --restart=Never --quiet \
-    --image="$image" --overrides="$overrides" 2>&1
+
+  if ! kubectl -n "$PROBE_NS" run "$name" --restart=Never --quiet \
+        --image="$image" --overrides="$overrides" >/dev/null 2>&1; then
+    echo "probe pod was refused at admission"
+    return
+  fi
+
+  local phase=""
+  for _ in $(seq 1 90); do
+    phase=$(kubectl -n "$PROBE_NS" get pod "$name" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    [[ "$phase" == "Succeeded" || "$phase" == "Failed" ]] && break
+    sleep 2
+  done
+
+  if [[ "$phase" != "Succeeded" && "$phase" != "Failed" ]]; then
+    echo "probe pod never finished (phase=${phase:-unknown}): $(kubectl -n "$PROBE_NS" get pod "$name" \
+      -o jsonpath='{.status.containerStatuses[0].state}' 2>/dev/null)"
+  else
+    kubectl -n "$PROBE_NS" logs "$name" 2>&1
+  fi
+  kubectl -n "$PROBE_NS" delete pod "$name" --wait=false >/dev/null 2>&1
 }
 fail() { printf '  \033[0;31mFAIL\033[0m  %s\n' "$1"; FAILED=1; }
 check() { local name="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$name"; else fail "$name"; fi; }
@@ -154,14 +177,16 @@ if kubectl -n "$NAMESPACE" get deploy "${RELEASE}-redis" >/dev/null 2>&1; then
     sh -c "curl -sf ${METRICS}/metrics | grep -q 'rate_limiter_decisions_total{backend=\"redis\"'"
   check "the note count is served from cache" \
     sh -c "curl -sf -b '$JAR' ${BASE}/stats >/dev/null; curl -sf -b '$JAR' ${BASE}/stats | grep -q '\"cached\":true'"
-  REDIS_OUT=$(run_probe "redis:7.4-alpine" \
-    '["sh","-c","out=$(redis-cli -h '"${RELEASE}-redis.${NAMESPACE}"' -t 5 ping 2>&1); echo PROBE_RAN:$out"]')
+  # A plain TCP attempt with the image already used above, rather than pulling
+  # a redis image for one connection.
+  REDIS_OUT=$(run_probe "curlimages/curl:8.11.1" \
+    '["sh","-c","code=$(curl -s -m 8 -o /dev/null -w %{http_code} telnet://'"${RELEASE}-redis.${NAMESPACE}"':6379); echo PROBE_RAN:$code"]')
   if [[ "$REDIS_OUT" != *"PROBE_RAN:"* ]]; then
     fail "the redis isolation probe never ran: ${REDIS_OUT:0:140}"
-  elif [[ "$REDIS_OUT" == *"PONG"* ]]; then
-    fail "an unrelated pod reached redis — NetworkPolicy not enforced"
-  else
+  elif [[ "$REDIS_OUT" == *"PROBE_RAN:000"* ]]; then
     pass "redis refuses connections from unrelated pods"
+  else
+    fail "an unrelated pod reached redis (${REDIS_OUT##*PROBE_RAN:}) — NetworkPolicy not enforced"
   fi
 fi
 
