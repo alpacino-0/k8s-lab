@@ -7,7 +7,7 @@ IMAGE       ?= k8s-lab-app
 IMAGE_TAG   ?= 1.0.0
 
 .DEFAULT_GOAL := help
-.PHONY: help test lint build web up down deploy smoke policies policy-test tls logs logging monitoring port-forward clean
+.PHONY: help test lint build web up down deploy smoke policies policy-test tls logs logging gitops monitoring port-forward clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -98,3 +98,19 @@ logging: ## Install Loki and Alloy, and register Loki with Grafana
 	@echo ""
 	@echo "  Grafana: make port-forward, then Explore -> Loki"
 	@echo '  Try:  {namespace="k8s-lab", app="k8s-lab-app"} | json | level=`warn`'
+
+gitops: ## Install Argo CD and let it reconcile the release from git
+	helm repo add argo https://argoproj.github.io/argo-helm
+	helm repo update
+	helm upgrade --install argocd argo/argo-cd -n argocd --create-namespace \
+	  -f cluster/argocd-values.yaml --wait --timeout 12m
+	kubectl create namespace k8s-lab-gitops --dry-run=client -o yaml | kubectl apply -f -
+	kubectl -n k8s-lab-gitops create secret generic db-credentials \
+	  --from-literal=POSTGRES_USER=labuser --from-literal=POSTGRES_DB=labdb \
+	  --from-literal=POSTGRES_PASSWORD="$$(openssl rand -base64 24)" \
+	  --dry-run=client -o yaml | kubectl apply -f -
+	kubectl apply -f gitops/application.yaml
+	@echo ""
+	@echo "  Watch it converge:  kubectl -n argocd get application k8s-lab -w"
+	@echo "  Then break it:      kubectl -n k8s-lab-gitops scale deploy/k8s-lab-k8s-lab-app --replicas=5"
+	@echo "  UI password:        kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"

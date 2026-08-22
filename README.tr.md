@@ -97,6 +97,7 @@ değişkenleri — ve tarayıcı sadece geleni sayıyor.
 | `make policy-test` | Her politikanın doğru şeyi reddettiğini kanıtlar |
 | `make tls` | cert-manager kurar, yerel CA ile HTTPS sunar |
 | `make logging` | Loki + Alloy kurar, Loki'yi Grafana'ya bağlar |
+| `make gitops` | Argo CD kurar, sürümü git'ten senkronlar |
 | `make monitoring` | Prometheus + Grafana kurar |
 | `make down` | Cluster'ı siler |
 
@@ -241,6 +242,37 @@ saatlik saklamayla çalışıyor: dağıtık mod, nesne depolama ve cache'ler te
 işleyen cluster'lar için var; küçük bir cluster'da ağır bir log yığınının
 başarısızlık biçimi, gözlemlemek için kurulduğu uygulamayı tahliye etmesidir.
 
+### Dağıtım
+
+CI ve Argo CD farklı işler yapıyor ve ayrım bilinçli: **CI bir değişikliği
+sonra attığı bir cluster'da kanıtlar; Argo CD onu kalıcı olana uygular.**
+
+Uzun ömürlü bir cluster'a `helm upgrade` çeken bir pipeline, biri gece 2'de
+elle `kubectl` çalıştırana kadar doğrudur. Ondan sonra git ile cluster ayrışır
+ve kimse fark etmez. [`gitops/application.yaml`](gitops/application.yaml) bunu
+zorunlu bir değişmeze çeviriyor — `prune` git'ten çıkanı siler, `selfHeal`
+dışarıdan değişeni geri alır.
+
+Bu cluster'da ölçülen:
+
+| Elle yapılan | Ne oldu |
+|---|---|
+| `kubectl scale --replicas=5` (git 2 diyor) | **5 saniyede** 2'ye döndü, `OutOfSync → Synced` kaydedildi |
+| `kubectl delete deployment` | **5 saniyede** yeniden oluşturuldu |
+
+Namespace, Pod Security Admission etiketlerini ve politika katılım etiketini
+`managedNamespaceMetadata` üzerinden alıyor; yani GitOps ile yönetilen bir
+sürüm, elle kurulan bir sürümle tam olarak aynı kurallara tabi.
+
+**Sürüklenme olmayan kalıcı bir OutOfSync.** Application tam senkronken
+`OutOfSync` görünüyordu. API sunucusu StatefulSet `volumeClaimTemplates`
+alanına `apiVersion`, `kind`, `volumeMode` ve bir `status` bloğu ekliyor ve
+bunların hiçbiri manifest'te yazılamaz. Sürekli kırmızı yanan bir sinyal,
+herkesi GitOps'un var olma sebebi olan tek uyarıyı görmezden gelmeye alıştırır.
+`volumeMode` artık açıkça yazılı ve sunucunun sahip olduğu üç alan, tüm blok
+yerine jq yoluyla yok sayılıyor — yani depolama boyutundaki gerçek bir değişim
+hâlâ görülüyor.
+
 ### Dayanıklılık
 
 | Davranış | Uygulama | Ölçüm |
@@ -308,10 +340,12 @@ chart/                Helm chart — tek deploy yolu
   values-dev.yaml     minimum ayak izi, demo uçları açık
   values-prod.yaml    otomatik ölçekleme, yedekleme, izleme, ağ politikaları
   values-public.yaml  GHCR imajları, TLS, harici secret — herkese açık adres için
+gitops/               Argo CD Application'ı: cluster'da ne olmalı
 cluster/              cluster kapsamlı eklentiler, chart'ın dışında
   issuers.yaml        yerel CA — TLS yolu varsayılmıyor, çalıştırılıyor
   loki-values.yaml    tek-binary Loki, filesystem depolama, 72 saat saklama
   alloy-values.yaml   log toplayıcı, metriklerle aynı etiketlerle
+  argocd-values.yaml  Dex, bildirim ve ApplicationSet olmadan Argo CD
 policies/             cluster politikası, bilerek chart'ın dışında
   namespace.yaml      Pod Security Admission etiketleri
   admission-*.yaml    ValidatingAdmissionPolicy kuralları ve bağlamaları
