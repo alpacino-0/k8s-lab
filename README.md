@@ -1,5 +1,10 @@
 # k8s-lab
 
+[![CI](https://github.com/alpacino-0/k8s-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/alpacino-0/k8s-lab/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Kubernetes](https://img.shields.io/badge/kubernetes-1.36-326ce5?logo=kubernetes&logoColor=white)
+![Helm](https://img.shields.io/badge/helm-3-0f1689?logo=helm&logoColor=white)
+
 A Node.js + PostgreSQL service deployed to Kubernetes the way it would be run in
 production: non-root containers with a read-only root filesystem, default-deny
 network policies, a schema migration that runs once per release, verified
@@ -56,7 +61,7 @@ flowchart TB
 Requires Docker, [kind](https://kind.sigs.k8s.io/), kubectl and Helm.
 
 ```bash
-git clone https://github.com/<you>/k8s-lab.git && cd k8s-lab
+git clone https://github.com/alpacino-0/k8s-lab.git && cd k8s-lab
 make up                                    # cluster + ingress + build + deploy
 echo "127.0.0.1 app.local" | sudo tee -a /etc/hosts
 curl app.local:8080
