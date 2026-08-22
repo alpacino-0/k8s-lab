@@ -81,6 +81,10 @@ ingress:
   enabled: true
   className: nginx
   host: app.local
+  # Additional hostnames served by the same rules. `localhost` lets a kind
+  # cluster be reached at http://localhost:8080 without editing /etc/hosts,
+  # which is the only step of the quick start that needs root.
+  extraHosts: []
   tls:
     enabled: false
     secretName: k8s-lab-app-tls
