@@ -47,11 +47,11 @@ spec:
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "postgres.fullname" . }}
+                  name: {{ include "postgres.secretName" . }}
                   key: POSTGRES_PASSWORD
           envFrom:
             - secretRef:
-                name: {{ include "postgres.fullname" . }}
+                name: {{ include "postgres.secretName" . }}
           command:
             - sh
             - -c

@@ -182,15 +182,17 @@ web/                  React interface (Vite), served by unprivileged nginx
   src/                app · pod ledger · notes · mechanisms
   nginx.conf          SPA fallback, CSP, writes confined to /tmp
 chart/                Helm chart — the single deployment path
-  templates/          16 resource templates + helpers
+  templates/          17 resource templates + helpers
   values.yaml         documented defaults
   values-dev.yaml     minimal footprint, demo endpoints on
   values-prod.yaml    autoscaling, backups, monitoring, network policies
+  values-public.yaml  GHCR images, TLS, external secret — for a public address
 scripts/
   bootstrap.sh        idempotent cluster + ingress + deploy
   smoke-test.sh       31 end-to-end checks including security posture
   teardown.sh         destroy the cluster
 docs/
+  DEPLOY.md           runbook for putting this on a public address
   LEARNING-LOG.tr.md  measured results and the bugs found (Turkish)
 ```
 
@@ -283,8 +285,17 @@ invisible to everyone, and removed by the same job.
 **Text is sanitised, not trusted.** Control characters are stripped, length is
 capped at 500, the JSON body at 32kb, and the interface renders text as text.
 
-Still missing before this is a product rather than a reachable demo: TLS with
-a real certificate, a domain, off-cluster backups, and someone who gets paged.
+**Everything needed to publish is prepared but unused.** `chart/values-public.yaml`
+points at the published GHCR images, turns on TLS through cert-manager, marks
+the visitor cookie `Secure`, and takes the database password from a secret
+created outside the chart so it never appears in a file or a shell history.
+[docs/DEPLOY.md](docs/DEPLOY.md) is the runbook: k3s on a small VPS,
+ingress-nginx, cert-manager, one `helm upgrade`. The path was validated by
+deploying that profile from GHCR into a throwaway namespace — 31/31 checks —
+so what remains is a server and a domain, not unknowns.
+
+Still missing before this is a product rather than a reachable demo:
+off-cluster backups, and someone who gets paged.
 
 ## Known limitations
 

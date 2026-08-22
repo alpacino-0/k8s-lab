@@ -179,15 +179,17 @@ web/                  React arayüzü (Vite), yetkisiz nginx ile servis edilir
   src/                app · pod defteri · notlar · mekanizmalar
   nginx.conf          SPA fallback, CSP, yazma işlemleri /tmp ile sınırlı
 chart/                Helm chart — tek deploy yolu
-  templates/          16 kaynak şablonu + helper'lar
+  templates/          17 kaynak şablonu + helper'lar
   values.yaml         açıklamalı varsayılanlar
   values-dev.yaml     minimum ayak izi, demo uçları açık
   values-prod.yaml    otomatik ölçekleme, yedekleme, izleme, ağ politikaları
+  values-public.yaml  GHCR imajları, TLS, harici secret — herkese açık adres için
 scripts/
   bootstrap.sh        idempotent cluster + ingress + deploy
   smoke-test.sh       güvenlik duruşu dahil 31 uçtan uca kontrol
   teardown.sh         cluster'ı siler
 docs/
+  DEPLOY.md           herkese açık bir adrese alma kılavuzu
   LEARNING-LOG.tr.md  ölçümler ve bulunan hatalar
 ```
 
@@ -280,8 +282,17 @@ kimseye görünmüyorlar ve aynı iş tarafından temizleniyorlar.
 **Metin temizleniyor, güvenilmiyor.** Kontrol karakterleri ayıklanıyor, uzunluk
 500 karakterle, JSON gövdesi 32kb ile sınırlı; arayüz metni metin olarak basıyor.
 
-Ürün olması için hâlâ eksik olanlar: gerçek sertifikayla TLS, alan adı, cluster
-dışı yedekler ve gece uyandırılacak bir sorumlu.
+**Yayına almak için gereken her şey hazır, ama kullanılmıyor.**
+`chart/values-public.yaml` yayınlanmış GHCR imajlarını gösteriyor, cert-manager
+ile TLS'i açıyor, ziyaretçi çerezini `Secure` işaretliyor ve veritabanı
+parolasını chart dışında oluşturulmuş bir secret'tan alıyor — yani parola ne bir
+dosyaya ne kabuk geçmişine giriyor. [docs/DEPLOY.md](docs/DEPLOY.md) adım adım
+kılavuz: küçük bir VPS'te k3s, ingress-nginx, cert-manager, tek `helm upgrade`.
+Bu yol, aynı profil GHCR'dan geçici bir namespace'e kurularak doğrulandı —
+31/31 kontrol — yani geriye kalan bir sunucu ve bir alan adı, bilinmeyen değil.
+
+Ürün olması için hâlâ eksik olanlar: cluster dışı yedekler ve gece uyandırılacak
+bir sorumlu.
 
 ## Bilinen sınırlar
 

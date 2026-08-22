@@ -1,0 +1,115 @@
+# Profile for a publicly reachable deployment.
+#
+# Differences from values-prod.yaml, which targets a local cluster:
+#   - images come from GHCR instead of being side-loaded into kind
+#   - TLS is on and cert-manager issues the certificate
+#   - the visitor cookie is marked Secure, which requires TLS
+#   - the database password comes from a secret created out of band
+#
+# Deploy with:
+#   kubectl -n k8s-lab create secret generic db-credentials \
+#     --from-literal=POSTGRES_USER=labuser \
+#     --from-literal=POSTGRES_DB=labdb \
+#     --from-literal=POSTGRES_PASSWORD="$(openssl rand -base64 24)"
+#
+#   helm upgrade --install app ./chart -n k8s-lab --create-namespace \
+#     -f chart/values-public.yaml --set ingress.host=demo.your-domain.com
+#
+# See docs/DEPLOY.md for the full runbook.
+
+image:
+  repository: ghcr.io/alpacino-0/k8s-lab
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+
+web:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: ghcr.io/alpacino-0/k8s-lab-web
+    tag: "1.0.0"
+    pullPolicy: IfNotPresent
+
+config:
+  APP_ENV: production
+  LOG_LEVEL: info
+  GREETING: Hello
+  DEMO_ENDPOINTS: "false"     # /burn stays closed on a public address
+  MAX_NOTES_PER_VISITOR: "20"
+  MAX_NOTE_LENGTH: "500"
+  WRITES_PER_MINUTE: "40"
+  READS_PER_MINUTE: "240"
+  SECURE_COOKIE: "true"       # requires TLS below
+
+ingress:
+  enabled: true
+  className: nginx
+  host: demo.example.com      # override on the command line
+  extraHosts: []
+  tls:
+    enabled: true
+    secretName: k8s-lab-tls
+    clusterIssuer: letsencrypt-prod
+  rateLimit:
+    requestsPerSecond: 25
+    burstMultiplier: 5
+    connections: 20
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 6              # a small server cannot host ten; cap the bill
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 48Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# A single-node cluster cannot spread pods across machines. The constraint is
+# left on with ScheduleAnyway so it starts working the moment a second node
+# joins, without a redeploy.
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  whenUnsatisfiable: ScheduleAnyway
+
+retention:
+  enabled: true
+  schedule: "17 * * * *"
+  hours: 24
+
+postgres:
+  enabled: true
+  auth:
+    existingSecret: db-credentials    # never a password in this file
+  persistence:
+    size: 2Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 400m
+      memory: 384Mi
+  backup:
+    enabled: true
+    schedule: "0 2 * * *"
+    retainDays: 7
+    size: 2Gi
+    verifyOnInstall: true
+
+# Off by default: both need the Prometheus Operator CRDs installed first.
+serviceMonitor:
+  enabled: false
+  labels:
+    release: monitoring
+prometheusRule:
+  enabled: false

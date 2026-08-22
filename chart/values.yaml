@@ -107,6 +107,10 @@ ingress:
   tls:
     enabled: false
     secretName: k8s-lab-app-tls
+    # Name of a cert-manager ClusterIssuer. When set, cert-manager watches the
+    # Ingress and issues the certificate into secretName on its own — no
+    # Certificate resource to maintain here.
+    clusterIssuer: ""
   annotations: {}
 
 resources:
@@ -177,7 +181,11 @@ postgres:
   auth:
     username: labuser
     database: labdb
-    password: change-me    # override with --set or an external secret
+    password: change-me    # ignored when existingSecret is set
+    # Preferred in any real cluster: create the secret out of band and name it
+    # here, so no password is ever written into a values file or a shell
+    # history. It must contain POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB.
+    existingSecret: ""
   persistence:
     size: 1Gi
     storageClass: ""

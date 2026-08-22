@@ -56,13 +56,13 @@ spec:
                 - name: PGPASSWORD
                   valueFrom:
                     secretKeyRef:
-                      name: {{ include "postgres.fullname" . }}
+                      name: {{ include "postgres.secretName" . }}
                       key: POSTGRES_PASSWORD
                 - name: RETAIN_DAYS
                   value: {{ .Values.postgres.backup.retainDays | quote }}
               envFrom:
                 - secretRef:
-                    name: {{ include "postgres.fullname" . }}
+                    name: {{ include "postgres.secretName" . }}
               command:
                 - sh
                 - -c

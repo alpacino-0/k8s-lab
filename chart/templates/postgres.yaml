@@ -1,4 +1,5 @@
 {{- if .Values.postgres.enabled }}
+{{- if not .Values.postgres.auth.existingSecret }}
 apiVersion: v1
 kind: Secret
 metadata:
@@ -8,9 +9,10 @@ metadata:
 type: Opaque
 stringData:
   POSTGRES_USER: {{ .Values.postgres.auth.username | quote }}
-  POSTGRES_PASSWORD: {{ required "postgres.auth.password is required" .Values.postgres.auth.password | quote }}
+  POSTGRES_PASSWORD: {{ required "set postgres.auth.password or postgres.auth.existingSecret" .Values.postgres.auth.password | quote }}
   POSTGRES_DB: {{ .Values.postgres.auth.database | quote }}
 ---
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -61,7 +63,7 @@ spec:
               drop: ["ALL"]
           envFrom:
             - secretRef:
-                name: {{ include "postgres.fullname" . }}
+                name: {{ include "postgres.secretName" . }}
           env:
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
