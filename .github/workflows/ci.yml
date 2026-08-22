@@ -96,13 +96,13 @@ jobs:
           terraform -chdir=terraform validate
 
       - name: Lint the API Dockerfile
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@v3.4.0
         with:
           dockerfile: app/Dockerfile
           failure-threshold: warning
 
       - name: Lint the web Dockerfile
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@v3.4.0
         with:
           dockerfile: web/Dockerfile
           failure-threshold: warning
