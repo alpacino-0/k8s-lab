@@ -106,6 +106,16 @@ redis:
       cpu: 200m
       memory: 96Mi
 
+# Migration, backup and retention containers. Small, but never unbounded: an
+# unbounded job container can starve every workload on its node.
+jobResources:
+  requests:
+    cpu: 25m
+    memory: 32Mi
+  limits:
+    cpu: 300m
+    memory: 192Mi
+
 # Nothing is kept forever on a public demo.
 retention:
   enabled: true

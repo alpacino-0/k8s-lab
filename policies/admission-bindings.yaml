@@ -1,0 +1,42 @@
+# Bindings scope the policies to this project's namespace.
+#
+# Kept separate from the policies on purpose: the same policy can be bound to
+# more namespaces, or bound in Audit mode somewhere while it enforces here.
+# Start with Audit + Warn on a namespace you did not write, read the reports,
+# then switch to Deny.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: k8s-lab-resource-bounds
+spec:
+  policyName: k8s-lab-resource-bounds
+  validationActions: [Deny, Audit]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: k8s-lab
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: k8s-lab-image-provenance
+spec:
+  policyName: k8s-lab-image-provenance
+  validationActions: [Deny, Audit]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: k8s-lab
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: k8s-lab-workload-hygiene
+spec:
+  policyName: k8s-lab-workload-hygiene
+  validationActions: [Deny, Audit]
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: k8s-lab

@@ -88,6 +88,8 @@ spec:
                      -v ON_ERROR_STOP=1 --single-transaction -f "$f"
               done
               echo "migrations complete"
+          resources:
+            {{- toYaml .Values.jobResources | nindent 12 }}
           volumeMounts:
             - name: migrations
               mountPath: /migrations

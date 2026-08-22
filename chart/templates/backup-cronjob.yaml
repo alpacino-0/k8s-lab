@@ -78,6 +78,8 @@ spec:
                   echo "size: $(wc -c < "$OUT") bytes"
                   find /backup -name '*.sql.gz' -mtime "+${RETAIN_DAYS}" -delete
                   echo "retained backups:"; ls -1 /backup
+              resources:
+                {{- toYaml .Values.jobResources | nindent 16 }}
               volumeMounts:
                 - name: backup
                   mountPath: /backup
