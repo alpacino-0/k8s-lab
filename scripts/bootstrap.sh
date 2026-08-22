@@ -51,6 +51,7 @@ helm upgrade --install "$RELEASE" "$ROOT/chart" \
   --set image.tag="$IMAGE_TAG" \
   --set web.image.tag="$IMAGE_TAG" \
   --set postgres.auth.password="${PGPASSWORD:-local-dev-password}" \
+  --set 'ingress.extraHosts[0]=localhost' \
   --timeout 10m "$@"
 
 log "waiting for workloads"
@@ -62,8 +63,9 @@ log "done"
 kubectl -n "$NAMESPACE" get deploy,sts,svc,ingress,hpa
 cat <<TXT
 
-Add the host entry once, then browse to http://app.local:8080
+  Open http://localhost:8080
 
-  echo "127.0.0.1 app.local" | sudo tee -a /etc/hosts
+  The chart also serves app.local. To use that name instead, add it once:
+    echo "127.0.0.1 app.local" | sudo tee -a /etc/hosts
 
 TXT
