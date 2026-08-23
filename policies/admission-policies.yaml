@@ -116,12 +116,20 @@ spec:
     - name: podSpec
       expression: >-
         has(object.spec.template) ? object.spec.template.spec : object.spec
+    # `in` tests for the key. Testing only that the label map exists and then
+    # indexing it throws whenever the key is absent, and CEL absorbs that error
+    # when the other side of an || is true — so the fault stayed invisible for
+    # every workload that has probes, and surfaced only for one that does not:
+    # exactly the case the message below exists to explain. The user saw a CEL
+    # evaluation error instead of being told to add a probe.
     - name: isTask
       expression: >-
         (has(object.spec.template)
           ? (has(object.spec.template.metadata) && has(object.spec.template.metadata.labels)
+             && 'app.kubernetes.io/component' in object.spec.template.metadata.labels
              && object.spec.template.metadata.labels['app.kubernetes.io/component'] == 'database-job')
           : (has(object.metadata.labels)
+             && 'app.kubernetes.io/component' in object.metadata.labels
              && object.metadata.labels['app.kubernetes.io/component'] == 'database-job'))
   validations:
     - expression: >-

@@ -1,0 +1,308 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: applications.platform.k8s-lab.dev
+spec:
+  group: platform.k8s-lab.dev
+  names:
+    kind: Application
+    listKind: ApplicationList
+    plural: applications
+    shortNames:
+    - app
+    singular: application
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.readyReplicas
+      name: Replicas
+      type: string
+    - jsonPath: .status.url
+      name: URL
+      type: string
+    - jsonPath: .spec.image
+      name: Image
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Application is one deployable thing: an image, a port, and optionally a
+          hostname. The platform renders it into the dozen Kubernetes objects a
+          production workload needs, all of them hardened the same way, so that the
+          safe configuration is the only configuration rather than the one a careful
+          author remembers to write.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ApplicationSpec is the whole surface a user writes. Everything absent from it
+              is a decision the platform has already made: non-root, read-only root
+              filesystem, all capabilities dropped, no service-account token, default-deny
+              networking, a disruption budget, and a rollout that never takes a replica out
+              before its replacement is ready. Those are not defaults — there is no field
+              that turns them off.
+            properties:
+              autoscale:
+                description: |-
+                  Autoscale replaces a fixed replica count with a range. Scale-up is immediate
+                  and scale-down is deliberately slow: being late to scale up costs users,
+                  being hasty to scale down causes thrashing.
+                properties:
+                  maxReplicas:
+                    default: 10
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  minReplicas:
+                    default: 2
+                    format: int32
+                    minimum: 2
+                    type: integer
+                  targetCPUPercent:
+                    default: 60
+                    format: int32
+                    maximum: 100
+                    minimum: 1
+                    type: integer
+                type: object
+              domain:
+                description: |-
+                  Domain publishes the application at a hostname over HTTPS. Without it the
+                  application is reachable only inside the cluster.
+                type: string
+                x-kubernetes-validations:
+                - message: domain must be a lowercase DNS name
+                  rule: self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$')
+              env:
+                description: |-
+                  Env holds literal environment variables. These are visible to anyone who
+                  can read the Application, so credentials belong in EnvFrom.
+                items:
+                  description: |-
+                    EnvVar is a literal environment variable. Anything that should not be read
+                    from `kubectl get application -o yaml` belongs in a Secret listed under
+                    EnvFrom instead.
+                  properties:
+                    name:
+                      minLength: 1
+                      type: string
+                    value:
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              envFrom:
+                description: |-
+                  EnvFrom names Secrets whose keys are injected as environment variables.
+                  The Secret is referenced, never copied, so its value never appears in this
+                  object or in whatever produced it.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
+              health:
+                description: |-
+                  Health is how the platform decides whether a replica should receive traffic
+                  and whether it is still alive. The two questions are answered separately on
+                  purpose: a readiness failure removes one replica from a Service, a liveness
+                  failure restarts it. Pointing liveness at a dependency turns one slow database
+                  into every replica restarting at once.
+                properties:
+                  livenessPath:
+                    default: /healthz
+                    type: string
+                  readinessPath:
+                    default: /readyz
+                    type: string
+                type: object
+              image:
+                description: |-
+                  Image is the container image to run. A digest is preferred; a tag is
+                  accepted as long as it is not :latest, which means "whatever is there
+                  today" and makes a rollback restore something other than what was rolled
+                  back from.
+                minLength: 1
+                type: string
+                x-kubernetes-validations:
+                - message: image must carry an explicit tag or digest
+                  rule: self.contains(':') || self.contains('@')
+                - message: image must not use the :latest tag
+                  rule: '!self.endsWith('':latest'')'
+              port:
+                default: 8080
+                description: Port is the port the container listens on.
+                format: int32
+                maximum: 65535
+                minimum: 1
+                type: integer
+              replicas:
+                description: |-
+                  Replicas is a fixed replica count. Leave it unset and set autoscale
+                  instead to hand the decision to the HorizontalPodAutoscaler.
+                format: int32
+                minimum: 1
+                type: integer
+              resources:
+                description: |-
+                  Resources is what the container asks for and what it may not exceed. Both are
+                  required: a pod with no request is scheduled blind and a pod with no memory
+                  limit can take a node down with it. The admission policy rejects workloads
+                  that omit either, so there is no point in letting an Application omit them.
+                properties:
+                  cpuRequest:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    default: 100m
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  memoryLimit:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    default: 512Mi
+                    description: |-
+                      There is deliberately no CPU limit. CPU is compressible — throttling a
+                      container is better than the latency cliff a limit produces — while memory
+                      is not, so exceeding it has to mean eviction.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  memoryRequest:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    default: 128Mi
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                type: object
+            required:
+            - image
+            type: object
+            x-kubernetes-validations:
+            - message: set replicas or autoscale, not both
+              rule: 'has(self.replicas) ? !has(self.autoscale) : true'
+          status:
+            description: |-
+              ApplicationStatus reports what the platform observed, never what it was asked
+              for. A field here that merely echoes the spec would make an Application look
+              healthy before anything had happened.
+            properties:
+              conditions:
+                description: |-
+                  Conditions follows the standard Kubernetes convention: Ready says whether
+                  the application is serving, Progressing says whether it is still rolling.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the spec generation this status describes. When it
+                  trails metadata.generation the status is about the previous spec, which is
+                  the difference between "not ready yet" and "ready, but not to this".
+                format: int64
+                type: integer
+              readyReplicas:
+                format: int32
+                type: integer
+              replicas:
+                format: int32
+                type: integer
+              url:
+                description: URL is where the application answers, once an ingress
+                  exists for it.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      scale:
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
+      status: {}
