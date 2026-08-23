@@ -1,12 +1,62 @@
+# Grouped on purpose.
+#
+# Ungrouped, this repository produced seven pull requests and seven branches in
+# a week for four dependency updates that were all applied together anyway.
+# Each one costs a full CI run — including a real cluster — and none of them can
+# be reviewed in isolation, because a bundle is what actually gets tested.
+#
+# Majors stay separate. They are the ones that need a human to check something
+# beyond a green pipeline: node-redis 5 to 6 passed the unit tests, which mock
+# the client entirely, and only a real server proved the client still worked.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: /app
-    schedule: { interval: weekly }
+    schedule:
+      interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      app-minor-and-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
+      app-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      web-minor-and-patch:
+        applies-to: version-updates
+        update-types: [minor, patch]
+      web-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
   - package-ecosystem: github-actions
     directory: /
-    schedule: { interval: weekly }
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
   - package-ecosystem: docker
     directory: /app
-    schedule: { interval: weekly }
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /web
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: terraform
+    directory: /terraform
+    schedule:
+      interval: weekly
+    groups:
+      terraform:
+        patterns: ["*"]
