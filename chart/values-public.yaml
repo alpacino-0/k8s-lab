@@ -15,7 +15,7 @@
 #   helm upgrade --install app ./chart -n k8s-lab --create-namespace \
 #     -f chart/values-public.yaml --set ingress.host=demo.your-domain.com
 #
-# See docs/DEPLOY.md for the full runbook.
+# The deployment runbook is kept outside this repository.
 
 image:
   repository: ghcr.io/alpacino-0/k8s-lab

@@ -13,10 +13,7 @@ metrikleri ve her push'ta gerçek bir cluster'a deploy eden CI hattı.
 
 Buradaki her sayı, bu deponun kurduğu cluster üzerinde **ölçülmüştür**. Yol
 boyunca bulunan hatalar, tek bir listede toplanmak yerine bozdukları mekanizmanın
-anlatıldığı yerde yazılı. İlk dönemin ders kaydı — Bölüm 2-7, yapı Helm chart'a
-taşınmadan önce — tarihsel kayıt olarak duruyor:
-[docs/LEARNING-LOG.tr.md](docs/LEARNING-LOG.tr.md).
-İngilizce sürüm: [README.md](README.md).
+anlatıldığı yerde yazılı. İngilizce sürüm: [README.md](README.md).
 
 ```
 Kubernetes 1.36 · kind · Helm 3 · containerd · ingress-nginx · Prometheus · Grafana · GitHub Actions
@@ -458,9 +455,6 @@ scripts/
   policy-test.sh      her kuralın doğru şeyi reddettiğini kanıtlayan 8 kontrol
   smoke-test.sh       güvenlik duruşu ve izolasyon dahil 35 uçtan uca kontrol
   teardown.sh         cluster'ı siler
-docs/
-  DEPLOY.md           herkese açık bir adrese alma kılavuzu
-  LEARNING-LOG.tr.md  ölçümler ve bulunan hatalar
 ```
 
 ---
@@ -571,8 +565,7 @@ kimseye görünmüyorlar ve aynı iş tarafından temizleniyorlar.
 `chart/values-public.yaml` yayınlanmış GHCR imajlarını gösteriyor, cert-manager
 ile TLS'i açıyor, ziyaretçi çerezini `Secure` işaretliyor ve veritabanı
 parolasını chart dışında oluşturulmuş bir secret'tan alıyor — yani parola ne bir
-dosyaya ne kabuk geçmişine giriyor. [docs/DEPLOY.md](docs/DEPLOY.md) adım adım
-kılavuz: küçük bir VPS'te k3s, ingress-nginx, cert-manager, tek `helm upgrade`.
+dosyaya ne kabuk geçmişine giriyor. kılavuz: küçük bir VPS'te k3s, ingress-nginx, cert-manager, tek `helm upgrade`.
 Bu yol, aynı profil GHCR'dan geçici bir namespace'e kurularak doğrulandı —
 31/31 kontrol — yani geriye kalan bir sunucu ve bir alan adı, bilinmeyen değil.
 

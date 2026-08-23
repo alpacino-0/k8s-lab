@@ -2,216 +2,308 @@ package controller
 
 import (
 	"context"
-	"fmt"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
+	policyv1 "k8s.io/api/policy/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	platformv1alpha1 "github.com/alpacino-0/k8s-lab/operator/api/v1alpha1"
 )
 
-var _ = Describe("PROBES", func() {
-	pctx := context.Background()
+// countingClient counts Update calls per object kind.
+type countingClient struct {
+	client.Client
+	updates []string
+}
 
-	mkNS := func(n string) {
-		GinkgoHelper()
-		_ = k8sClient.Create(pctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: n}})
+func (c *countingClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	c.updates = append(c.updates, objKind(obj))
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+func objKind(obj client.Object) string {
+	switch obj.(type) {
+	case *appsv1.Deployment:
+		return "Deployment"
+	case *corev1.Service:
+		return "Service"
+	case *corev1.ServiceAccount:
+		return "ServiceAccount"
+	case *networkingv1.NetworkPolicy:
+		return "NetworkPolicy"
+	case *policyv1.PodDisruptionBudget:
+		return "PDB"
+	default:
+		return "other"
 	}
-	rec := func() *WorkloadReconciler {
-		return &WorkloadReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+}
+
+var _ = Describe("AUDITPROBE", func() {
+	ctx := context.Background()
+	ns := "default"
+
+	cleanup := func(name string) {
+		app := &platformv1alpha1.Workload{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, app); err == nil {
+			_ = k8sClient.Delete(ctx, app)
+		}
+		for _, obj := range []client.Object{
+			&appsv1.Deployment{}, &corev1.Service{}, &corev1.ServiceAccount{},
+			&networkingv1.NetworkPolicy{}, &policyv1.PodDisruptionBudget{},
+			&networkingv1.Ingress{}, &autoscalingv2.HorizontalPodAutoscaler{},
+		} {
+			obj.SetName(name)
+			obj.SetNamespace(ns)
+			_ = k8sClient.Delete(ctx, obj)
+		}
 	}
 
-	It("P1: deleteIfPresent kills a foreign Ingress with the same name", func() {
-		ns := "p1"
-		mkNS(ns)
-		foreign := &networkingv1.Ingress{
-			ObjectMeta: metav1.ObjectMeta{Name: "shop", Namespace: ns,
-				Labels: map[string]string{"owner": "someone-else"}},
+	// ---------------- CLAIM 1 ----------------
+	It("CLAIM1 foreign ingress and hpa", func() {
+		name := "probe-foreign"
+		defer cleanup(name)
+
+		pt := networkingv1.PathTypePrefix
+		foreignIng := &networkingv1.Ingress{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns,
+				Labels: map[string]string{"owner": "human"}},
 			Spec: networkingv1.IngressSpec{
-				Rules: []networkingv1.IngressRule{{Host: "victim.example.com"}},
+				Rules: []networkingv1.IngressRule{{
+					Host: "hand-made.example.com",
+					IngressRuleValue: networkingv1.IngressRuleValue{
+						HTTP: &networkingv1.HTTPIngressRuleValue{
+							Paths: []networkingv1.HTTPIngressPath{{
+								Path: "/", PathType: &pt,
+								Backend: networkingv1.IngressBackend{
+									Service: &networkingv1.IngressServiceBackend{
+										Name: "something-else",
+										Port: networkingv1.ServiceBackendPort{Number: 80},
+									},
+								},
+							}},
+						},
+					},
+				}},
 			},
 		}
-		Expect(k8sClient.Create(pctx, foreign)).To(Succeed())
+		Expect(k8sClient.Create(ctx, foreignIng)).To(Succeed())
 
-		Expect(k8sClient.Create(pctx, &platformv1alpha1.Workload{
-			ObjectMeta: metav1.ObjectMeta{Name: "shop", Namespace: ns},
-			Spec:       platformv1alpha1.WorkloadSpec{Image: "ghcr.io/x/a:1"},
+		foreignHPA := &autoscalingv2.HorizontalPodAutoscaler{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns,
+				Labels: map[string]string{"owner": "human"}},
+			Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+				ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+					APIVersion: "apps/v1", Kind: "Deployment", Name: "unrelated",
+				},
+				MinReplicas: ptr.To(int32(1)),
+				MaxReplicas: 4,
+			},
+		}
+		Expect(k8sClient.Create(ctx, foreignHPA)).To(Succeed())
+
+		Expect(k8sClient.Create(ctx, &platformv1alpha1.Workload{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec:       platformv1alpha1.WorkloadSpec{Image: "ghcr.io/example/app:1.0.0"},
 		})).To(Succeed())
 
-		_, err := rec().Reconcile(pctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: "shop", Namespace: ns}})
+		r := &WorkloadReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}})
 		Expect(err).NotTo(HaveOccurred())
 
-		got := &networkingv1.Ingress{}
-		gerr := k8sClient.Get(pctx, types.NamespacedName{Name: "shop", Namespace: ns}, got)
-		GinkgoWriter.Printf("P1 RESULT: foreign ingress get err = %v\n", gerr)
+		ingErr := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &networkingv1.Ingress{})
+		hpaErr := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &autoscalingv2.HorizontalPodAutoscaler{})
+		GinkgoWriter.Printf("RESULT CLAIM1 foreign-ingress-get-err=%v notfound=%v\n", ingErr, apierrors.IsNotFound(ingErr))
+		GinkgoWriter.Printf("RESULT CLAIM1 foreign-hpa-get-err=%v notfound=%v\n", hpaErr, apierrors.IsNotFound(hpaErr))
 	})
 
-	It("P2a: CreateOrUpdate adopts an unowned Service and rewrites its selector", func() {
-		ns := "p2"
-		mkNS(ns)
-		svc := &corev1.Service{
-			ObjectMeta: metav1.ObjectMeta{Name: "billing", Namespace: ns},
-			Spec: corev1.ServiceSpec{
-				Selector: map[string]string{"app": "billing-real"},
-				Ports:    []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt32(9000)}},
-			},
-		}
-		Expect(k8sClient.Create(pctx, svc)).To(Succeed())
+	// ---------------- CLAIM 2 ----------------
+	It("CLAIM2 stale deployment generation", func() {
+		name := "probe-stale"
+		defer cleanup(name)
+		key := types.NamespacedName{Name: name, Namespace: ns}
 
-		Expect(k8sClient.Create(pctx, &platformv1alpha1.Workload{
-			ObjectMeta: metav1.ObjectMeta{Name: "billing", Namespace: ns},
-			Spec:       platformv1alpha1.WorkloadSpec{Image: "evil/attacker:1"},
+		Expect(k8sClient.Create(ctx, &platformv1alpha1.Workload{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec:       platformv1alpha1.WorkloadSpec{Image: "ghcr.io/example/app:1.0.0"},
 		})).To(Succeed())
 
-		_, err := rec().Reconcile(pctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: "billing", Namespace: ns}})
-		GinkgoWriter.Printf("P2a reconcile err = %v\n", err)
+		r := &WorkloadReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
 
-		got := &corev1.Service{}
-		Expect(k8sClient.Get(pctx, types.NamespacedName{Name: "billing", Namespace: ns}, got)).To(Succeed())
-		GinkgoWriter.Printf("P2a RESULT selector=%v ownerRefs=%v\n", got.Spec.Selector, got.OwnerReferences)
-	})
+		dep := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
+		dep.Status.Replicas = 2
+		dep.Status.ReadyReplicas = 2
+		dep.Status.ObservedGeneration = dep.Generation
+		Expect(k8sClient.Status().Update(ctx, dep)).To(Succeed())
 
-	It("P2b: adopting a Deployment whose selector differs", func() {
-		ns := "p2b"
-		mkNS(ns)
-		dep := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: ns},
-			Spec: appsv1.DeploymentSpec{
-				Replicas: ptr.To(int32(1)),
-				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "orders"}},
-				Template: corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "orders"}},
-					Spec: corev1.PodSpec{Containers: []corev1.Container{
-						{Name: "c", Image: "internal/orders:9.9.9"}}},
-				},
-			},
+		app := &platformv1alpha1.Workload{}
+		Expect(k8sClient.Get(ctx, key, app)).To(Succeed())
+		app.Spec.Image = "ghcr.io/example/app:2.0.0-broken"
+		Expect(k8sClient.Update(ctx, app)).To(Succeed())
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(k8sClient.Get(ctx, key, app)).To(Succeed())
+		Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
+		for _, c := range app.Status.Conditions {
+			GinkgoWriter.Printf("RESULT CLAIM2 cond type=%s status=%s reason=%s msg=%q obsGen=%d\n",
+				c.Type, c.Status, c.Reason, c.Message, c.ObservedGeneration)
 		}
-		Expect(k8sClient.Create(pctx, dep)).To(Succeed())
-
-		Expect(k8sClient.Create(pctx, &platformv1alpha1.Workload{
-			ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: ns},
-			Spec:       platformv1alpha1.WorkloadSpec{Image: "evil/attacker:1"},
-		})).To(Succeed())
-
-		_, err := rec().Reconcile(pctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: "orders", Namespace: ns}})
-		GinkgoWriter.Printf("P2b RESULT reconcile err = %v\n", err)
-
-		got := &appsv1.Deployment{}
-		Expect(k8sClient.Get(pctx, types.NamespacedName{Name: "orders", Namespace: ns}, got)).To(Succeed())
-		GinkgoWriter.Printf("P2b RESULT image=%s ownerRefs=%v\n",
-			got.Spec.Template.Spec.Containers[0].Image, got.OwnerReferences)
+		GinkgoWriter.Printf("RESULT CLAIM2 wl-generation=%d wl-status-observedGeneration=%d\n",
+			app.Generation, app.Status.ObservedGeneration)
+		GinkgoWriter.Printf("RESULT CLAIM2 dep-generation=%d dep-status-observedGeneration=%d dep-image=%s dep-readyReplicas=%d\n",
+			dep.Generation, dep.Status.ObservedGeneration,
+			dep.Spec.Template.Spec.Containers[0].Image, dep.Status.ReadyReplicas)
 	})
 
-	It("P5: image validation with a ported registry and no tag", func() {
-		ns := "p5"
-		mkNS(ns)
-		for i, img := range []string{
-			"registry.local:5000/team-a/app",
-			"registry.local:5000/team-a/app:latest",
-			"nginx",
-			"nginx:latest",
-			"nginx:1.2.3",
-		} {
-			err := k8sClient.Create(pctx, &platformv1alpha1.Workload{
-				ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("img%d", i), Namespace: ns},
-				Spec:       platformv1alpha1.WorkloadSpec{Image: img},
-			})
-			GinkgoWriter.Printf("P5 RESULT image=%-40q accepted=%v err=%v\n", img, err == nil, err)
-		}
-	})
+	// ---------------- CLAIM 3 ----------------
+	It("CLAIM3 min greater than max", func() {
+		name := "probe-hpa"
+		defer cleanup(name)
+		key := types.NamespacedName{Name: name, Namespace: ns}
 
-	It("P12: min>max autoscale", func() {
-		ns := "p12"
-		mkNS(ns)
-		err := k8sClient.Create(pctx, &platformv1alpha1.Workload{
-			ObjectMeta: metav1.ObjectMeta{Name: "hpa", Namespace: ns},
+		err := k8sClient.Create(ctx, &platformv1alpha1.Workload{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 			Spec: platformv1alpha1.WorkloadSpec{
-				Image:     "ghcr.io/x/a:1",
-				Autoscale: &platformv1alpha1.Autoscale{MinReplicas: 9, MaxReplicas: 3, TargetCPUPercent: 60},
-			},
-		})
-		GinkgoWriter.Printf("P12 RESULT crd accepted=%v err=%v\n", err == nil, err)
-		if err == nil {
-			_, rerr := rec().Reconcile(pctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: "hpa", Namespace: ns}})
-			GinkgoWriter.Printf("P12 RESULT reconcile err = %v\n", rerr)
-			d := &appsv1.Deployment{}
-			GinkgoWriter.Printf("P12 RESULT deployment exists=%v\n",
-				k8sClient.Get(pctx, types.NamespacedName{Name: "hpa", Namespace: ns}, d) == nil)
-			h := &autoscalingv2.HorizontalPodAutoscaler{}
-			GinkgoWriter.Printf("P12 RESULT hpa exists=%v\n",
-				k8sClient.Get(pctx, types.NamespacedName{Name: "hpa", Namespace: ns}, h) == nil)
-			app := &platformv1alpha1.Workload{}
-			Expect(k8sClient.Get(pctx, types.NamespacedName{Name: "hpa", Namespace: ns}, app)).To(Succeed())
-			GinkgoWriter.Printf("P12 RESULT status conds = %+v\n", app.Status.Conditions)
-		}
-	})
-
-	It("P13: memoryLimit < memoryRequest", func() {
-		ns := "p13"
-		mkNS(ns)
-		err := k8sClient.Create(pctx, &platformv1alpha1.Workload{
-			ObjectMeta: metav1.ObjectMeta{Name: "mem", Namespace: ns},
-			Spec: platformv1alpha1.WorkloadSpec{
-				Image: "ghcr.io/x/a:1",
-				Resources: platformv1alpha1.Resources{
-					MemoryRequest: resource.MustParse("2Gi"),
-					MemoryLimit:   resource.MustParse("64Mi"),
+				Image: "ghcr.io/example/app:1.0.0",
+				Autoscale: &platformv1alpha1.Autoscale{
+					MinReplicas: 5, MaxReplicas: 3, TargetCPUPercent: 60,
 				},
 			},
 		})
-		GinkgoWriter.Printf("P13 RESULT crd accepted=%v err=%v\n", err == nil, err)
-		if err == nil {
-			_, rerr := rec().Reconcile(pctx, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: "mem", Namespace: ns}})
-			GinkgoWriter.Printf("P13 RESULT reconcile err = %v\n", rerr)
+		GinkgoWriter.Printf("RESULT CLAIM3 create-workload-err=%v\n", err)
+		if err != nil {
+			return
+		}
+
+		r := &WorkloadReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		_, rerr := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		GinkgoWriter.Printf("RESULT CLAIM3 reconcile-err=%v\n", rerr)
+
+		depErr := k8sClient.Get(ctx, key, &appsv1.Deployment{})
+		GinkgoWriter.Printf("RESULT CLAIM3 deployment-get-err=%v\n", depErr)
+
+		app := &platformv1alpha1.Workload{}
+		Expect(k8sClient.Get(ctx, key, app)).To(Succeed())
+		for _, c := range app.Status.Conditions {
+			GinkgoWriter.Printf("RESULT CLAIM3 cond %s=%s reason=%s msg=%q\n", c.Type, c.Status, c.Reason, c.Message)
 		}
 	})
 
-	It("P3: duplicate domain across namespaces", func() {
-		for _, ns := range []string{"tenant-a", "tenant-b"} {
-			mkNS(ns)
-			err := k8sClient.Create(pctx, &platformv1alpha1.Workload{
-				ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: ns},
-				Spec:       platformv1alpha1.WorkloadSpec{Image: "ghcr.io/x/a:1", Domain: "bank.example.com"},
-			})
-			GinkgoWriter.Printf("P3 RESULT ns=%s accepted=%v err=%v\n", ns, err == nil, err)
+	// ---------------- CLAIM 4 ----------------
+	It("CLAIM4 pdb at one replica", func() {
+		app := &platformv1alpha1.Workload{
+			ObjectMeta: metav1.ObjectMeta{Name: "one", Namespace: ns},
+			Spec:       platformv1alpha1.WorkloadSpec{Image: "x:1", Replicas: ptr.To(int32(1))},
 		}
+		pdb := desiredPodDisruptionBudget(app)
+		dep := desiredDeployment(app)
+		GinkgoWriter.Printf("RESULT CLAIM4 replicas=%d minAvailable=%v maxUnavailable=%v\n",
+			*dep.Spec.Replicas, pdb.Spec.MinAvailable, pdb.Spec.MaxUnavailable)
 	})
 
-	It("P9: PDB percentage math at replicas=1", func() {
-		for _, n := range []int{1, 2, 3, 4} {
-			v, err := intstr.GetScaledValueFromIntOrPercent(ptr.To(intstr.FromString("50%")), n, true)
-			GinkgoWriter.Printf("P9 RESULT expected=%d desiredHealthy=%d disruptionsAllowed=%d err=%v\n",
-				n, v, n-v, err)
+	// ---------------- CLAIM 5 ----------------
+	It("CLAIM5 probe timings", func() {
+		app := &platformv1alpha1.Workload{
+			ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: ns},
+			Spec:       platformv1alpha1.WorkloadSpec{Image: "x:1", Port: 8080},
 		}
-	})
-
-	It("P14: probe fields as rendered", func() {
-		app := &platformv1alpha1.Workload{ObjectMeta: metav1.ObjectMeta{Name: "pr", Namespace: "default"},
-			Spec: platformv1alpha1.WorkloadSpec{Image: "x:1"}}
 		normalise(app)
-		d := desiredDeployment(app)
-		lp := d.Spec.Template.Spec.Containers[0].LivenessProbe
-		GinkgoWriter.Printf("P14 RESULT liveness initialDelay=%d period=%d failureThreshold=%d startupProbe=%v\n",
-			lp.InitialDelaySeconds, lp.PeriodSeconds, lp.FailureThreshold,
-			d.Spec.Template.Spec.Containers[0].StartupProbe)
-		GinkgoWriter.Printf("P10 RESULT emptyDir=%+v limits=%+v\n",
-			d.Spec.Template.Spec.Volumes[0].VolumeSource.EmptyDir,
-			d.Spec.Template.Spec.Containers[0].Resources.Limits)
+		c := desiredDeployment(app).Spec.Template.Spec.Containers[0]
+		GinkgoWriter.Printf("RESULT CLAIM5 liveness initialDelay=%d period=%d timeout=%d failureThreshold=%d\n",
+			c.LivenessProbe.InitialDelaySeconds, c.LivenessProbe.PeriodSeconds,
+			c.LivenessProbe.TimeoutSeconds, c.LivenessProbe.FailureThreshold)
+		GinkgoWriter.Printf("RESULT CLAIM5 startupProbe-is-nil=%v\n", c.StartupProbe == nil)
+	})
+
+	// ---------------- CLAIM 6 ----------------
+	It("CLAIM6 long name", func() {
+		name := strings.Repeat("a", 70)
+		defer cleanup(name)
+		key := types.NamespacedName{Name: name, Namespace: ns}
+
+		err := k8sClient.Create(ctx, &platformv1alpha1.Workload{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec:       platformv1alpha1.WorkloadSpec{Image: "ghcr.io/example/app:1.0.0"},
+		})
+		GinkgoWriter.Printf("RESULT CLAIM6 create-workload len=%d err=%v\n", len(name), err)
+		if err != nil {
+			return
+		}
+		r := &WorkloadReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		_, rerr := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		GinkgoWriter.Printf("RESULT CLAIM6 reconcile-err=%v\n", rerr)
+		saErr := k8sClient.Get(ctx, key, &corev1.ServiceAccount{})
+		depErr := k8sClient.Get(ctx, key, &appsv1.Deployment{})
+		GinkgoWriter.Printf("RESULT CLAIM6 sa-err=%v dep-err=%v\n", saErr, depErr)
+	})
+
+	// ---------------- CLAIM 7 ----------------
+	It("CLAIM7 scale subresource", func() {
+		name := "probe-scale"
+		defer cleanup(name)
+		key := types.NamespacedName{Name: name, Namespace: ns}
+
+		Expect(k8sClient.Create(ctx, &platformv1alpha1.Workload{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec:       platformv1alpha1.WorkloadSpec{Image: "ghcr.io/example/app:1.0.0"},
+		})).To(Succeed())
+
+		app := &platformv1alpha1.Workload{}
+		Expect(k8sClient.Get(ctx, key, app)).To(Succeed())
+		GinkgoWriter.Printf("RESULT CLAIM7 stored-spec-replicas-is-nil=%v\n", app.Spec.Replicas == nil)
+		scale := &autoscalingv1.Scale{}
+		err := k8sClient.SubResource("scale").Get(ctx, app, scale)
+		GinkgoWriter.Printf("RESULT CLAIM7 scale-get-unset-err=%v\n", err)
+
+		app2 := &platformv1alpha1.Workload{}
+		Expect(k8sClient.Get(ctx, key, app2)).To(Succeed())
+		app2.Spec.Replicas = ptr.To(int32(3))
+		Expect(k8sClient.Update(ctx, app2)).To(Succeed())
+		scale2 := &autoscalingv1.Scale{}
+		err2 := k8sClient.SubResource("scale").Get(ctx, app2, scale2)
+		GinkgoWriter.Printf("RESULT CLAIM7 scale-get-set-err=%v spec=%+v\n", err2, scale2.Spec)
+	})
+
+	// ---------------- CLAIM 8 ----------------
+	It("CLAIM8 writes per reconcile", func() {
+		name := "probe-writes"
+		defer cleanup(name)
+		key := types.NamespacedName{Name: name, Namespace: ns}
+
+		Expect(k8sClient.Create(ctx, &platformv1alpha1.Workload{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec:       platformv1alpha1.WorkloadSpec{Image: "ghcr.io/example/app:1.0.0"},
+		})).To(Succeed())
+
+		cc := &countingClient{Client: k8sClient}
+		r := &WorkloadReconciler{Client: cc, Scheme: k8sClient.Scheme()}
+		for i := 1; i <= 4; i++ {
+			cc.updates = nil
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			dep := &appsv1.Deployment{}
+			_ = k8sClient.Get(ctx, key, dep)
+			GinkgoWriter.Printf("RESULT CLAIM8 pass=%d updates=%v dep-rv=%s dep-gen=%d dnsPolicy=%q restartPolicy=%q schedulerName=%q imagePullPolicy=%q\n",
+				i, cc.updates, dep.ResourceVersion, dep.Generation,
+				dep.Spec.Template.Spec.DNSPolicy, dep.Spec.Template.Spec.RestartPolicy,
+				dep.Spec.Template.Spec.SchedulerName, dep.Spec.Template.Spec.Containers[0].ImagePullPolicy)
+		}
 	})
 })

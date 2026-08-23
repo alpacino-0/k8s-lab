@@ -13,9 +13,7 @@ pipeline that deploys to a real cluster on every push.
 
 Every number in this README was measured on the cluster this repository builds.
 The bugs found along the way are written up where the mechanism they broke is
-explained, rather than collected in one place. The early tutorial log —
-sections 2-7, before the layout moved to a Helm chart — is kept as a historical
-record in [docs/LEARNING-LOG.tr.md](docs/LEARNING-LOG.tr.md). Turkish readme:
+explained, rather than collected in one place. Turkish readme:
 [README.tr.md](README.tr.md).
 
 ```
@@ -460,9 +458,6 @@ scripts/
   policy-test.sh      10 checks that each rule rejects what it should
   smoke-test.sh       35 end-to-end checks including security posture and isolation
   teardown.sh         destroy the cluster
-docs/
-  DEPLOY.md           runbook for putting this on a public address
-  LEARNING-LOG.tr.md  measured results and the bugs found (Turkish)
 ```
 
 ---
@@ -573,8 +568,8 @@ capped at 500, the JSON body at 32kb, and the interface renders text as text.
 points at the published GHCR images, turns on TLS through cert-manager, marks
 the visitor cookie `Secure`, and takes the database password from a secret
 created outside the chart so it never appears in a file or a shell history.
-[docs/DEPLOY.md](docs/DEPLOY.md) is the runbook: k3s on a small VPS,
-ingress-nginx, cert-manager, one `helm upgrade`. The path was validated by
+Deployment is k3s on a small VPS, ingress-nginx, cert-manager and one
+`helm upgrade`. The path was validated by
 deploying that profile from GHCR into a throwaway namespace — 31/31 checks —
 so what remains is a server and a domain, not unknowns.
 

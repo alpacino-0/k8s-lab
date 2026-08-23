@@ -19,3 +19,6 @@ kubeconform
 .idea/
 .vscode/
 *.swp
+
+# Development notes — private, not published
+docs/
