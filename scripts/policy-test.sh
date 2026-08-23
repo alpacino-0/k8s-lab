@@ -180,6 +180,54 @@ spec:
 EOF
 must_reject "a bad Deployment fails at apply time" "ValidatingAdmissionPolicy"
 
+# ---- image signatures -------------------------------------------------------
+# Only when Kyverno is installed: this is the one rule that needs it, because
+# verifying a signature means reaching a registry and a transparency log, which
+# the built-in admission engine cannot do.
+if kubectl get clusterpolicy verify-image-signatures >/dev/null 2>&1; then
+  signed_pod() {
+    sed "s|IMAGE_REF|$1|; s|POD_NAME|$2|" > "$WORK/manifest.yaml" <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: POD_NAME
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: c
+      image: IMAGE_REF
+      command: ["node", "-e", "0"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: { drop: ["ALL"] }
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { memory: 64Mi }
+      readinessProbe: { exec: { command: ["true"] } }
+      livenessProbe: { exec: { command: ["true"] } }
+EOF
+  }
+
+  signed_pod "${SIGNED_IMAGE:-ghcr.io/alpacino-0/k8s-lab:1.0.0}" sig-ok
+  must_admit "an image signed by the pipeline is admitted"
+
+  # An image that exists but was published before signing was added. Testing
+  # with a tag that does not exist would prove nothing: the rejection would say
+  # "manifest unknown", which is a different failure wearing the same colour.
+  if [[ -n "${UNSIGNED_IMAGE:-}" ]]; then
+    signed_pod "$UNSIGNED_IMAGE" sig-unsigned
+    must_reject "an unsigned image is rejected" "no signatures found"
+  else
+    echo "  ....  skipping the unsigned case: set UNSIGNED_IMAGE to an image that exists but is not signed"
+  fi
+fi
+
 echo
 if [[ "$FAILED" -eq 0 ]]; then echo "all policy checks passed"; else echo "some policy checks failed"; fi
 exit "$FAILED"

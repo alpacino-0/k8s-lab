@@ -223,7 +223,24 @@ jobs:
           docker build -t "k8s-lab-web:${IMAGE_TAG}" ./web
           kind load docker-image "k8s-lab-app:${IMAGE_TAG}" "k8s-lab-web:${IMAGE_TAG}" --name ci
 
+      # Kyverno is installed for one rule: verifying that an image was signed by
+      # this pipeline. Everything else in policies/ runs in the API server.
+      - name: Install Kyverno for signature verification
+        run: |
+          helm repo add kyverno https://kyverno.github.io/kyverno/
+          helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace \
+            --set admissionController.replicas=1 --set backgroundController.replicas=1 \
+            --set cleanupController.enabled=false --set reportsController.enabled=false \
+            --wait --timeout 10m
+          kubectl apply -f policies/kyverno-image-signatures.yaml
+
       - name: Policies must reject what they are meant to
+        env:
+          # Published before signing was added, so it exists and carries no
+          # signature — the only way to prove the rule rejects for the right
+          # reason rather than because a tag is missing.
+          UNSIGNED_IMAGE: ghcr.io/alpacino-0/k8s-lab:c5cc9e7e18a9a438bcabf3c03b7a7353d84148c4
+          SIGNED_IMAGE: ghcr.io/alpacino-0/k8s-lab:1.0.0
         run: NAMESPACE=k8s-lab IMAGE="k8s-lab-app:${IMAGE_TAG}" ./scripts/policy-test.sh
 
       - name: Install the chart
