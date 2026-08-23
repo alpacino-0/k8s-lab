@@ -97,6 +97,7 @@ test('/config never leaks credentials', async () => {
     async (base) => {
       const body = await (await fetch(`${base}/config`)).text();
       assert.ok(!body.includes('super-secret'), '/config must not expose the password');
+      assert.ok(!body.includes('pg'), '/config must not expose the database address either');
       assert.match(body, /"databaseConfigured":true/);
     },
   );
