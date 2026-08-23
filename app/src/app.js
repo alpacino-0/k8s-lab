@@ -126,12 +126,14 @@ function createApp({ config, logger, metrics, db, redis = null }) {
   });
 
   app.get('/config', (req, res) => {
-    // Never expose credentials — only whether they are present.
+    // Never expose credentials, and never expose internal addresses either.
+    // The database hostname is not a secret, but it is a free piece of the
+    // cluster's map for anyone probing from outside, and nothing needs it —
+    // the interface reads /stats, not this.
     res.json({
       env: config.env,
       logLevel: config.logLevel,
       databaseConfigured: Boolean(db),
-      databaseHost: config.db ? config.db.host : null,
       demoEndpoints: config.demoEndpoints,
     });
   });
