@@ -238,7 +238,23 @@ jobs:
             --set admissionController.replicas=1 --set backgroundController.replicas=1 \
             --set cleanupController.enabled=false --set reportsController.enabled=false \
             --wait --timeout 10m
-          kubectl apply -f policies/kyverno-image-signatures.yaml
+
+          # helm --wait returns when the pods report Ready, which is earlier than
+          # the moment Kyverno's own webhook starts accepting connections — and
+          # every ClusterPolicy apply goes through that webhook. Applying straight
+          # away fails with "connection refused" often enough to matter.
+          for attempt in $(seq 1 30); do
+            if kubectl apply -f policies/kyverno-image-signatures.yaml; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              echo "kyverno webhook never became reachable"
+              kubectl -n kyverno get pods,svc,endpoints
+              kubectl -n kyverno logs -l app.kubernetes.io/component=admission-controller --tail=50
+              exit 1
+            fi
+            sleep 2
+          done
 
       - name: Policies must reject what they are meant to
         env:

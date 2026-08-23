@@ -126,6 +126,10 @@ helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace \
 kubectl apply -f policies/kyverno-image-signatures.yaml
 ```
 
+If that last line returns `connection refused`, wait a few seconds and run it
+again: `--wait` returns when the pods are Ready, which is slightly before
+Kyverno's own webhook starts accepting the policy you are applying through it.
+
 After this, only images signed by this repository's pipeline can run, and each
 is rewritten to its digest on admission so a moved tag cannot change what runs.
 
