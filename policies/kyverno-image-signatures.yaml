@@ -1,0 +1,49 @@
+# The one rule that needs a policy engine.
+#
+# Everything else in policies/ is a ValidatingAdmissionPolicy running inside
+# the API server. This is not, because the built-in engine has no way to reach
+# a registry, fetch a signature and check it against an identity. That is the
+# whole justification for Kyverno being installed.
+#
+# Scoped to this project's own registry namespace. Locally built k8s-lab-*
+# images are unsigned by design — they never leave the machine — and the
+# official postgres and redis images are signed by other identities entirely.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signatures
+  annotations:
+    policies.kyverno.io/title: Only run images this pipeline signed
+    policies.kyverno.io/category: Supply chain
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: Enforce
+  background: false          # verification needs a registry call, not a replay
+  webhookTimeoutSeconds: 30
+  failurePolicy: Fail
+  rules:
+    - name: ghcr-images-must-be-signed
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: ["k8s-lab", "k8s-lab-gitops"]
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/alpacino-0/k8s-lab*"
+          # Rewrite the tag to the digest that was actually verified. Without
+          # this a signed digest is checked and then a mutable tag is pulled,
+          # which is a different image by the time it matters.
+          mutateDigest: true
+          required: true
+          attestors:
+            - count: 1
+              entries:
+                # Keyless: there is no public key to distribute. The claim is
+                # that a workflow in this repository produced this digest, and
+                # Fulcio and Rekor are what make that checkable.
+                - keyless:
+                    subject: "https://github.com/alpacino-0/k8s-lab/*"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev

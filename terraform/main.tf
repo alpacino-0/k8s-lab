@@ -88,6 +88,39 @@ resource "helm_release" "argocd" {
   values = [file("${path.module}/../cluster/argocd-values.yaml")]
 }
 
+# ---------------------------------------------------------------- kyverno
+
+# Kyverno is installed for exactly one capability: verifying that an image was
+# signed by this repository's pipeline. Everything else it could do here is
+# already done by ValidatingAdmissionPolicy, which runs in the API server and
+# costs no pods — the earlier version of these policies was Kyverno's and was
+# moved for that reason.
+#
+# Signature verification is the one thing the built-in engine cannot do: it has
+# no way to reach a registry, fetch a signature and check it against an
+# identity.
+resource "helm_release" "kyverno" {
+  count = var.install_kyverno ? 1 : 0
+
+  name             = "kyverno"
+  repository       = "https://kyverno.github.io/kyverno/"
+  chart            = "kyverno"
+  version          = var.kyverno_version
+  namespace        = "kyverno"
+  create_namespace = true
+  wait             = true
+  timeout          = 600
+
+  set = [
+    { name = "admissionController.replicas", value = "1" },
+    { name = "backgroundController.replicas", value = "1" },
+    { name = "cleanupController.enabled", value = "false" },
+    { name = "reportsController.enabled", value = "false" },
+    { name = "admissionController.container.resources.requests.memory", value = "128Mi" },
+    { name = "admissionController.container.resources.limits.memory", value = "384Mi" },
+  ]
+}
+
 # ---------------------------------------------------------------- policies
 
 # The admission policies use built-in APIs, so there is no CRD to wait for and
