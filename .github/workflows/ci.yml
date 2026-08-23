@@ -69,12 +69,19 @@ jobs:
             echo "::endgroup::"
           done
 
+      # The CRD catalog is given explicitly rather than reaching for
+      # -ignore-missing-schemas. That flag would make the Kyverno policy pass by
+      # not being checked at all, and quietly do the same for the next custom
+      # resource added here.
       - name: Validate the policy manifests
         run: |
           curl -sSLo kubeconform.tar.gz \
             https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
           tar xf kubeconform.tar.gz kubeconform
-          ./kubeconform -strict -summary policies/
+          ./kubeconform -strict -summary \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            policies/
 
       - name: Validate rendered manifests against the Kubernetes schema
         run: |
