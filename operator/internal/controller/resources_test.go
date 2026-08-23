@@ -221,3 +221,37 @@ func TestDisruptionBudgetIsProportional(t *testing.T) {
 		t.Errorf("minAvailable = %v, want a percentage", pdb.Spec.MinAvailable)
 	}
 }
+
+// A container that needs longer than liveness allows must still be given the
+// chance to start. Without a startup probe the kubelet begins liveness checks
+// at once and kills anything slower than periodSeconds * failureThreshold.
+func TestSlowStartIsSurvivable(t *testing.T) {
+	c := desiredDeployment(app()).Spec.Template.Spec.Containers[0]
+
+	if c.StartupProbe == nil {
+		t.Fatal("no startup probe: any image slower than ~15s restarts forever")
+	}
+	budget := c.StartupProbe.PeriodSeconds * c.StartupProbe.FailureThreshold
+	if budget < 120 {
+		t.Errorf("startup budget is %ds, too short for a runtime that compiles or migrates on boot", budget)
+	}
+	if c.StartupProbe.HTTPGet == nil || c.StartupProbe.HTTPGet.Path != c.LivenessProbe.HTTPGet.Path {
+		t.Error("the startup probe should check the same endpoint liveness will")
+	}
+}
+
+// The images this platform is built to run are distroless: no shell, no
+// coreutils, no /bin/sleep. An exec hook would fail and the grace period it
+// promises would never happen.
+func TestPreStopDoesNotDependOnTheImage(t *testing.T) {
+	lc := desiredDeployment(app()).Spec.Template.Spec.Containers[0].Lifecycle
+	if lc == nil || lc.PreStop == nil {
+		t.Fatal("no preStop hook")
+	}
+	if lc.PreStop.Exec != nil {
+		t.Error("preStop execs a binary, which a distroless image does not have")
+	}
+	if lc.PreStop.Sleep == nil || lc.PreStop.Sleep.Seconds <= 0 {
+		t.Error("preStop does not use the kubelet's own sleep")
+	}
+}

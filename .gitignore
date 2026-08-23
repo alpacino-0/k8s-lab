@@ -20,5 +20,9 @@ kubeconform
 .vscode/
 *.swp
 
-# Development notes — private, not published
-docs/
+# Development notes — private, not published. DEPLOY.md is the exception: it is
+# a runbook for other people, not a working note. The directory has to be
+# excluded by contents rather than as a whole, because git does not descend into
+# an excluded directory to find a negation.
+docs/*
+!docs/DEPLOY.md

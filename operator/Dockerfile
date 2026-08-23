@@ -1,7 +1,7 @@
 # Build the manager binary
 # Pinned rather than tracking a major line, so a rebuild months from now
 # produces the same binary. Kept in step with the go directive in go.mod.
-ARG GO_VERSION=1.26.0
+ARG GO_VERSION=1.27.0
 FROM golang:${GO_VERSION}-alpine AS builder
 ARG TARGETOS
 ARG TARGETARCH

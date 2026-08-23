@@ -149,6 +149,29 @@ var _ = Describe("Workload Controller", func() {
 			"reconciling undid the autoscaler's decision, so the two will fight forever")
 	})
 
+	// Deleting by name alone would destroy an object that merely shares a name
+	// with this Workload — one that could be carrying live traffic and that this
+	// operator never created.
+	It("refuses to delete an object it does not own", func() {
+		foreign := &networkingv1.Ingress{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+			Spec: networkingv1.IngressSpec{
+				Rules: []networkingv1.IngressRule{{Host: "someone-elses.example.com"}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+
+		// No domain, so the reconciler wants no Ingress and reaches for the
+		// delete path.
+		create(platformv1alpha1.WorkloadSpec{Image: testImage})
+		reconcileNow()
+
+		survivor := &networkingv1.Ingress{}
+		Expect(k8sClient.Get(ctx, key, survivor)).To(Succeed(),
+			"the operator deleted an Ingress it never created")
+		Expect(survivor.Spec.Rules[0].Host).To(Equal("someone-elses.example.com"))
+	})
+
 	It("reports what it observed rather than what it was asked for", func() {
 		create(platformv1alpha1.WorkloadSpec{Image: testImage})
 		reconcileNow()

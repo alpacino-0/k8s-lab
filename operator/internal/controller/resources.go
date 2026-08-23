@@ -44,7 +44,14 @@ const (
 	// preStop buys the endpoint removal a head start. Without it, a pod is
 	// removed from the Service and its process is killed at the same moment,
 	// and whichever loses that race drops requests that were already in flight.
-	preStopSleepSecs = "5"
+	preStopSleepSecs int64 = 5
+
+	// How long a container may take to answer its first probe before the kubelet
+	// gives up. Liveness does not run until the startup probe has succeeded, so
+	// this is the budget for a slow start — a JVM, a runtime that compiles on
+	// boot, a process that runs a migration first.
+	startupPeriodSecs    int32 = 5
+	startupFailureBudget int32 = 60
 
 	// The ingress controller lives here. Namespaces carry
 	// kubernetes.io/metadata.name automatically, so this needs no cooperation
@@ -189,13 +196,23 @@ func desiredDeployment(app *platformv1alpha1.Workload) *appsv1.Deployment {
 								corev1.ResourceMemory: app.Spec.Resources.MemoryLimit,
 							},
 						},
+						// Liveness is held back until startup succeeds. Without
+						// a startup probe the kubelet begins liveness checks
+						// immediately, and a container that needs 30 seconds to
+						// answer is killed at 15 — every time, forever, with no
+						// field on the spec that could rescue it.
+						StartupProbe:   startupProbe(app),
 						LivenessProbe:  probe(app.Spec.Health.LivenessPath),
 						ReadinessProbe: probe(app.Spec.Health.ReadinessPath),
 						Lifecycle: &corev1.Lifecycle{
+							// The kubelet's own sleep, not /bin/sleep. An exec
+							// hook needs that binary to exist in the image, and
+							// the images worth running here are distroless ones
+							// that have no shell and no coreutils — so the exec
+							// form fails silently and the grace period this is
+							// supposed to buy never happens.
 							PreStop: &corev1.LifecycleHandler{
-								Exec: &corev1.ExecAction{
-									Command: []string{"sleep", preStopSleepSecs},
-								},
+								Sleep: &corev1.SleepAction{Seconds: preStopSleepSecs},
 							},
 						},
 						SecurityContext: &corev1.SecurityContext{
@@ -215,6 +232,22 @@ func desiredDeployment(app *platformv1alpha1.Workload) *appsv1.Deployment {
 				},
 			},
 		},
+	}
+}
+
+// startupProbe gives a slow container startupFailureBudget * startupPeriodSecs
+// seconds to answer once, and asks nothing of it after that.
+func startupProbe(app *platformv1alpha1.Workload) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: app.Spec.Health.LivenessPath,
+				Port: intstr.FromInt32(app.Spec.Port),
+			},
+		},
+		PeriodSeconds:    startupPeriodSecs,
+		TimeoutSeconds:   3,
+		FailureThreshold: startupFailureBudget,
 	}
 }
 

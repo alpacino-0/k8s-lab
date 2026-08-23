@@ -565,7 +565,9 @@ kimseye görünmüyorlar ve aynı iş tarafından temizleniyorlar.
 `chart/values-public.yaml` yayınlanmış GHCR imajlarını gösteriyor, cert-manager
 ile TLS'i açıyor, ziyaretçi çerezini `Secure` işaretliyor ve veritabanı
 parolasını chart dışında oluşturulmuş bir secret'tan alıyor — yani parola ne bir
-dosyaya ne kabuk geçmişine giriyor. kılavuz: küçük bir VPS'te k3s, ingress-nginx, cert-manager, tek `helm upgrade`.
+dosyaya ne kabuk geçmişine giriyor.
+[docs/DEPLOY.md](docs/DEPLOY.md) adım adım kılavuz: küçük bir VPS'te k3s,
+ingress-nginx, cert-manager, tek `helm upgrade`.
 Bu yol, aynı profil GHCR'dan geçici bir namespace'e kurularak doğrulandı —
 31/31 kontrol — yani geriye kalan bir sunucu ve bir alan adı, bilinmeyen değil.
 

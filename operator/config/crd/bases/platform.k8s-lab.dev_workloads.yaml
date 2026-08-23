@@ -74,6 +74,10 @@ spec:
                   Autoscale replaces a fixed replica count with a range. Scale-up is immediate
                   and scale-down is deliberately slow: being late to scale up costs users,
                   being hasty to scale down causes thrashing.
+
+                  The bound is checked here rather than left to the HorizontalPodAutoscaler.
+                  Without it the CRD accepts max < min, the HPA is then rejected as invalid, and
+                  reconciliation fails on every pass with an error the author never sees.
                 properties:
                   maxReplicas:
                     default: 10
@@ -92,6 +96,9 @@ spec:
                     minimum: 1
                     type: integer
                 type: object
+                x-kubernetes-validations:
+                - message: maxReplicas must be greater than or equal to minReplicas
+                  rule: self.maxReplicas >= self.minReplicas
               domain:
                 description: |-
                   Domain publishes the workload at a hostname over HTTPS. Without it the
@@ -152,11 +159,16 @@ spec:
                   accepted as long as it is not :latest, which means "whatever is there
                   today" and makes a rollback restore something other than what was rolled
                   back from.
+                  The tag has to be looked for in the last path segment. Checking the whole
+                  string lets `registry.local:5000/team-a/app` through — the colon belongs to
+                  the registry port, there is no tag at all, and the kubelet resolves that to
+                  :latest. The rule would then admit precisely what it exists to forbid.
                 minLength: 1
                 type: string
                 x-kubernetes-validations:
                 - message: image must carry an explicit tag or digest
-                  rule: self.contains(':') || self.contains('@')
+                  rule: self.contains('@') || self.split('/')[int(self.split('/').size())
+                    - 1].contains(':')
                 - message: image must not use the :latest tag
                   rule: '!self.endsWith('':latest'')'
               port:
@@ -178,7 +190,11 @@ spec:
                   Resources is what the container asks for and what it may not exceed. Both are
                   required: a pod with no request is scheduled blind and a pod with no memory
                   limit can take a node down with it. The admission policy rejects workloads
-                  that omit either, so there is no point in letting an Workload omit them.
+                  that omit either, so there is no point in letting a Workload omit them.
+
+                  Raising only the request past the default limit is an easy mistake to make and
+                  produces a Deployment the API server refuses, so it is caught at admission
+                  where the message can name the field.
                 properties:
                   cpuRequest:
                     anyOf:
@@ -206,6 +222,10 @@ spec:
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                 type: object
+                x-kubernetes-validations:
+                - message: memoryLimit must be greater than or equal to memoryRequest
+                  rule: quantity(self.memoryLimit).compareTo(quantity(self.memoryRequest))
+                    >= 0
             required:
             - image
             type: object
@@ -302,7 +322,4 @@ spec:
     served: true
     storage: true
     subresources:
-      scale:
-        specReplicasPath: .spec.replicas
-        statusReplicasPath: .status.replicas
       status: {}

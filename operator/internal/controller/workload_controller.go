@@ -206,18 +206,30 @@ func (r *WorkloadReconciler) apply(
 	return err
 }
 
+// deleteIfPresent removes an object this Workload no longer wants — but only if
+// this Workload is the thing that created it.
+//
+// Deleting by name and namespace alone is enough to destroy something that
+// merely shares a name. A Workload called `blog` with no domain would delete an
+// unrelated Ingress called `blog` in the same namespace, one that could be
+// carrying live traffic and that this operator never created. The owner
+// reference is the only thing that distinguishes the two.
 func (r *WorkloadReconciler) deleteIfPresent(
 	ctx context.Context,
 	app *platformv1alpha1.Workload,
 	obj client.Object,
 ) error {
-	obj.SetName(app.Name)
-	obj.SetNamespace(app.Namespace)
-	err := r.Delete(ctx, obj)
-	if apierrors.IsNotFound(err) {
+	key := client.ObjectKey{Name: app.Name, Namespace: app.Namespace}
+	if err := r.Get(ctx, key, obj); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(obj, app) {
+		log.FromContext(ctx).Info(
+			"leaving an object alone because this workload does not own it",
+			"kind", obj.GetObjectKind().GroupVersionKind().Kind, "name", key.Name)
 		return nil
 	}
-	return err
+	return client.IgnoreNotFound(r.Delete(ctx, obj))
 }
 
 func (r *WorkloadReconciler) updateStatus(

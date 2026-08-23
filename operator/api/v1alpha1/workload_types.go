@@ -35,7 +35,12 @@ type EnvVar struct {
 // Resources is what the container asks for and what it may not exceed. Both are
 // required: a pod with no request is scheduled blind and a pod with no memory
 // limit can take a node down with it. The admission policy rejects workloads
-// that omit either, so there is no point in letting an Workload omit them.
+// that omit either, so there is no point in letting a Workload omit them.
+//
+// Raising only the request past the default limit is an easy mistake to make and
+// produces a Deployment the API server refuses, so it is caught at admission
+// where the message can name the field.
+// +kubebuilder:validation:XValidation:rule="quantity(self.memoryLimit).compareTo(quantity(self.memoryRequest)) >= 0",message="memoryLimit must be greater than or equal to memoryRequest"
 type Resources struct {
 	// +kubebuilder:default="100m"
 	CPURequest resource.Quantity `json:"cpuRequest,omitempty"`
@@ -66,6 +71,11 @@ type Health struct {
 // Autoscale replaces a fixed replica count with a range. Scale-up is immediate
 // and scale-down is deliberately slow: being late to scale up costs users,
 // being hasty to scale down causes thrashing.
+//
+// The bound is checked here rather than left to the HorizontalPodAutoscaler.
+// Without it the CRD accepts max < min, the HPA is then rejected as invalid, and
+// reconciliation fails on every pass with an error the author never sees.
+// +kubebuilder:validation:XValidation:rule="self.maxReplicas >= self.minReplicas",message="maxReplicas must be greater than or equal to minReplicas"
 type Autoscale struct {
 	// +kubebuilder:validation:Minimum=2
 	// +kubebuilder:default=2
@@ -94,7 +104,11 @@ type WorkloadSpec struct {
 	// today" and makes a rollback restore something other than what was rolled
 	// back from.
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:XValidation:rule="self.contains(':') || self.contains('@')",message="image must carry an explicit tag or digest"
+	// The tag has to be looked for in the last path segment. Checking the whole
+	// string lets `registry.local:5000/team-a/app` through — the colon belongs to
+	// the registry port, there is no tag at all, and the kubelet resolves that to
+	// :latest. The rule would then admit precisely what it exists to forbid.
+	// +kubebuilder:validation:XValidation:rule="self.contains('@') || self.split('/')[int(self.split('/').size()) - 1].contains(':')",message="image must carry an explicit tag or digest"
 	// +kubebuilder:validation:XValidation:rule="!self.endsWith(':latest')",message="image must not use the :latest tag"
 	Image string `json:"image"`
 
@@ -158,7 +172,10 @@ type WorkloadStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas
+// There is deliberately no scale subresource. It would have to point at
+// .spec.replicas, which is absent whenever autoscaling owns the count, and
+// `kubectl scale` against a missing path returns a 500. Scaling belongs to the
+// autoscaler or to the replica count in the spec.
 // +kubebuilder:resource:shortName=wl
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Replicas",type=string,JSONPath=`.status.readyReplicas`

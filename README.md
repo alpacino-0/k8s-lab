@@ -568,8 +568,8 @@ capped at 500, the JSON body at 32kb, and the interface renders text as text.
 points at the published GHCR images, turns on TLS through cert-manager, marks
 the visitor cookie `Secure`, and takes the database password from a secret
 created outside the chart so it never appears in a file or a shell history.
-Deployment is k3s on a small VPS, ingress-nginx, cert-manager and one
-`helm upgrade`. The path was validated by
+[docs/DEPLOY.md](docs/DEPLOY.md) is the runbook: k3s on a small VPS,
+ingress-nginx, cert-manager, one `helm upgrade`. The path was validated by
 deploying that profile from GHCR into a throwaway namespace — 31/31 checks —
 so what remains is a server and a domain, not unknowns.
 
