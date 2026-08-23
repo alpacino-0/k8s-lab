@@ -91,12 +91,49 @@ confirm a certificate is issued, then switch to `letsencrypt-prod`.
 > server and confirm it resolves *before* creating the issuer, and use
 > `https://acme-staging-v02.api.letsencrypt.org/directory` while testing.
 
-## 4. Database credentials
+## 4. Namespace and admission policies
+
+Create the namespace from the manifest, not with `kubectl create namespace`. The
+labels are the whole point of the file:
+
+```bash
+kubectl apply -f policies/namespace.yaml
+kubectl apply -f policies/admission-policies.yaml -f policies/admission-bindings.yaml
+```
+
+Four of those labels put the namespace under Pod Security Admission at
+`restricted`; the fifth, `k8s-lab.dev/policies: enforced`, is what the
+ValidatingAdmissionPolicy bindings select on. A namespace created without them
+is not a namespace with weaker rules — it is a namespace with **no** rules, and
+nothing says so. The release installs, every pod starts, and the enforcement
+layer this project is built around is silently absent.
+
+Confirm it is on before going further:
+
+```bash
+kubectl get namespace k8s-lab -o jsonpath='{.metadata.labels}' | tr ',' '\n'
+NAMESPACE=k8s-lab ./scripts/policy-test.sh     # each rule must reject what it should
+```
+
+Optionally, image signature verification. It is the one rule the built-in
+admission engine cannot express, because verifying a signature means reaching a
+registry and a transparency log — so it costs two pods:
+
+```bash
+helm repo add kyverno https://kyverno.github.io/kyverno/
+helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace \
+  --version 3.5.2 --wait
+kubectl apply -f policies/kyverno-image-signatures.yaml
+```
+
+After this, only images signed by this repository's pipeline can run, and each
+is rewritten to its digest on admission so a moved tag cannot change what runs.
+
+## 5. Database credentials
 
 The password never goes into a values file or a shell history:
 
 ```bash
-kubectl create namespace k8s-lab
 kubectl -n k8s-lab create secret generic db-credentials \
   --from-literal=POSTGRES_USER=labuser \
   --from-literal=POSTGRES_DB=labdb \
@@ -104,9 +141,10 @@ kubectl -n k8s-lab create secret generic db-credentials \
 ```
 
 `chart/values-public.yaml` refers to it by name via
-`postgres.auth.existingSecret`, so the chart renders no secret of its own.
+`postgres.auth.existingSecret`, so the chart renders no PostgreSQL secret of its
+own — the credentials exist only in the cluster, never in this repository.
 
-## 5. Deploy
+## 6. Deploy
 
 ```bash
 helm upgrade --install app ./chart \
@@ -116,15 +154,21 @@ helm upgrade --install app ./chart \
   --timeout 10m
 
 kubectl -n k8s-lab rollout status statefulset/app-postgres --timeout=300s
+kubectl -n k8s-lab rollout status deployment/app-redis --timeout=300s
 kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app --timeout=300s
 kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app-web --timeout=300s
 ```
+
+Redis comes from the chart, so there is nothing extra to install. It holds the
+rate-limit window and the note-count cache, and both degrade rather than fail
+if it is unavailable — but the limit stops binding across replicas, which on a
+public address is the difference between a limit and a suggestion.
 
 `--wait` is deliberately not used: the backup volume uses a
 `WaitForFirstConsumer` storage class and stays `Pending` until the first backup
 job mounts it, which would block the release forever.
 
-## 6. Verify
+## 7. Verify
 
 ```bash
 curl -sI https://demo.your-domain.com | head -3          # 200, valid certificate

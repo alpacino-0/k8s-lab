@@ -228,6 +228,12 @@ jobs:
       - name: Install Kyverno for signature verification
         run: |
           helm repo add kyverno https://kyverno.github.io/kyverno/
+          # Deliberately unpinned for now, and this is a known gap: terraform pins
+          # 3.5.2, whose admission controller resolves a tag to the per-platform
+          # child manifest, while whatever Kyverno is current accepts a signature
+          # on the index alone. Pinning here before the tag below carries child
+          # signatures would fail e2e, and publish needs e2e — so the signing fix
+          # could never reach the registry. Pin it once one signed run has landed.
           helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace \
             --set admissionController.replicas=1 --set backgroundController.replicas=1 \
             --set cleanupController.enabled=false --set reportsController.enabled=false \
@@ -452,20 +458,35 @@ jobs:
       # records the signature in the Rekor transparency log. What is verified
       # later is not "someone had the key" but "this workflow, in this
       # repository, produced this digest".
+      # --recursive signs the index *and* every per-platform child it references.
+      # Signing only the index looks correct and is not: an admission controller
+      # resolves a tag to the child manifest for its own platform, then looks for
+      # a signature on that digest. Without --recursive it finds none and rejects
+      # an image this pipeline really did sign.
       - name: Sign the published images
         env:
           COSIGN_YES: "true"
         run: |
-          cosign sign "${IMAGE_NAME}@${{ steps.api.outputs.digest }}"
-          cosign sign "${IMAGE_NAME}-web@${{ steps.web.outputs.digest }}"
+          cosign sign --recursive "${IMAGE_NAME}@${{ steps.api.outputs.digest }}"
+          cosign sign --recursive "${IMAGE_NAME}-web@${{ steps.web.outputs.digest }}"
 
       - name: Verify the signatures the way the cluster will
         run: |
           for ref in "${IMAGE_NAME}@${{ steps.api.outputs.digest }}" \
                      "${IMAGE_NAME}-web@${{ steps.web.outputs.digest }}"; do
-            cosign verify "$ref" \
-              --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
-              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-              > /dev/null
-            echo "verified: $ref"
+            repo="${ref%@*}"
+            # The index, plus every platform a cluster could resolve to. Verifying
+            # only the index would re-check the exact digest the step above signed,
+            # which is a check that cannot fail for the reason it exists.
+            children=$(docker buildx imagetools inspect "$ref" --raw \
+              | jq -r '.manifests[]
+                       | select(.platform.architecture != null and .platform.architecture != "unknown")
+                       | .digest')
+            for digest in "${ref#*@}" $children; do
+              cosign verify "${repo}@${digest}" \
+                --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+                > /dev/null
+              echo "verified: ${repo}@${digest}"
+            done
           done

@@ -12,7 +12,10 @@ doğrulanmış gecelik yedekler, otomatik ölçekleme, kesinti bütçesi, Promet
 metrikleri ve her push'ta gerçek bir cluster'a deploy eden CI hattı.
 
 Buradaki her sayı, bu deponun kurduğu cluster üzerinde **ölçülmüştür**. Yol
-boyunca bulunan hatalar dahil tüm kayıt: [docs/LEARNING-LOG.tr.md](docs/LEARNING-LOG.tr.md).
+boyunca bulunan hatalar, tek bir listede toplanmak yerine bozdukları mekanizmanın
+anlatıldığı yerde yazılı. İlk dönemin ders kaydı — Bölüm 2-7, yapı Helm chart'a
+taşınmadan önce — tarihsel kayıt olarak duruyor:
+[docs/LEARNING-LOG.tr.md](docs/LEARNING-LOG.tr.md).
 İngilizce sürüm: [README.md](README.md).
 
 ```
@@ -88,7 +91,7 @@ değişkenleri — ve tarayıcı sadece geleni sayıyor.
 
 | Komut | Ne yapar |
 |---|---|
-| `make test` | Birim ve entegrasyon testleri (27 test, cluster gerekmez) |
+| `make test` | Birim ve entegrasyon testleri (29 test, cluster gerekmez) |
 | `make lint` | ESLint + `helm lint` + tüm values profillerini üretir |
 | `make deploy` | İki imajı da yeniden derler ve sürümü günceller |
 | `make web` | Arayüzü yerelde, port-forward edilmiş backend'e karşı çalıştırır |
@@ -118,12 +121,12 @@ değişkenleri — ve tarayıcı sadece geleni sayıyor.
 | ServiceAccount token'ı monte edilmez | `automountServiceAccountToken: false` | iki katman da Kubernetes API'sini kullanmaz |
 | Kazıma ucu dışarıya yönlendirilmez | metrikler ayrı portta (9090) | CI `/api/metrics` için 404 doğrular |
 | Arayüz CSP ve frame-deny başlıkları gönderir | `web/security-headers.conf` | çalışan konteyner üzerinde doğrulanır |
-| Varsayılan-reddet ağ | 3 NetworkPolicy | yetkisiz bir pod'un erişemediği **kanıtlanır** |
+| Varsayılan-reddet ağ | 5 NetworkPolicy | yetkisiz bir pod'un erişemediği **kanıtlanır** |
 | Multi-stage imaj, yalnız üretim bağımlılıkları | `app/Dockerfile` | CI'da Trivy CRITICAL/HIGH bulguda durdurur |
 | npm runtime imajından çıkarıldı | `app/Dockerfile` | **tüm** Node.js paket CVE'lerini sıfırladı (aşağıda) |
 | Git'te secret yok | `.gitignore` + chart values | parola zorunlu bir chart değeri |
 | TLS, yönlendirme ve Secure çerez | cert-manager + açık Certificate | gerçek bir CA'nın verdiği sertifikayla her push'ta doğrulanır |
-| Güvenlik ayarları zorunlu, sadece yazılı değil | Pod Security Admission + ValidatingAdmissionPolicy | 8 politika testi: bir uyumlu manifest kabul, yedi bozuk manifest ayrı ayrı red |
+| Güvenlik ayarları zorunlu, sadece yazılı değil | Pod Security Admission + ValidatingAdmissionPolicy | 10 politika testi: iki uyumlu manifest kabul, sekiz bozuk manifest ayrı ayrı red |
 | Notlar ziyaretçi başına izole | anonim çerez, owner'a göre filtrelenmiş sorgular | ikinci bir ziyaretçi ilkinin notunu ne görür ne siler |
 | Yazma sınırlı | ingress `limit-rps` + paylaşımlı pencere + not tavanı | uzun ve kota aşan yazmalar reddedilir |
 | Limitler replikalar arası bağlayıcı | Redis kayan pencere | limit 30 iken 60 istek: paylaşımlı **29 geçti**, replika başına **60 geçti** |
@@ -165,8 +168,66 @@ içinde çalışan yerleşik motorla ifade edilebiliyordu:
 | API durumu | `ClusterPolicy` kullanımdan kalkıyor | 1.30'dan beri GA |
 
 Politika motoru; mutasyon, namespace'ler arası üretim veya imaj imzası
-doğrulaması gerektiğinde hak eder. Henüz hiçbirine ihtiyaç yok —
+doğrulaması gerektiğinde hak eder. Kyverno tam olarak bunlardan biri için geri
+döndü — aşağıdaki [Tedarik zinciri](#tedarik-zinciri) ve
 [policies/README.md](policies/README.md).
+
+### Tedarik zinciri
+
+Yukarıdaki her şey *bu iş yükü güvenli yapılandırılmış mı* sorusuna cevap verir.
+Hiçbiri *bu, bizim derlediğimiz imaj mı* sorusuna cevap vermez. Sızmış bir
+registry kimliği, ele geçirilmiş bir action ya da kaydırılmış bir etiket — üçü de
+bu sayfadaki her politikadan geçen bir pod üretir.
+
+Pipeline her yayımlanan imajı anahtarsız (keyless) cosign ile imzalıyor:
+saklanacak, döndürülecek veya sızdırılacak bir anahtar yok. İş akışının OIDC
+token'ını Fulcio'dan kısa ömürlü bir sertifikayla takas ediyor ve imzayı Rekor
+şeffaflık günlüğüne yazıyor. Sonradan doğrulanan şey "birinde anahtar vardı"
+değil, "bu depodaki bu iş akışı bu digest'i üretti" oluyor.
+
+Cluster başka hiçbir şeyi kabul etmiyor. Kyverno'nun `verifyImages` kuralı,
+yerleşik motorun ifade edemediği tek kural — çünkü imza doğrulamak bir registry'ye
+ve bir şeffaflık günlüğüne erişmek demek, ki bir admission eklentisi bunu yapmaz.
+İki pod'a mal oluyor ve Kyverno'nun kurulu olmasının tek sebebi bu:
+
+```yaml
+attestors:
+  - entries:
+      - keyless:
+          subject: "https://github.com/alpacino-0/k8s-lab/*"
+          issuer:  "https://token.actions.githubusercontent.com"
+mutateDigest: true      # etiket, doğrulanan digest ile değiştirilir
+```
+
+`mutateDigest`, doğrulama ile çalıştırma arasındaki boşluğu kapatan şey. O
+olmadan etiket bir kez doğrulanır, sonra çekilirken yeniden çözülür — ve bu
+ikisinin aynı imaj olduğunun garantisi yoktur.
+
+| | |
+|---|---|
+| İmzalı imaj | kabul, pod spec'inde `…@sha256:…` olarak yeniden yazılıyor |
+| İmzalama eklenmeden önce yayımlanmış imaj | red: **`no signatures found`** |
+
+Olumsuz durum bilinçli olarak **var olan** ama imzasız bir imaj kullanıyor. Hiç
+push edilmemiş bir etiket de reddedilirdi — ama `manifest unknown` diyerek, yani
+aynı rengi giymiş farklı bir hatayla.
+
+**Bunun bulduğu hata.** Pipeline her imajın index digest'ini imzalıyordu.
+Çok-mimarili bir etiket, platform başına bir manifeste işaret eden bir index'tir;
+admission denetleyicisi ise etiketi kendi platformunun alt manifestine çözer ve
+imzayı *o* digest'te arar — bulamaz. Sonradan doğrulandı:
+
+```
+index  sha256:dcda008f…  imzali
+  ├─ linux/amd64  sha256:4ca43c01…  imzasiz
+  └─ linux/arm64  sha256:a993151c…  imzasiz
+```
+
+Yani doğru imzalanmış bir imaj, doğru çalışan bir politika tarafından reddediliyordu.
+CI kontrolü bunu kaçırdı ve sebebi bu tür kontrollerin genellikle kaçırma sebebi:
+bir önceki adımın az önce imzaladığı digest'i doğruluyordu — var olma sebebi
+yüzünden başarısız olamayacak bir test. `cosign sign --recursive` çocukları da
+imzalıyor, ve kontrol artık bir cluster'ın çözebileceği her platformu doğruluyor.
 
 ### TLS
 
@@ -348,10 +409,10 @@ Her push'ta beş job ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
 
 | Job | Neyi denetler |
 |---|---|
-| `test` | API için ESLint + 27 test; arayüz için ESLint + üretim derlemesi |
+| `test` | API için ESLint + 29 test; arayüz için ESLint + üretim derlemesi |
 | `manifests` | `helm lint`, values profilleri, kubeconform şema denetimi, `terraform fmt -check` ve `validate`, iki Dockerfile için hadolint |
 | `image` | İki imajı derler, ikisinin de root olmadığını doğrular, salt-okunur başlatır, Trivy taraması |
-| `e2e` | Gerçek kind cluster kurar, politikaları **chart'tan önce** uygular (yani sürüm onlara uymak zorunda), 8 politika kontrolünü ve 35 duman kontrolünü çalıştırır, ardından bir upgrade'in **sıfır istek düşürdüğünü** kanıtlar |
+| `e2e` | Gerçek kind cluster kurar, politikaları **chart'tan önce** uygular (yani sürüm onlara uymak zorunda), 10 politika kontrolünü ve 35 duman kontrolünü çalıştırır, ardından bir upgrade'in **sıfır istek düşürdüğünü** kanıtlar |
 | `publish` | İki imajı da amd64 + arm64 için GHCR'a, SBOM ve provenance ile push eder (yalnız main) |
 
 ---
@@ -367,7 +428,7 @@ web/                  React arayüzü (Vite), yetkisiz nginx ile servis edilir
   src/                app · pod defteri · notlar · mekanizmalar
   nginx.conf          SPA fallback, CSP, yazma işlemleri /tmp ile sınırlı
 chart/                Helm chart — tek deploy yolu
-  templates/          18 kaynak şablonu + helper'lar
+  templates/          19 kaynak şablonu + helper'lar
   values.yaml         açıklamalı varsayılanlar
   values-dev.yaml     minimum ayak izi, demo uçları açık
   values-prod.yaml    otomatik ölçekleme, yedekleme, izleme, ağ politikaları
@@ -416,7 +477,7 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 Temel imajı sabitlemek build'leri tekrarlanabilir tutar; `apk upgrade` yamalı tutar.
 
-## Bu projenin bulduğu iki hata
+## Bu projenin bulduğu hatalar
 
 İkisi de bilerek bir şeyleri bozarak bulundu ve ikisi de yalnızca arıza anında
 ortaya çıkan türden.
@@ -443,7 +504,7 @@ yolunun çalıştığını kanıtlar hem de volume'ü bağlar.
 
 ---
 
-### Trafiği okurken çıkan dördüncü hata
+### Trafiği okurken çıkan bir diğeri
 
 Arayüzü bağlamak, manifest'lerin iddia ettiği ama hiç uygulamadığı bir açığı
 ortaya çıkardı: ingress `/api`'yi servise yönlendiriyordu ve `/metrics` aynı
@@ -510,16 +571,25 @@ bir sorumlu.
 
 ## Bilinen sınırlar
 
-Bu proje yerel bir kind cluster'ında çalışır. Gerçek trafik taşıyabilmesi için:
+Bu proje yerel bir kind cluster'ında çalışır. TLS, admission zorlaması ve imza
+doğrulaması gerçek ve her push'ta sınanıyor — onlar bu listede değil. Hâlâ eksik
+olanlar:
 
-- **TLS yok.** Chart `ingress.tls` destekliyor ama sertifika üretmek cert-manager
-  ve gerçek bir alan adı gerektirir.
 - **Secret'lar düz Kubernetes Secret'ı** — base64, şifreleme değil. Üretimde harici
-  secret yönetimi ve etcd'de şifreleme gerekir.
+  secret yönetimi ve etcd'de şifreleme gerekir. Bu, aksi halde eksiksiz olan
+  GitOps zincirindeki tek kopuk halka: cluster'daki diğer her şey bu depodan
+  yeniden üretilebilir, secret'lar üretilemez.
 - **PostgreSQL tek replika**, failover yok; yedekler aynı cluster'daki bir PVC'ye
-  yazılıyor. Gerçek yedekler cluster dışında, nesne depolamada durmalı.
-- **PodSecurity admission veya OPA/Kyverno yok** — chart güvenlik ayarlarını
-  koyuyor ama hatalı bir deployment'ı engelleyen bir mekanizma yok.
+  yazılıyor. Yedekler doğrulanıyor — her kurulumda ve her gece `gzip -t` ve bir
+  boyut tabanı — ama kaynağıyla aynı arıza alanını paylaşan bir yedek, yedek
+  değildir. Gerçek olanlar cluster dışında, nesne depolamada durmalı.
+- **metrics-server platform katmanında değil.** Elle kuruldu; yani yukarıda
+  ölçülen otomatik ölçekleme bu cluster'da yaşıyor ama cluster yeniden
+  kurulduğunda yaşamaz. `make up`'ın yarattığı diğer her şey Terraform'dan geliyor.
+- **Alertmanager kapalı.** `PrometheusRule` var ve ifadeleri gerçekten ateşlenerek
+  test edildi; ürettiklerini teslim edecek hiçbir şey bağlı değil.
+- **ResourceQuota veya LimitRange yok.** Tek tek iş yükleri admission politikasıyla
+  sınırlanıyor; namespace'in bütünü için bir tavan yok.
 - **Dağıtık izleme (tracing) yok.** Yalnızca metrik ve log var.
 
 ---

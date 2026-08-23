@@ -12,8 +12,10 @@ nightly backups, autoscaling, disruption budgets, Prometheus metrics, and a CI
 pipeline that deploys to a real cluster on every push.
 
 Every number in this README was measured on the cluster this repository builds.
-The full log, including the bugs found along the way, is in
-[docs/LEARNING-LOG.tr.md](docs/LEARNING-LOG.tr.md). Turkish readme:
+The bugs found along the way are written up where the mechanism they broke is
+explained, rather than collected in one place. The early tutorial log —
+sections 2-7, before the layout moved to a Helm chart — is kept as a historical
+record in [docs/LEARNING-LOG.tr.md](docs/LEARNING-LOG.tr.md). Turkish readme:
 [README.tr.md](README.tr.md).
 
 ```
@@ -90,7 +92,7 @@ variables the kubelet injects — and the browser simply counts what came back.
 
 | Command | What it does |
 |---|---|
-| `make test` | Unit and integration tests (27 tests, no cluster needed) |
+| `make test` | Unit and integration tests (29 tests, no cluster needed) |
 | `make lint` | ESLint + `helm lint` + renders every values profile |
 | `make deploy` | Rebuild both images and upgrade the release |
 | `make web` | Run the interface locally against a port-forwarded backend |
@@ -120,12 +122,12 @@ variables the kubelet injects — and the browser simply counts what came back.
 | No service-account token mounted | `automountServiceAccountToken: false` | neither tier calls the Kubernetes API |
 | Scrape endpoint is not publicly routable | metrics on a separate port (9090) | CI asserts `/api/metrics` returns 404 |
 | Interface sends CSP and frame-deny headers | `web/security-headers.conf` | asserted on the running container |
-| Default-deny networking | 3 NetworkPolicies | an unauthorized pod is proven unable to reach the app |
+| Default-deny networking | 5 NetworkPolicies | an unauthorized pod is proven unable to reach the app |
 | Multi-stage image, production deps only | `app/Dockerfile` | Trivy blocks CRITICAL/HIGH findings in CI |
 | npm removed from the runtime image | `app/Dockerfile` | eliminated **every** Node.js package CVE (see below) |
 | No secrets in git | `.gitignore` + chart values | password is a required chart value |
 | TLS, the redirect and the Secure cookie | cert-manager + explicit Certificate | verified on every push against a certificate a real CA issued |
-| Security settings are enforced, not just set | Pod Security Admission + ValidatingAdmissionPolicy | 8 policy tests: one compliant manifest admitted, seven broken ones each rejected |
+| Security settings are enforced, not just set | Pod Security Admission + ValidatingAdmissionPolicy | 10 policy tests: two compliant manifests admitted, eight broken ones each rejected |
 | Notes isolated per visitor | anonymous cookie, owner-scoped queries | a second visitor cannot read or delete the first one's notes |
 | Writes bounded | ingress `limit-rps` + a shared window + a note cap | oversized and over-quota writes are rejected |
 | Rate limits bind across replicas | Redis sliding window | 60 requests against a limit of 30: **29 allowed** shared, **60 allowed** per replica |
@@ -167,8 +169,64 @@ engine, which runs in the API server:
 | API status | `ClusterPolicy` deprecated | GA since 1.30 |
 
 A policy engine earns its keep for mutation, cross-namespace generation, or
-image signature verification. None of those are needed yet — see
-[policies/README.md](policies/README.md).
+image signature verification. Kyverno is back for exactly one of those — see
+[Supply chain](#supply-chain) below and [policies/README.md](policies/README.md).
+
+### Supply chain
+
+Everything above answers *is this workload configured safely*. None of it answers
+*is this the image we built*. A registry credential, a compromised action, or a
+moved tag all produce a pod that passes every policy on this page.
+
+The pipeline signs each published image with keyless cosign — no key to store,
+rotate or leak. It exchanges the workflow's OIDC token for a short-lived Fulcio
+certificate and records the signature in the Rekor transparency log, so what is
+verified later is not "someone held the key" but "this workflow, in this
+repository, produced this digest".
+
+The cluster refuses anything else. Kyverno's `verifyImages` is the one rule the
+built-in engine cannot express, because checking a signature means reaching a
+registry and a transparency log — work an admission plugin does not do. It costs
+two pods, and it is the only reason Kyverno is installed at all:
+
+```yaml
+attestors:
+  - entries:
+      - keyless:
+          subject: "https://github.com/alpacino-0/k8s-lab/*"
+          issuer:  "https://token.actions.githubusercontent.com"
+mutateDigest: true      # the tag is rewritten to the digest that was verified
+```
+
+`mutateDigest` is what closes the gap between verification and execution. Without
+it a tag is checked and then resolved again at pull time, and those are not
+guaranteed to be the same image.
+
+| | |
+|---|---|
+| Signed image | admitted, and rewritten to `…@sha256:…` in the pod spec |
+| Image published before signing existed | rejected: **`no signatures found`** |
+
+The negative case deliberately uses an image that *exists* and carries no
+signature. A tag that was never pushed would be rejected too — with
+`manifest unknown`, a different failure wearing the same colour.
+
+**The bug this found.** The pipeline signed each image's index digest. A
+multi-arch tag is an index pointing at one manifest per platform, and an
+admission controller resolves the tag to the child for its own platform — then
+looks for a signature on *that* digest and finds none. Verified afterwards:
+
+```
+index  sha256:dcda008f…  signed
+  ├─ linux/amd64  sha256:4ca43c01…  unsigned
+  └─ linux/arm64  sha256:a993151c…  unsigned
+```
+
+So a correctly signed image was rejected by a correctly working policy. The CI
+check missed it for the reason such checks usually do: it verified the same
+digest the previous step had just signed, which is a test that cannot fail for
+the reason it exists. `cosign sign --recursive` signs the children too, and the
+check now verifies every platform a cluster could resolve to.
 
 ### TLS
 
@@ -354,10 +412,10 @@ Five jobs on every push ([`.github/workflows/ci.yml`](.github/workflows/ci.yml))
 
 | Job | Gate |
 |---|---|
-| `test` | ESLint and 27 tests for the API; ESLint and a production build for the interface |
+| `test` | ESLint and 29 tests for the API; ESLint and a production build for the interface |
 | `manifests` | `helm lint`, renders all values profiles, kubeconform schema validation, `terraform fmt -check` and `validate`, hadolint on both Dockerfiles |
 | `image` | Builds both images, asserts each is non-root, boots each read-only, Trivy scan (fails on CRITICAL/HIGH) |
-| `e2e` | Creates a real kind cluster, applies the policies **before** the chart so the release has to satisfy them, runs the 8 policy checks and the 35-check smoke test, then proves an upgrade drops zero requests |
+| `e2e` | Creates a real kind cluster, applies the policies **before** the chart so the release has to satisfy them, runs the 10 policy checks and the 35-check smoke test, then proves an upgrade drops zero requests |
 | `publish` | Pushes both images to GHCR for amd64 and arm64, with SBOM and provenance attestation (main only) |
 
 ---
@@ -373,7 +431,7 @@ web/                  React interface (Vite), served by unprivileged nginx
   src/                app · pod ledger · notes · mechanisms
   nginx.conf          SPA fallback, CSP, writes confined to /tmp
 chart/                Helm chart — the single deployment path
-  templates/          18 resource templates + helpers
+  templates/          19 resource templates + helpers
   values.yaml         documented defaults
   values-dev.yaml     minimal footprint, demo endpoints on
   values-prod.yaml    autoscaling, backups, monitoring, network policies
@@ -390,7 +448,7 @@ policies/             cluster policy, kept out of the chart on purpose
   admission-*.yaml    ValidatingAdmissionPolicy rules and their bindings
 scripts/
   bootstrap.sh        idempotent cluster + ingress + policies + deploy
-  policy-test.sh      8 checks that each rule rejects what it should
+  policy-test.sh      10 checks that each rule rejects what it should
   smoke-test.sh       35 end-to-end checks including security posture and isolation
   teardown.sh         destroy the cluster
 docs/
@@ -422,9 +480,9 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 Pinning the base tag keeps builds reproducible; `apk upgrade` keeps them patched.
 
-## Two bugs this project found
+## Bugs this project found
 
-Both were found by breaking things on purpose, and both are the kind of fault
+Each was found by breaking something on purpose, and each is the kind of fault
 that only shows up under failure.
 
 **The application crashed whenever the database restarted.** `node-postgres`
@@ -449,7 +507,7 @@ and binds the volume.
 
 ---
 
-### A fourth bug, found by reading the traffic
+### Another, found by reading the traffic
 
 Wiring the interface exposed something the manifests had claimed but never
 enforced: the ingress routed `/api` to the service, and `/metrics` sat on that
@@ -516,16 +574,25 @@ off-cluster backups, and someone who gets paged.
 
 ## Known limitations
 
-This runs on a local kind cluster. Before it could carry real traffic:
+This runs on a local kind cluster. TLS, admission enforcement and signature
+verification are real and exercised on every push — they are not on this list.
+What is still missing:
 
-- **No TLS.** The chart supports `ingress.tls`, but issuing certificates needs
-  cert-manager and a real domain.
 - **Secrets are plain Kubernetes Secrets** — base64, not encryption. Production
-  needs external secret management and etcd encryption at rest.
+  needs external secret management and etcd encryption at rest. This is the one
+  broken link in an otherwise complete GitOps chain: everything else in the
+  cluster can be reconstructed from this repository, and secrets cannot.
 - **PostgreSQL is a single replica** with no failover, and backups land on a PVC
-  in the same cluster. Real backups belong in object storage, off-cluster.
-- **No PodSecurity admission or OPA/Kyverno policies** enforcing the security
-  context cluster-wide; the chart sets it, nothing stops a bad deployment.
+  in the same cluster. They are verified — `gzip -t` and a size floor, on every
+  install and nightly — but a backup that shares a failure domain with its
+  source is not a backup. Real ones belong in object storage, off-cluster.
+- **metrics-server is not in the platform layer.** It was installed by hand, so
+  the autoscaling measured above survives this cluster but not a rebuild of it.
+  Everything else `make up` creates comes from Terraform.
+- **Alertmanager is off.** The `PrometheusRule` exists and its expressions were
+  tested by making them fire; nothing is wired to deliver what they produce.
+- **No ResourceQuota or LimitRange.** Individual workloads are bounded by
+  admission policy; the namespace as a whole has no ceiling.
 - **No distributed tracing.** Metrics and logs only.
 
 ---
