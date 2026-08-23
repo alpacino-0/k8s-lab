@@ -223,46 +223,11 @@ jobs:
           docker build -t "k8s-lab-web:${IMAGE_TAG}" ./web
           kind load docker-image "k8s-lab-app:${IMAGE_TAG}" "k8s-lab-web:${IMAGE_TAG}" --name ci
 
-      # Kyverno is installed for one rule: verifying that an image was signed by
-      # this pipeline. Everything else in policies/ runs in the API server.
-      - name: Install Kyverno for signature verification
-        run: |
-          helm repo add kyverno https://kyverno.github.io/kyverno/
-          # Deliberately unpinned for now, and this is a known gap: terraform pins
-          # 3.5.2, whose admission controller resolves a tag to the per-platform
-          # child manifest, while whatever Kyverno is current accepts a signature
-          # on the index alone. Pinning here before the tag below carries child
-          # signatures would fail e2e, and publish needs e2e — so the signing fix
-          # could never reach the registry. Pin it once one signed run has landed.
-          helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace \
-            --set admissionController.replicas=1 --set backgroundController.replicas=1 \
-            --set cleanupController.enabled=false --set reportsController.enabled=false \
-            --wait --timeout 10m
-
-          # helm --wait returns when the pods report Ready, which is earlier than
-          # the moment Kyverno's own webhook starts accepting connections — and
-          # every ClusterPolicy apply goes through that webhook. Applying straight
-          # away fails with "connection refused" often enough to matter.
-          for attempt in $(seq 1 30); do
-            if kubectl apply -f policies/kyverno-image-signatures.yaml; then
-              break
-            fi
-            if [ "$attempt" -eq 30 ]; then
-              echo "kyverno webhook never became reachable"
-              kubectl -n kyverno get pods,svc,endpoints
-              kubectl -n kyverno logs -l app.kubernetes.io/component=admission-controller --tail=50
-              exit 1
-            fi
-            sleep 2
-          done
-
+      # No Kyverno here, so policy-test skips its signature block. Signatures are
+      # checked in the supply-chain job instead, against the image this run just
+      # published — testing a previously published tag made the pipeline unable
+      # to land a change to signing, because publish needs this job to pass.
       - name: Policies must reject what they are meant to
-        env:
-          # Published before signing was added, so it exists and carries no
-          # signature — the only way to prove the rule rejects for the right
-          # reason rather than because a tag is missing.
-          UNSIGNED_IMAGE: ghcr.io/alpacino-0/k8s-lab:c5cc9e7e18a9a438bcabf3c03b7a7353d84148c4
-          SIGNED_IMAGE: ghcr.io/alpacino-0/k8s-lab:1.0.0
         run: NAMESPACE=k8s-lab IMAGE="k8s-lab-app:${IMAGE_TAG}" ./scripts/policy-test.sh
 
       - name: Install the chart
@@ -421,6 +386,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [image, e2e]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    outputs:
+      api_digest: ${{ steps.api.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -506,3 +473,67 @@ jobs:
               echo "verified: ${repo}@${digest}"
             done
           done
+
+  # The signature rule, proved against the image this run just signed rather than
+  # one published earlier. Kept out of e2e deliberately: publish needs e2e, so a
+  # signature check inside e2e can only ever test the *previous* run's artifact —
+  # which meant a fix to signing could never reach the registry, because the
+  # broken signature it was fixing kept the pipeline red.
+  supply-chain:
+    name: Enforce signatures in a cluster
+    runs-on: ubuntu-latest
+    needs: [publish]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.16.3
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: signatures
+          config: kind-config.yaml
+
+      - name: Apply cluster policies
+        run: |
+          kubectl apply -f policies/namespace.yaml
+          kubectl apply -f policies/admission-policies.yaml -f policies/admission-bindings.yaml
+
+      - name: Install Kyverno
+        run: |
+          helm repo add kyverno https://kyverno.github.io/kyverno/
+          # Pinned to the chart version terraform installs, so this proves
+          # enforcement for the Kyverno a cluster actually runs. Unpinned, CI
+          # verified whatever released today: measured drift on 2026-08-23 was
+          # chart 3.9.0 / v1.19.0 here against 3.5.2 / v1.15.2 in terraform.
+          helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace \
+            --version "$(grep -A3 'variable "kyverno_version"' terraform/variables.tf \
+                         | sed -n 's/.*default *= *"\(.*\)"/\1/p')" \
+            --set admissionController.replicas=1 --set backgroundController.replicas=1 \
+            --set cleanupController.enabled=false --set reportsController.enabled=false \
+            --wait --timeout 10m
+
+          # helm --wait returns when the pods report Ready, which is earlier than
+          # the moment Kyverno's webhook starts accepting connections — and every
+          # ClusterPolicy apply travels through that webhook.
+          for attempt in $(seq 1 30); do
+            if kubectl apply -f policies/kyverno-image-signatures.yaml; then break; fi
+            if [ "$attempt" -eq 30 ]; then
+              echo "kyverno webhook never became reachable"
+              kubectl -n kyverno get pods,svc,endpoints
+              kubectl -n kyverno logs -l app.kubernetes.io/component=admission-controller --tail=50
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: A signed image is admitted, an unsigned one is not
+        env:
+          SIGNED_IMAGE: ghcr.io/${{ github.repository }}@${{ needs.publish.outputs.api_digest }}
+          # Published before signing existed, so it is present in the registry and
+          # carries no signature. A tag that was never pushed would be rejected
+          # too, with "manifest unknown" — a different failure wearing the same
+          # colour, which would prove nothing about the rule.
+          UNSIGNED_IMAGE: ghcr.io/alpacino-0/k8s-lab:c5cc9e7e18a9a438bcabf3c03b7a7353d84148c4
+        run: NAMESPACE=k8s-lab IMAGE="$SIGNED_IMAGE" ./scripts/policy-test.sh
