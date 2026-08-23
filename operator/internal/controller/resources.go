@@ -52,10 +52,14 @@ const (
 	ingressNamespace = "ingress-nginx"
 
 	// Link-local. The cloud metadata service sits at 169.254.169.254, and
-	// reaching it from an application container turns any request-forgery bug
-	// into cloud credentials. Egress is otherwise open, because an application
+	// reaching it from an workload container turns any request-forgery bug
+	// into cloud credentials. Egress is otherwise open, because an workload
 	// that cannot make outbound calls is not a platform, it is a sandbox.
 	metadataCIDR = "169.254.0.0/16"
+
+	// ingress-nginx reads its annotations as strings, so "true" is a value here
+	// rather than a boolean.
+	annotationTrue = "true"
 )
 
 func labelsFor(app *platformv1alpha1.Workload) map[string]string {
@@ -82,7 +86,7 @@ func objectMeta(app *platformv1alpha1.Workload) metav1.ObjectMeta {
 }
 
 // desiredServiceAccount exists so the workload has an identity that is not
-// `default`, and so that identity can be denied a token. An application that
+// `default`, and so that identity can be denied a token. An workload that
 // does not call the Kubernetes API has no reason to carry a credential for it.
 func desiredServiceAccount(app *platformv1alpha1.Workload) *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{
@@ -159,7 +163,7 @@ func desiredDeployment(app *platformv1alpha1.Workload) *appsv1.Deployment {
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
 					// Spread across nodes where possible, but ScheduleAnyway: a
-					// single-node cluster should still run the application, just
+					// single-node cluster should still run the workload, just
 					// without the guarantee that draining a node is free.
 					TopologySpreadConstraints: []corev1.TopologySpreadConstraint{{
 						MaxSkew:           1,
@@ -229,7 +233,7 @@ func desiredService(app *platformv1alpha1.Workload) *corev1.Service {
 	}
 }
 
-// desiredNetworkPolicy denies everything this application is not explicitly
+// desiredNetworkPolicy denies everything this workload is not explicitly
 // allowed. One policy is enough: selecting a pod with both policy types set
 // means only the listed traffic survives.
 func desiredNetworkPolicy(app *platformv1alpha1.Workload) *networkingv1.NetworkPolicy {
@@ -257,7 +261,7 @@ func desiredNetworkPolicy(app *platformv1alpha1.Workload) *networkingv1.NetworkP
 			Egress: []networkingv1.NetworkPolicyEgressRule{
 				{
 					// Forgetting this rule is the most common way a default-deny
-					// policy silently breaks an application: name resolution
+					// policy silently breaks an workload: name resolution
 					// fails and every outbound call times out with no obvious
 					// cause.
 					Ports: []networkingv1.NetworkPolicyPort{
@@ -338,8 +342,8 @@ func desiredIngress(app *platformv1alpha1.Workload) *networkingv1.Ingress {
 	meta := objectMeta(app)
 	meta.Annotations = map[string]string{
 		"cert-manager.io/cluster-issuer":                 "letsencrypt-prod",
-		"nginx.ingress.kubernetes.io/ssl-redirect":       "true",
-		"nginx.ingress.kubernetes.io/force-ssl-redirect": "true",
+		"nginx.ingress.kubernetes.io/ssl-redirect":       annotationTrue,
+		"nginx.ingress.kubernetes.io/force-ssl-redirect": annotationTrue,
 	}
 
 	return &networkingv1.Ingress{

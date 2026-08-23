@@ -114,6 +114,12 @@ jobs:
           dockerfile: web/Dockerfile
           failure-threshold: warning
 
+      - name: Lint the operator Dockerfile
+        uses: hadolint/hadolint-action@v3.4.0
+        with:
+          dockerfile: operator/Dockerfile
+          failure-threshold: warning
+
   # ------------------------------------------------------------- container
   image:
     name: Build and scan image
@@ -176,6 +182,52 @@ jobs:
           exit-code: '1'
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+
+      - name: Build the operator image
+        run: docker build -t "k8s-lab-operator:${IMAGE_TAG}" ./operator
+
+      - name: Operator container must not run as root
+        run: |
+          uid=$(docker inspect "k8s-lab-operator:${IMAGE_TAG}" --format '{{.Config.User}}')
+          echo "operator user: $uid"
+          case "$uid" in 0|root|""|0:*|root:*) echo "operator image runs as root"; exit 1 ;; esac
+
+      - name: Scan the operator image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: k8s-lab-operator:${{ env.IMAGE_TAG }}
+          format: table
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+  # ------------------------------------------------------------- operator
+  operator:
+    name: Build and test the operator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+
+      # `make test` regenerates the CRD and deepcopy code before running. If the
+      # committed output differs from what the types produce, the tree is
+      # inconsistent and every manifest downstream is stale — so it is a failure
+      # here rather than a surprise at apply time.
+      - name: Test, and prove the generated code is committed
+        working-directory: operator
+        run: |
+          make test
+          if ! git diff --exit-code -- api config; then
+            echo "generated files are out of date — run 'make manifests generate' in operator/ and commit"
+            exit 1
+          fi
+
+      - name: Lint
+        working-directory: operator
+        run: make lint
 
   # ----------------------------------------------------------- integration
   e2e:
@@ -371,6 +423,63 @@ jobs:
           echo "requests through ingress: $TOTAL, failed: $FAILED"
           [ "$FAILED" -eq 0 ]
 
+      # The operator is exercised in the same namespace the rest of this job
+      # uses, which is where Pod Security Admission and the admission policies
+      # are enforced. That is the assertion worth having: the platform's own
+      # output has to satisfy the platform's own rules, with nothing exempted.
+      - name: Deploy the operator
+        run: |
+          docker build -t "k8s-lab-operator:${IMAGE_TAG}" ./operator
+          kind load docker-image "k8s-lab-operator:${IMAGE_TAG}" --name ci
+          make -C operator install
+          make -C operator deploy IMG="k8s-lab-operator:${IMAGE_TAG}"
+          kubectl -n k8s-lab-platform-system rollout status \
+            deployment/k8s-lab-platform-controller-manager --timeout=180s
+
+      - name: A Workload must reach Ready through the admission policies
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: platform.k8s-lab.dev/v1alpha1
+          kind: Workload
+          metadata:
+            name: ci-probe
+            namespace: k8s-lab
+          spec:
+            image: k8s-lab-app:${IMAGE_TAG}
+            port: 3000
+            replicas: 2
+          EOF
+          kubectl -n k8s-lab wait --for=condition=Ready workload/ci-probe --timeout=180s
+
+      # Reading the rendered pod back rather than the operator's own source. The
+      # unit tests already prove the renderer intends this; this proves the API
+      # server accepted it, which is a different claim.
+      - name: The rendered pod must actually carry the hardening
+        run: |
+          pod=$(kubectl -n k8s-lab get pod -l app.kubernetes.io/instance=ci-probe \
+                  -o jsonpath='{.items[0].metadata.name}')
+          get() { kubectl -n k8s-lab get pod "$pod" -o jsonpath="$1"; }
+          [ "$(get '{.spec.securityContext.runAsNonRoot}')" = true ] || { echo "runs as root"; exit 1; }
+          [ "$(get '{.spec.automountServiceAccountToken}')" = false ] || { echo "carries a token"; exit 1; }
+          [ "$(get '{.spec.containers[0].securityContext.readOnlyRootFilesystem}')" = true ] || { echo "writable rootfs"; exit 1; }
+          [ "$(get '{.spec.containers[0].securityContext.capabilities.drop[0]}')" = ALL ] || { echo "capabilities kept"; exit 1; }
+          [ "$(kubectl -n k8s-lab exec "$pod" -- id -u)" != 0 ] || { echo "effective uid is 0"; exit 1; }
+          echo "the operator's output satisfies the cluster's own policies"
+
+      - name: Deleting the Workload must leave nothing behind
+        run: |
+          kubectl -n k8s-lab delete workload ci-probe --wait=true
+          for _ in $(seq 1 30); do
+            left=$(kubectl -n k8s-lab get deploy,svc,sa,networkpolicy,pdb \
+                     -l app.kubernetes.io/managed-by=k8s-lab-platform \
+                     --no-headers 2>/dev/null | wc -l)
+            [ "$left" -eq 0 ] && { echo "owner references cascaded"; exit 0; }
+            sleep 2
+          done
+          echo "objects outlived the Workload that owned them:"
+          kubectl -n k8s-lab get all -l app.kubernetes.io/managed-by=k8s-lab-platform
+          exit 1
+
       - name: Diagnostics on failure
         if: failure()
         run: |
@@ -384,7 +493,7 @@ jobs:
   publish:
     name: Publish image
     runs-on: ubuntu-latest
-    needs: [image, e2e]
+    needs: [image, e2e, operator]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     outputs:
       api_digest: ${{ steps.api.outputs.digest }}
@@ -443,6 +552,22 @@ jobs:
           provenance: true
           sbom: true
 
+      - name: Publish the operator image
+        id: operator
+        uses: docker/build-push-action@v7
+        with:
+          context: ./operator
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.IMAGE_NAME }}-operator:${{ env.IMAGE_TAG }}
+            ${{ env.IMAGE_NAME }}-operator:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}-operator:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
       # Keyless: no key to store, rotate or leak. cosign exchanges the
       # workflow's OIDC token for a short-lived certificate from Fulcio and
       # records the signature in the Rekor transparency log. What is verified
@@ -459,11 +584,13 @@ jobs:
         run: |
           cosign sign --recursive "${IMAGE_NAME}@${{ steps.api.outputs.digest }}"
           cosign sign --recursive "${IMAGE_NAME}-web@${{ steps.web.outputs.digest }}"
+          cosign sign --recursive "${IMAGE_NAME}-operator@${{ steps.operator.outputs.digest }}"
 
       - name: Verify the signatures the way the cluster will
         run: |
           for ref in "${IMAGE_NAME}@${{ steps.api.outputs.digest }}" \
-                     "${IMAGE_NAME}-web@${{ steps.web.outputs.digest }}"; do
+                     "${IMAGE_NAME}-web@${{ steps.web.outputs.digest }}" \
+                     "${IMAGE_NAME}-operator@${{ steps.operator.outputs.digest }}"; do
             repo="${ref%@*}"
             # The index, plus every platform a cluster could resolve to. Verifying
             # only the index would re-check the exact digest the step above signed,

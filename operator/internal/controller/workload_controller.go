@@ -43,9 +43,9 @@ type WorkloadReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=platform.k8s-lab.dev,resources=applications,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=platform.k8s-lab.dev,resources=applications/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=platform.k8s-lab.dev,resources=applications/finalizers,verbs=update
+// +kubebuilder:rbac:groups=platform.k8s-lab.dev,resources=workloads,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=platform.k8s-lab.dev,resources=workloads/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=platform.k8s-lab.dev,resources=workloads/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies;ingresses,verbs=get;list;watch;create;update;patch;delete
@@ -66,7 +66,7 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	normalise(&app)
 
 	if err := r.reconcileOwned(ctx, &app); err != nil {
-		logger.Error(err, "rendering the application failed")
+		logger.Error(err, "rendering the workload failed")
 		if statusErr := r.updateStatus(ctx, &app, err); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
@@ -296,6 +296,6 @@ func (r *WorkloadReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&networkingv1.Ingress{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
-		Named("application").
+		Named("workload").
 		Complete(r)
 }

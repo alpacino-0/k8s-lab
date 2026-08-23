@@ -23,7 +23,7 @@ import (
 )
 
 // EnvVar is a literal environment variable. Anything that should not be read
-// from `kubectl get application -o yaml` belongs in a Secret listed under
+// from `kubectl get workload -o yaml` belongs in a Secret listed under
 // EnvFrom instead.
 type EnvVar struct {
 	// +kubebuilder:validation:MinLength=1
@@ -109,8 +109,8 @@ type WorkloadSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	Replicas *int32 `json:"replicas,omitempty"`
 
-	// Domain publishes the application at a hostname over HTTPS. Without it the
-	// application is reachable only inside the cluster.
+	// Domain publishes the workload at a hostname over HTTPS. Without it the
+	// workload is reachable only inside the cluster.
 	// +kubebuilder:validation:XValidation:rule="self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$')",message="domain must be a lowercase DNS name"
 	Domain string `json:"domain,omitempty"`
 
@@ -138,12 +138,12 @@ type WorkloadSpec struct {
 // healthy before anything had happened.
 type WorkloadStatus struct {
 	// Conditions follows the standard Kubernetes convention: Ready says whether
-	// the application is serving, Progressing says whether it is still rolling.
+	// the workload is serving, Progressing says whether it is still rolling.
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// URL is where the application answers, once an ingress exists for it.
+	// URL is where the workload answers, once an ingress exists for it.
 	URL string `json:"url,omitempty"`
 
 	Replicas int32 `json:"replicas,omitempty"`

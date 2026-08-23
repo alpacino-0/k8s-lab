@@ -22,7 +22,7 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the k8s-lab-platform itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
-- application_admin_role.yaml
-- application_editor_role.yaml
-- application_viewer_role.yaml
+- workload_admin_role.yaml
+- workload_editor_role.yaml
+- workload_viewer_role.yaml
 

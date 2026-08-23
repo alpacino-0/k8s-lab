@@ -1,5 +1,8 @@
 # Build the manager binary
-FROM golang:1.26 AS builder
+# Pinned rather than tracking a major line, so a rebuild months from now
+# produces the same binary. Kept in step with the go directive in go.mod.
+ARG GO_VERSION=1.26.0
+FROM golang:${GO_VERSION}-alpine AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -23,6 +26,14 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
+# distroless/static holds a CA bundle, /etc/passwd and nothing else — no shell,
+# no package manager, nothing for an attacker who lands here to call.
+#
+# :nonroot is a moving tag, which this project treats as a problem everywhere
+# else. It is accepted here because what a cluster admits is the published
+# manifest by digest, signed by the pipeline: the base moving changes the next
+# build, never a release already running. Trivy runs against the result on every
+# push, so a base that moves somewhere bad fails the build rather than shipping.
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
 COPY --from=builder /workspace/manager .

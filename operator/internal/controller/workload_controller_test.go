@@ -42,6 +42,8 @@ var _ = Describe("Workload Controller", func() {
 		namespace = "default"
 	)
 
+	const testImage = "ghcr.io/example/app:1.0.0"
+
 	ctx := context.Background()
 	key := types.NamespacedName{Name: name, Namespace: namespace}
 
@@ -82,7 +84,7 @@ var _ = Describe("Workload Controller", func() {
 	})
 
 	It("renders the full set of objects a production workload needs", func() {
-		create(platformv1alpha1.WorkloadSpec{Image: "ghcr.io/example/app:1.0.0", Port: 3000})
+		create(platformv1alpha1.WorkloadSpec{Image: testImage, Port: 3000})
 		reconcileNow()
 
 		for _, obj := range []client.Object{
@@ -102,7 +104,7 @@ var _ = Describe("Workload Controller", func() {
 
 	It("adds and then removes the ingress as the domain comes and goes", func() {
 		create(platformv1alpha1.WorkloadSpec{
-			Image:  "ghcr.io/example/app:1.0.0",
+			Image:  testImage,
 			Domain: "app.example.com",
 		})
 		reconcileNow()
@@ -125,7 +127,7 @@ var _ = Describe("Workload Controller", func() {
 
 	It("hands the replica count to the autoscaler and takes it back", func() {
 		create(platformv1alpha1.WorkloadSpec{
-			Image:     "ghcr.io/example/app:1.0.0",
+			Image:     testImage,
 			Autoscale: &platformv1alpha1.Autoscale{MinReplicas: 3, MaxReplicas: 9, TargetCPUPercent: 70},
 		})
 		reconcileNow()
@@ -148,7 +150,7 @@ var _ = Describe("Workload Controller", func() {
 	})
 
 	It("reports what it observed rather than what it was asked for", func() {
-		create(platformv1alpha1.WorkloadSpec{Image: "ghcr.io/example/app:1.0.0"})
+		create(platformv1alpha1.WorkloadSpec{Image: testImage})
 		reconcileNow()
 
 		app := &platformv1alpha1.Workload{}

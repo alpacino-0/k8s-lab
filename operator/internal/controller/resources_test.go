@@ -26,6 +26,8 @@ import (
 	platformv1alpha1 "github.com/alpacino-0/k8s-lab/operator/api/v1alpha1"
 )
 
+const testDomain = "blog.example.com"
+
 func app(mutate ...func(*platformv1alpha1.Workload)) *platformv1alpha1.Workload {
 	a := &platformv1alpha1.Workload{
 		ObjectMeta: metav1.ObjectMeta{Name: "blog", Namespace: "team-a"},
@@ -54,7 +56,7 @@ func TestHardeningSurvivesEverySpec(t *testing.T) {
 			a.Spec.Autoscale = &platformv1alpha1.Autoscale{MinReplicas: 3, MaxReplicas: 9, TargetCPUPercent: 70}
 		}),
 		"published": app(func(a *platformv1alpha1.Workload) {
-			a.Spec.Domain = "blog.example.com"
+			a.Spec.Domain = testDomain
 		}),
 		"with env and secrets": app(func(a *platformv1alpha1.Workload) {
 			a.Spec.Env = []platformv1alpha1.EnvVar{{Name: "LOG_LEVEL", Value: "debug"}}
@@ -186,19 +188,19 @@ func TestNetworkPolicyDeniesByDefaultAndBlocksMetadata(t *testing.T) {
 
 func TestIngressOnlyExistsWithADomainAndAlwaysForcesTLS(t *testing.T) {
 	if desiredIngress(app()) != nil {
-		t.Fatal("an ingress was rendered for an application with no domain")
+		t.Fatal("an ingress was rendered for an workload with no domain")
 	}
 
 	ing := desiredIngress(app(func(a *platformv1alpha1.Workload) {
-		a.Spec.Domain = "blog.example.com"
+		a.Spec.Domain = testDomain
 	}))
 	if ing == nil {
-		t.Fatal("no ingress was rendered for an application with a domain")
+		t.Fatal("no ingress was rendered for an workload with a domain")
 	}
-	if len(ing.Spec.TLS) != 1 || ing.Spec.TLS[0].Hosts[0] != "blog.example.com" {
+	if len(ing.Spec.TLS) != 1 || ing.Spec.TLS[0].Hosts[0] != testDomain {
 		t.Error("TLS is not configured for the domain")
 	}
-	if ing.Annotations["nginx.ingress.kubernetes.io/force-ssl-redirect"] != "true" {
+	if ing.Annotations["nginx.ingress.kubernetes.io/force-ssl-redirect"] != annotationTrue {
 		t.Error("plaintext is served rather than redirected")
 	}
 }

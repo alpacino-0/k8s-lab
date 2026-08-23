@@ -11,17 +11,17 @@ metadata:
   labels:
     app.kubernetes.io/name: k8s-lab-platform
     app.kubernetes.io/managed-by: kustomize
-  name: application-admin-role
+  name: workload-admin-role
 rules:
 - apiGroups:
   - platform.k8s-lab.dev
   resources:
-  - applications
+  - workloads
   verbs:
   - '*'
 - apiGroups:
   - platform.k8s-lab.dev
   resources:
-  - applications/status
+  - workloads/status
   verbs:
   - get

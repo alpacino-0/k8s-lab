@@ -72,6 +72,20 @@ monitoring: ## Install Prometheus + Grafana
 port-forward: ## Open Grafana on http://localhost:3000 (admin/admin)
 	kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80
 
+operator-test: ## Run the operator's unit and envtest suites
+	$(MAKE) -C operator test
+
+operator-install: ## Install the Workload CRD into the current cluster
+	$(MAKE) -C operator install
+
+operator-deploy: ## Build the operator image, load it into kind and deploy it
+	docker build -t k8s-lab-operator:1.0.0 ./operator
+	kind load docker-image k8s-lab-operator:1.0.0 --name k8s-lab
+	$(MAKE) -C operator install
+	$(MAKE) -C operator deploy IMG=k8s-lab-operator:1.0.0
+	kubectl -n k8s-lab-platform-system rollout status \
+	  deployment/k8s-lab-platform-controller-manager --timeout=180s
+
 down: ## Delete the kind cluster
 	./scripts/teardown.sh
 
