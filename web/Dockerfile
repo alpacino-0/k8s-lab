@@ -20,17 +20,20 @@ LABEL org.opencontainers.image.title="k8s-lab-web" \
       org.opencontainers.image.description="Interface for the k8s-lab service" \
       org.opencontainers.image.licenses="MIT"
 
-USER root
-RUN apk upgrade --no-cache
+USER 0
 COPY nginx.conf /etc/nginx/nginx.conf
 COPY security-headers.conf /etc/nginx/security-headers.conf
 COPY --from=build /src/dist /usr/share/nginx/html
-RUN chown -R 101:101 /usr/share/nginx/html
+# One layer: patch the base packages and hand the served files to the
+# unprivileged user the image already ships.
+RUN apk upgrade --no-cache && \
+    chown -R 101:101 /usr/share/nginx/html
 USER 101
 
 EXPOSE 8080
 
+# Exec form, so no shell is started for every check.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=3s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:8080/healthz | grep -q ok || exit 1
+  CMD ["sh", "-c", "wget -qO- http://127.0.0.1:8080/healthz | grep -q ok"]
 
 CMD ["nginx", "-g", "daemon off;"]

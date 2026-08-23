@@ -25,13 +25,14 @@ WORKDIR /app
 
 # node:alpine ships an unprivileged "node" user (uid 1000). Never run as root.
 # Pull the latest security patches for the base image's OS packages. Pinning the
-# base tag keeps builds reproducible; this keeps them patched.
-RUN apk upgrade --no-cache
-
+# One layer: patch the base packages, then remove the build-time tooling.
+#
 # npm is a build-time tool. Leaving it in the runtime image ships its entire
-# dependency tree (tar, minimatch, glob, sigstore, ...) and every CVE they carry,
-# for code that never executes here — the entrypoint is `node`, not `npm`.
-RUN rm -rf /usr/local/lib/node_modules/npm \
+# dependency tree (tar, minimatch, glob, sigstore, ...) and every CVE they
+# carry, for code that never executes here — the entrypoint is `node`, not
+# `npm`.
+RUN apk upgrade --no-cache && \
+    rm -rf /usr/local/lib/node_modules/npm \
            /usr/local/bin/npm /usr/local/bin/npx \
            /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg
 
@@ -39,14 +40,18 @@ COPY --chown=node:node --from=deps /app/node_modules ./node_modules
 COPY --chown=node:node package.json ./
 COPY --chown=node:node src ./src
 
-USER node
+# Numeric, not the "node" name. Kubernetes checks runAsNonRoot against the UID
+# in the image config and cannot resolve a name without reading the image's
+# /etc/passwd — a numeric id is unambiguous to both the kubelet and a policy.
+USER 1000
 
 EXPOSE 3000
 
 # Container-level check. Kubernetes uses its own probes; this helps plain
 # `docker run` and local compose setups.
+# Exec form: no shell process per check, and no shell to misparse the script.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD ["node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
 # Exec form (no shell): the process becomes PID 1 and receives SIGTERM directly.
 CMD ["node", "src/index.js"]
