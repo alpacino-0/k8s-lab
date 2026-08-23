@@ -48,6 +48,18 @@ variable "ingress_node_ports" {
   }
 }
 
+variable "kyverno_version" {
+  description = "Kyverno chart version. Kyverno is here for one thing only — verifying image signatures, which ValidatingAdmissionPolicy cannot do."
+  type        = string
+  default     = "3.5.2"
+}
+
+variable "install_kyverno" {
+  description = "Install Kyverno for image signature verification."
+  type        = bool
+  default     = true
+}
+
 variable "install_argocd" {
   description = "Install Argo CD. The Application itself is applied separately — see README."
   type        = bool
