@@ -212,6 +212,16 @@ Olumsuz durum bilinçli olarak **var olan** ama imzasız bir imaj kullanıyor. H
 push edilmemiş bir etiket de reddedilirdi — ama `manifest unknown` diyerek, yani
 aynı rengi giymiş farklı bir hatayla.
 
+**cosign 3 ile Kyverno henüz anlaşmıyor.** cosign 3, imzaları Sigstore bundle
+(`application/vnd.dev.sigstore.bundle.v0.3+json`) olarak yazıyor ve bundan
+vazgeçmenin yolu yok. Kyverno bu katmanı okuyamıyor — ve bildirdiği şey
+"desteklenmeyen biçim" değil, **`no signatures found`**: doğrulayıcının
+göremediği geçerli bir imza, hiç imza olmamasından ayırt edilemiyor. Bu yüzden
+imzalayan taraf, doğrulayan yetişene kadar cosign 2.x'e sabitlendi. Yalnızca
+imzalama action'ının yükseltilmesi zorlamayı kırmaya yetti — ve bunu yaparken
+pipeline yeşil kaldı, çünkü kontrol yükseltmeden önce imzalanmış bir imajı
+okuyordu.
+
 **Bunun bulduğu hata.** Pipeline her imajın index digest'ini imzalıyordu.
 Çok-mimarili bir etiket, platform başına bir manifeste işaret eden bir index'tir;
 admission denetleyicisi ise etiketi kendi platformunun alt manifestine çözer ve

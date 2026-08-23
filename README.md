@@ -211,6 +211,15 @@ The negative case deliberately uses an image that *exists* and carries no
 signature. A tag that was never pushed would be rejected too — with
 `manifest unknown`, a different failure wearing the same colour.
 
+**cosign 3 and Kyverno do not agree yet.** cosign 3 writes signatures as a
+Sigstore bundle (`application/vnd.dev.sigstore.bundle.v0.3+json`) and gives no
+way to opt out. Kyverno cannot read that layer, and what it reports is not
+"unsupported format" but **`no signatures found`** — a valid signature the
+enforcer cannot see, indistinguishable from no signature at all. So the signer
+is pinned to cosign 2.x until the verifier catches up. An upgrade of the signing
+action alone was enough to break enforcement, and the pipeline stayed green
+while it did, because the check was reading an image signed before the upgrade.
+
 **The bug this found.** The pipeline signed each image's index digest. A
 multi-arch tag is an index pointing at one manifest per platform, and an
 admission controller resolves the tag to the child for its own platform — then

@@ -105,12 +105,19 @@ spec:
       readinessProbe: { httpGet: { path: /healthz, port: 3000 } }
       livenessProbe: { httpGet: { path: /healthz, port: 3000 } }
 EOF
+  local last=""
   for _ in $(seq 1 60); do
-    if [[ "$(apply_dry)" == *"requests and a memory limit"* ]]; then
+    last="$(apply_dry)"
+    if [[ "$last" == *"requests and a memory limit"* ]]; then
       return 0
     fi
     sleep 1
   done
+  # Without this, a timeout says only "policies never took effect", which is the
+  # right conclusion and the wrong diagnosis: the probe may be getting rejected
+  # by something else entirely, and its message is the thing that says what.
+  echo "  ....  last response from the API server:"
+  printf '%s\n' "$last" | sed 's/^/         /'
   return 1
 }
 
