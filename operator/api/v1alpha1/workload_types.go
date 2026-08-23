@@ -35,7 +35,7 @@ type EnvVar struct {
 // Resources is what the container asks for and what it may not exceed. Both are
 // required: a pod with no request is scheduled blind and a pod with no memory
 // limit can take a node down with it. The admission policy rejects workloads
-// that omit either, so there is no point in letting an Application omit them.
+// that omit either, so there is no point in letting an Workload omit them.
 type Resources struct {
 	// +kubebuilder:default="100m"
 	CPURequest resource.Quantity `json:"cpuRequest,omitempty"`
@@ -81,14 +81,14 @@ type Autoscale struct {
 	TargetCPUPercent int32 `json:"targetCPUPercent,omitempty"`
 }
 
-// ApplicationSpec is the whole surface a user writes. Everything absent from it
+// WorkloadSpec is the whole surface a user writes. Everything absent from it
 // is a decision the platform has already made: non-root, read-only root
 // filesystem, all capabilities dropped, no service-account token, default-deny
 // networking, a disruption budget, and a rollout that never takes a replica out
 // before its replacement is ready. Those are not defaults — there is no field
 // that turns them off.
 // +kubebuilder:validation:XValidation:rule="has(self.replicas) ? !has(self.autoscale) : true",message="set replicas or autoscale, not both"
-type ApplicationSpec struct {
+type WorkloadSpec struct {
 	// Image is the container image to run. A digest is preferred; a tag is
 	// accepted as long as it is not :latest, which means "whatever is there
 	// today" and makes a rollback restore something other than what was rolled
@@ -115,7 +115,7 @@ type ApplicationSpec struct {
 	Domain string `json:"domain,omitempty"`
 
 	// Env holds literal environment variables. These are visible to anyone who
-	// can read the Application, so credentials belong in EnvFrom.
+	// can read the Workload, so credentials belong in EnvFrom.
 	// +listType=map
 	// +listMapKey=name
 	Env []EnvVar `json:"env,omitempty"`
@@ -133,10 +133,10 @@ type ApplicationSpec struct {
 	Autoscale *Autoscale `json:"autoscale,omitempty"`
 }
 
-// ApplicationStatus reports what the platform observed, never what it was asked
-// for. A field here that merely echoes the spec would make an Application look
+// WorkloadStatus reports what the platform observed, never what it was asked
+// for. A field here that merely echoes the spec would make an Workload look
 // healthy before anything had happened.
-type ApplicationStatus struct {
+type WorkloadStatus struct {
 	// Conditions follows the standard Kubernetes convention: Ready says whether
 	// the application is serving, Progressing says whether it is still rolling.
 	// +listType=map
@@ -159,38 +159,38 @@ type ApplicationStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas
-// +kubebuilder:resource:shortName=app
+// +kubebuilder:resource:shortName=wl
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Replicas",type=string,JSONPath=`.status.readyReplicas`
 // +kubebuilder:printcolumn:name="URL",type=string,JSONPath=`.status.url`
 // +kubebuilder:printcolumn:name="Image",type=string,priority=1,JSONPath=`.spec.image`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// Application is one deployable thing: an image, a port, and optionally a
+// Workload is one deployable thing: an image, a port, and optionally a
 // hostname. The platform renders it into the dozen Kubernetes objects a
 // production workload needs, all of them hardened the same way, so that the
 // safe configuration is the only configuration rather than the one a careful
 // author remembers to write.
-type Application struct {
+type Workload struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   ApplicationSpec   `json:"spec,omitempty"`
-	Status ApplicationStatus `json:"status,omitempty"`
+	Spec   WorkloadSpec   `json:"spec,omitempty"`
+	Status WorkloadStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// ApplicationList contains a list of Application.
-type ApplicationList struct {
+// WorkloadList contains a list of Workload.
+type WorkloadList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []Application `json:"items"`
+	Items           []Workload `json:"items"`
 }
 
 func init() {
 	SchemeBuilder.Register(func(scheme *runtime.Scheme) error {
-		scheme.AddKnownTypes(SchemeGroupVersion, &Application{}, &ApplicationList{})
+		scheme.AddKnownTypes(SchemeGroupVersion, &Workload{}, &WorkloadList{})
 		return nil
 	})
 }

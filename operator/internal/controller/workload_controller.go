@@ -36,9 +36,9 @@ import (
 	platformv1alpha1 "github.com/alpacino-0/k8s-lab/operator/api/v1alpha1"
 )
 
-// ApplicationReconciler renders one Application into the objects a production
+// WorkloadReconciler renders one Workload into the objects a production
 // workload needs, and keeps them that way.
-type ApplicationReconciler struct {
+type WorkloadReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
@@ -53,10 +53,10 @@ type ApplicationReconciler struct {
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
-func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	var app platformv1alpha1.Application
+	var app platformv1alpha1.Workload
 	if err := r.Get(ctx, req.NamespacedName, &app); err != nil {
 		// Gone. Every object this created carries an owner reference, so the
 		// garbage collector has already dealt with them.
@@ -76,11 +76,11 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return ctrl.Result{}, r.updateStatus(ctx, &app, nil)
 }
 
-// normalise fills in what the CRD's defaults would have supplied. An Application
+// normalise fills in what the CRD's defaults would have supplied. An Workload
 // built in Go and handed straight to the reconciler never passes through the API
 // server's defaulting, and a zero Quantity means "no CPU at all" rather than
 // "unset" — which the admission policies would rightly reject.
-func normalise(app *platformv1alpha1.Application) {
+func normalise(app *platformv1alpha1.Workload) {
 	app.Spec.Resources.CPURequest = quantityOrDefault(app.Spec.Resources.CPURequest, "100m")
 	app.Spec.Resources.MemoryRequest = quantityOrDefault(app.Spec.Resources.MemoryRequest, "128Mi")
 	app.Spec.Resources.MemoryLimit = quantityOrDefault(app.Spec.Resources.MemoryLimit, "512Mi")
@@ -96,7 +96,7 @@ func normalise(app *platformv1alpha1.Application) {
 	}
 }
 
-func (r *ApplicationReconciler) reconcileOwned(ctx context.Context, app *platformv1alpha1.Application) error {
+func (r *WorkloadReconciler) reconcileOwned(ctx context.Context, app *platformv1alpha1.Workload) error {
 	// Order matters only for the ServiceAccount, which the Deployment names.
 	if err := r.apply(ctx, app, desiredServiceAccount(app), func(existing, desired client.Object) {
 		e := existing.(*corev1.ServiceAccount)
@@ -188,9 +188,9 @@ func (r *ApplicationReconciler) reconcileOwned(ctx context.Context, app *platfor
 // mutate copies only the fields this operator owns, so that defaults the API
 // server filled in — a Service's clusterIP, a Deployment's revision history —
 // are not clobbered on every pass.
-func (r *ApplicationReconciler) apply(
+func (r *WorkloadReconciler) apply(
 	ctx context.Context,
-	app *platformv1alpha1.Application,
+	app *platformv1alpha1.Workload,
 	desired client.Object,
 	mutate func(existing, desired client.Object),
 ) error {
@@ -206,9 +206,9 @@ func (r *ApplicationReconciler) apply(
 	return err
 }
 
-func (r *ApplicationReconciler) deleteIfPresent(
+func (r *WorkloadReconciler) deleteIfPresent(
 	ctx context.Context,
-	app *platformv1alpha1.Application,
+	app *platformv1alpha1.Workload,
 	obj client.Object,
 ) error {
 	obj.SetName(app.Name)
@@ -220,9 +220,9 @@ func (r *ApplicationReconciler) deleteIfPresent(
 	return err
 }
 
-func (r *ApplicationReconciler) updateStatus(
+func (r *WorkloadReconciler) updateStatus(
 	ctx context.Context,
-	app *platformv1alpha1.Application,
+	app *platformv1alpha1.Workload,
 	reconcileErr error,
 ) error {
 	var dep appsv1.Deployment
@@ -286,9 +286,9 @@ func setCondition(conditions *[]metav1.Condition, next metav1.Condition) {
 	*conditions = append(*conditions, next)
 }
 
-func (r *ApplicationReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *WorkloadReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&platformv1alpha1.Application{}).
+		For(&platformv1alpha1.Workload{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).

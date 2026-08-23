@@ -4,16 +4,16 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: applications.platform.k8s-lab.dev
+  name: workloads.platform.k8s-lab.dev
 spec:
   group: platform.k8s-lab.dev
   names:
-    kind: Application
-    listKind: ApplicationList
-    plural: applications
+    kind: Workload
+    listKind: WorkloadList
+    plural: workloads
     shortNames:
-    - app
-    singular: application
+    - wl
+    singular: workload
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
@@ -37,7 +37,7 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          Application is one deployable thing: an image, a port, and optionally a
+          Workload is one deployable thing: an image, a port, and optionally a
           hostname. The platform renders it into the dozen Kubernetes objects a
           production workload needs, all of them hardened the same way, so that the
           safe configuration is the only configuration rather than the one a careful
@@ -62,7 +62,7 @@ spec:
             type: object
           spec:
             description: |-
-              ApplicationSpec is the whole surface a user writes. Everything absent from it
+              WorkloadSpec is the whole surface a user writes. Everything absent from it
               is a decision the platform has already made: non-root, read-only root
               filesystem, all capabilities dropped, no service-account token, default-deny
               networking, a disruption budget, and a rollout that never takes a replica out
@@ -103,7 +103,7 @@ spec:
               env:
                 description: |-
                   Env holds literal environment variables. These are visible to anyone who
-                  can read the Application, so credentials belong in EnvFrom.
+                  can read the Workload, so credentials belong in EnvFrom.
                 items:
                   description: |-
                     EnvVar is a literal environment variable. Anything that should not be read
@@ -178,7 +178,7 @@ spec:
                   Resources is what the container asks for and what it may not exceed. Both are
                   required: a pod with no request is scheduled blind and a pod with no memory
                   limit can take a node down with it. The admission policy rejects workloads
-                  that omit either, so there is no point in letting an Application omit them.
+                  that omit either, so there is no point in letting an Workload omit them.
                 properties:
                   cpuRequest:
                     anyOf:
@@ -214,8 +214,8 @@ spec:
               rule: 'has(self.replicas) ? !has(self.autoscale) : true'
           status:
             description: |-
-              ApplicationStatus reports what the platform observed, never what it was asked
-              for. A field here that merely echoes the spec would make an Application look
+              WorkloadStatus reports what the platform observed, never what it was asked
+              for. A field here that merely echoes the spec would make an Workload look
               healthy before anything had happened.
             properties:
               conditions:

@@ -36,7 +36,7 @@ import (
 	platformv1alpha1 "github.com/alpacino-0/k8s-lab/operator/api/v1alpha1"
 )
 
-var _ = Describe("Application Controller", func() {
+var _ = Describe("Workload Controller", func() {
 	const (
 		name      = "test-app"
 		namespace = "default"
@@ -45,8 +45,8 @@ var _ = Describe("Application Controller", func() {
 	ctx := context.Background()
 	key := types.NamespacedName{Name: name, Namespace: namespace}
 
-	reconciler := func() *ApplicationReconciler {
-		return &ApplicationReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+	reconciler := func() *WorkloadReconciler {
+		return &WorkloadReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 	}
 
 	reconcileNow := func() {
@@ -55,16 +55,16 @@ var _ = Describe("Application Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
-	create := func(spec platformv1alpha1.ApplicationSpec) {
+	create := func(spec platformv1alpha1.WorkloadSpec) {
 		GinkgoHelper()
-		Expect(k8sClient.Create(ctx, &platformv1alpha1.Application{
+		Expect(k8sClient.Create(ctx, &platformv1alpha1.Workload{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 			Spec:       spec,
 		})).To(Succeed())
 	}
 
 	AfterEach(func() {
-		app := &platformv1alpha1.Application{}
+		app := &platformv1alpha1.Workload{}
 		if err := k8sClient.Get(ctx, key, app); err == nil {
 			Expect(k8sClient.Delete(ctx, app)).To(Succeed())
 		}
@@ -82,7 +82,7 @@ var _ = Describe("Application Controller", func() {
 	})
 
 	It("renders the full set of objects a production workload needs", func() {
-		create(platformv1alpha1.ApplicationSpec{Image: "ghcr.io/example/app:1.0.0", Port: 3000})
+		create(platformv1alpha1.WorkloadSpec{Image: "ghcr.io/example/app:1.0.0", Port: 3000})
 		reconcileNow()
 
 		for _, obj := range []client.Object{
@@ -91,8 +91,8 @@ var _ = Describe("Application Controller", func() {
 		} {
 			Expect(k8sClient.Get(ctx, key, obj)).To(Succeed())
 			Expect(obj.GetOwnerReferences()).To(HaveLen(1),
-				"without an owner reference, deleting the Application would orphan this object")
-			Expect(obj.GetOwnerReferences()[0].Kind).To(Equal("Application"))
+				"without an owner reference, deleting the Workload would orphan this object")
+			Expect(obj.GetOwnerReferences()[0].Kind).To(Equal("Workload"))
 		}
 
 		By("leaving out what was not asked for")
@@ -101,7 +101,7 @@ var _ = Describe("Application Controller", func() {
 	})
 
 	It("adds and then removes the ingress as the domain comes and goes", func() {
-		create(platformv1alpha1.ApplicationSpec{
+		create(platformv1alpha1.WorkloadSpec{
 			Image:  "ghcr.io/example/app:1.0.0",
 			Domain: "app.example.com",
 		})
@@ -112,7 +112,7 @@ var _ = Describe("Application Controller", func() {
 		Expect(ing.Spec.Rules[0].Host).To(Equal("app.example.com"))
 
 		By("dropping the domain again")
-		app := &platformv1alpha1.Application{}
+		app := &platformv1alpha1.Workload{}
 		Expect(k8sClient.Get(ctx, key, app)).To(Succeed())
 		app.Spec.Domain = ""
 		Expect(k8sClient.Update(ctx, app)).To(Succeed())
@@ -124,7 +124,7 @@ var _ = Describe("Application Controller", func() {
 	})
 
 	It("hands the replica count to the autoscaler and takes it back", func() {
-		create(platformv1alpha1.ApplicationSpec{
+		create(platformv1alpha1.WorkloadSpec{
 			Image:     "ghcr.io/example/app:1.0.0",
 			Autoscale: &platformv1alpha1.Autoscale{MinReplicas: 3, MaxReplicas: 9, TargetCPUPercent: 70},
 		})
@@ -148,10 +148,10 @@ var _ = Describe("Application Controller", func() {
 	})
 
 	It("reports what it observed rather than what it was asked for", func() {
-		create(platformv1alpha1.ApplicationSpec{Image: "ghcr.io/example/app:1.0.0"})
+		create(platformv1alpha1.WorkloadSpec{Image: "ghcr.io/example/app:1.0.0"})
 		reconcileNow()
 
-		app := &platformv1alpha1.Application{}
+		app := &platformv1alpha1.Workload{}
 		Expect(k8sClient.Get(ctx, key, app)).To(Succeed())
 
 		// No kubelet runs in envtest, so nothing can become ready. A status that

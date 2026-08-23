@@ -26,10 +26,10 @@ import (
 	platformv1alpha1 "github.com/alpacino-0/k8s-lab/operator/api/v1alpha1"
 )
 
-func app(mutate ...func(*platformv1alpha1.Application)) *platformv1alpha1.Application {
-	a := &platformv1alpha1.Application{
+func app(mutate ...func(*platformv1alpha1.Workload)) *platformv1alpha1.Workload {
+	a := &platformv1alpha1.Workload{
 		ObjectMeta: metav1.ObjectMeta{Name: "blog", Namespace: "team-a"},
-		Spec: platformv1alpha1.ApplicationSpec{
+		Spec: platformv1alpha1.WorkloadSpec{
 			Image: "ghcr.io/example/blog:1.2.3",
 		},
 	}
@@ -45,18 +45,18 @@ func app(mutate ...func(*platformv1alpha1.Application)) *platformv1alpha1.Applic
 // a default rather than a guarantee — so this runs the hardening assertions
 // against every spec shape the type allows, including the emptiest one.
 func TestHardeningSurvivesEverySpec(t *testing.T) {
-	cases := map[string]*platformv1alpha1.Application{
+	cases := map[string]*platformv1alpha1.Workload{
 		"minimal": app(),
-		"fixed replicas": app(func(a *platformv1alpha1.Application) {
+		"fixed replicas": app(func(a *platformv1alpha1.Workload) {
 			a.Spec.Replicas = ptr.To(int32(7))
 		}),
-		"autoscaled": app(func(a *platformv1alpha1.Application) {
+		"autoscaled": app(func(a *platformv1alpha1.Workload) {
 			a.Spec.Autoscale = &platformv1alpha1.Autoscale{MinReplicas: 3, MaxReplicas: 9, TargetCPUPercent: 70}
 		}),
-		"published": app(func(a *platformv1alpha1.Application) {
+		"published": app(func(a *platformv1alpha1.Workload) {
 			a.Spec.Domain = "blog.example.com"
 		}),
-		"with env and secrets": app(func(a *platformv1alpha1.Application) {
+		"with env and secrets": app(func(a *platformv1alpha1.Workload) {
 			a.Spec.Env = []platformv1alpha1.EnvVar{{Name: "LOG_LEVEL", Value: "debug"}}
 			a.Spec.EnvFrom = []string{"blog-secrets"}
 		}),
@@ -124,7 +124,7 @@ func TestRolloutNeverRemovesAReplicaFirst(t *testing.T) {
 // Deployment as well makes the operator and the autoscaler overwrite each other
 // on every pass.
 func TestAutoscalingOwnsTheReplicaCount(t *testing.T) {
-	withHPA := app(func(a *platformv1alpha1.Application) {
+	withHPA := app(func(a *platformv1alpha1.Workload) {
 		a.Spec.Autoscale = &platformv1alpha1.Autoscale{MinReplicas: 2, MaxReplicas: 8, TargetCPUPercent: 60}
 	})
 	if r := desiredDeployment(withHPA).Spec.Replicas; r != nil {
@@ -189,7 +189,7 @@ func TestIngressOnlyExistsWithADomainAndAlwaysForcesTLS(t *testing.T) {
 		t.Fatal("an ingress was rendered for an application with no domain")
 	}
 
-	ing := desiredIngress(app(func(a *platformv1alpha1.Application) {
+	ing := desiredIngress(app(func(a *platformv1alpha1.Workload) {
 		a.Spec.Domain = "blog.example.com"
 	}))
 	if ing == nil {

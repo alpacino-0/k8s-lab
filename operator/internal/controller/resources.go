@@ -33,7 +33,7 @@ import (
 )
 
 // Everything in this block is the platform's decision rather than the user's.
-// There is no field on Application that changes any of it, which is the point:
+// There is no field on Workload that changes any of it, which is the point:
 // a security context that can be switched off is a convention, and conventions
 // are what the workload written at 2am does not follow.
 const (
@@ -58,7 +58,7 @@ const (
 	metadataCIDR = "169.254.0.0/16"
 )
 
-func labelsFor(app *platformv1alpha1.Application) map[string]string {
+func labelsFor(app *platformv1alpha1.Workload) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       app.Name,
 		"app.kubernetes.io/instance":   app.Name,
@@ -66,14 +66,14 @@ func labelsFor(app *platformv1alpha1.Application) map[string]string {
 	}
 }
 
-func selectorFor(app *platformv1alpha1.Application) map[string]string {
+func selectorFor(app *platformv1alpha1.Workload) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":     app.Name,
 		"app.kubernetes.io/instance": app.Name,
 	}
 }
 
-func objectMeta(app *platformv1alpha1.Application) metav1.ObjectMeta {
+func objectMeta(app *platformv1alpha1.Workload) metav1.ObjectMeta {
 	return metav1.ObjectMeta{
 		Name:      app.Name,
 		Namespace: app.Namespace,
@@ -84,14 +84,14 @@ func objectMeta(app *platformv1alpha1.Application) metav1.ObjectMeta {
 // desiredServiceAccount exists so the workload has an identity that is not
 // `default`, and so that identity can be denied a token. An application that
 // does not call the Kubernetes API has no reason to carry a credential for it.
-func desiredServiceAccount(app *platformv1alpha1.Application) *corev1.ServiceAccount {
+func desiredServiceAccount(app *platformv1alpha1.Workload) *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{
 		ObjectMeta:                   objectMeta(app),
 		AutomountServiceAccountToken: ptr.To(false),
 	}
 }
 
-func desiredDeployment(app *platformv1alpha1.Application) *appsv1.Deployment {
+func desiredDeployment(app *platformv1alpha1.Workload) *appsv1.Deployment {
 	probe := func(path string) *corev1.Probe {
 		return &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
@@ -214,7 +214,7 @@ func desiredDeployment(app *platformv1alpha1.Application) *appsv1.Deployment {
 	}
 }
 
-func desiredService(app *platformv1alpha1.Application) *corev1.Service {
+func desiredService(app *platformv1alpha1.Workload) *corev1.Service {
 	return &corev1.Service{
 		ObjectMeta: objectMeta(app),
 		Spec: corev1.ServiceSpec{
@@ -232,7 +232,7 @@ func desiredService(app *platformv1alpha1.Application) *corev1.Service {
 // desiredNetworkPolicy denies everything this application is not explicitly
 // allowed. One policy is enough: selecting a pod with both policy types set
 // means only the listed traffic survives.
-func desiredNetworkPolicy(app *platformv1alpha1.Application) *networkingv1.NetworkPolicy {
+func desiredNetworkPolicy(app *platformv1alpha1.Workload) *networkingv1.NetworkPolicy {
 	tcp := corev1.ProtocolTCP
 	udp := corev1.ProtocolUDP
 	dnsPort := intstr.FromInt32(53)
@@ -278,7 +278,7 @@ func desiredNetworkPolicy(app *platformv1alpha1.Application) *networkingv1.Netwo
 	}
 }
 
-func desiredPodDisruptionBudget(app *platformv1alpha1.Application) *policyv1.PodDisruptionBudget {
+func desiredPodDisruptionBudget(app *platformv1alpha1.Workload) *policyv1.PodDisruptionBudget {
 	return &policyv1.PodDisruptionBudget{
 		ObjectMeta: objectMeta(app),
 		Spec: policyv1.PodDisruptionBudgetSpec{
@@ -292,7 +292,7 @@ func desiredPodDisruptionBudget(app *platformv1alpha1.Application) *policyv1.Pod
 	}
 }
 
-func desiredHPA(app *platformv1alpha1.Application) *autoscalingv2.HorizontalPodAutoscaler {
+func desiredHPA(app *platformv1alpha1.Workload) *autoscalingv2.HorizontalPodAutoscaler {
 	if app.Spec.Autoscale == nil {
 		return nil
 	}
@@ -330,7 +330,7 @@ func desiredHPA(app *platformv1alpha1.Application) *autoscalingv2.HorizontalPodA
 	}
 }
 
-func desiredIngress(app *platformv1alpha1.Application) *networkingv1.Ingress {
+func desiredIngress(app *platformv1alpha1.Workload) *networkingv1.Ingress {
 	if app.Spec.Domain == "" {
 		return nil
 	}

@@ -1,5 +1,5 @@
 apiVersion: platform.k8s-lab.dev/v1alpha1
-kind: Application
+kind: Workload
 metadata:
   labels:
     app.kubernetes.io/name: k8s-lab-platform
