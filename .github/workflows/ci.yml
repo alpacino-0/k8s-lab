@@ -438,7 +438,11 @@ jobs:
 
       - name: A Workload must reach Ready through the admission policies
         run: |
-          cat <<'EOF' | kubectl apply -f -
+          # Unquoted delimiter on purpose: ${IMAGE_TAG} has to expand. With
+          # <<'EOF' it reached the API server as a literal and the pods came up
+          # InvalidImageName, which the wait below then reported only as a
+          # timeout.
+          cat <<EOF | kubectl apply -f -
           apiVersion: platform.k8s-lab.dev/v1alpha1
           kind: Workload
           metadata:
@@ -449,7 +453,12 @@ jobs:
             port: 3000
             replicas: 2
           EOF
-          kubectl -n k8s-lab wait --for=condition=Ready workload/ci-probe --timeout=180s
+          if ! kubectl -n k8s-lab wait --for=condition=Ready workload/ci-probe --timeout=180s; then
+            kubectl -n k8s-lab get workload ci-probe -o jsonpath='{.status.conditions}' | tr ',' '\n'
+            kubectl -n k8s-lab get pod -l app.kubernetes.io/instance=ci-probe \
+              -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,IMAGE:.spec.containers[0].image,REASON:.status.containerStatuses[0].state.waiting.reason
+            exit 1
+          fi
 
       # Reading the rendered pod back rather than the operator's own source. The
       # unit tests already prove the renderer intends this; this proves the API
