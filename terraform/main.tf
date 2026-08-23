@@ -149,7 +149,7 @@ resource "kubernetes_manifest" "admission_bindings" {
   depends_on = [kubernetes_manifest.admission_policies]
 }
 
-resource "kubernetes_namespace" "app" {
+resource "kubernetes_namespace_v1" "app" {
   metadata {
     name = "k8s-lab"
     labels = merge(local.common_labels, {
