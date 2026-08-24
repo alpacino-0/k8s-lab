@@ -452,7 +452,7 @@ policies/             cluster politikası, bilerek chart'ın dışında
   admission-*.yaml    ValidatingAdmissionPolicy kuralları ve bağlamaları
 scripts/
   bootstrap.sh        idempotent cluster + ingress + politikalar + deploy
-  policy-test.sh      her kuralın doğru şeyi reddettiğini kanıtlayan 12 kontrol
+  policy-test.sh      her kuralın doğru şeyi reddettiğini kanıtlayan 13 kontrol
   smoke-test.sh       güvenlik duruşu ve izolasyon dahil 35 uçtan uca kontrol
   teardown.sh         cluster'ı siler
 ```

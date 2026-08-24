@@ -455,7 +455,7 @@ policies/             cluster policy, kept out of the chart on purpose
   admission-*.yaml    ValidatingAdmissionPolicy rules and their bindings
 scripts/
   bootstrap.sh        idempotent cluster + ingress + policies + deploy
-  policy-test.sh      12 checks that each rule rejects what it should
+  policy-test.sh      13 checks that each rule rejects what it should
   smoke-test.sh       35 end-to-end checks including security posture and isolation
   teardown.sh         destroy the cluster
 ```

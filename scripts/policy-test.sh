@@ -11,7 +11,12 @@ NAMESPACE="${NAMESPACE:-k8s-lab}"
 IMAGE="${IMAGE:-k8s-lab-app:1.0.0}"
 FAILED=0
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+# A namespace that grants the token exemption. Created here rather than
+# borrowed from the cluster: in CI this script runs before the operator is
+# installed, so the one namespace that carries the label does not exist yet,
+# and a case that silently skips is a case that never ran.
+PERMIT_NS="${PERMIT_NS:-policy-probe-permitted}"
+trap 'rm -rf "$WORK"; kubectl delete namespace "$PERMIT_NS" --ignore-not-found --wait=false >/dev/null 2>&1' EXIT
 
 pass() { printf '  \033[0;32mPASS\033[0m  %s\n' "$1"; }
 fail() { printf '  \033[0;31mFAIL\033[0m  %s\n' "$1"; FAILED=1; }
@@ -19,7 +24,9 @@ fail() { printf '  \033[0;31mFAIL\033[0m  %s\n' "$1"; FAILED=1; }
 # Written to a file rather than piped: a pipeline runs its last stage in a
 # subshell, so a failure counter incremented there never reaches this script
 # and it would always report success.
-apply_dry() { kubectl -n "$NAMESPACE" apply --dry-run=server -f "$WORK/manifest.yaml" 2>&1; }
+# TARGET_NS lets one case run somewhere other than the namespace under test,
+# which the namespace-scoped token exemption needs in order to be provable.
+apply_dry() { kubectl -n "${TARGET_NS:-$NAMESPACE}" apply --dry-run=server -f "$WORK/manifest.yaml" 2>&1; }
 
 must_reject() {
   local what="$1" expect="$2" out
@@ -175,10 +182,18 @@ EOF
   } > "$WORK/manifest.yaml"
 }
 
+kubectl create namespace "$PERMIT_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl label namespace "$PERMIT_NS" --overwrite >/dev/null \
+  k8s-lab.dev/policies=enforced \
+  k8s-lab.dev/api-access=permitted \
+  pod-security.kubernetes.io/enforce=restricted
+
 token_pod policy-probe-token ""
 must_reject "a pod mounting a token without saying why is rejected" "automountServiceAccountToken"
 token_pod policy-probe-token-ok "k8s-lab.dev/api-access: required"
-must_admit  "a pod that declares it needs the API keeps its token"
+must_reject "the pod label alone does not grant a token" "automountServiceAccountToken"
+token_pod policy-probe-token-ok "k8s-lab.dev/api-access: required"
+TARGET_NS="$PERMIT_NS" must_admit "a permitted namespace plus the pod label keeps the token"
 
 # Pod Security Admission runs before any of the above.
 cat > "$WORK/manifest.yaml" <<EOF
