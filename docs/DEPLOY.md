@@ -17,7 +17,7 @@ public address yet.
 | Server | 1 vCPU / 2 GB RAM is comfortable; 1 GB works. Hetzner CX22 or similar, ~€4-5/month |
 | Domain | A record pointing at the server's IP. A subdomain is fine |
 | Local tools | `kubectl`, `helm` |
-| Images | Built and pushed by CI on the first push to `main` (amd64 + arm64). Before you start, confirm `ghcr.io/damgahq/damga` exists and is **public** — a new organisation's GHCR packages start private, and the visibility has to be flipped once by hand |
+| Images | Already published: `ghcr.io/damgahq/damga`, public, amd64 + arm64. If you fork this and publish your own, note that a new organisation's GHCR packages start private and the visibility has to be flipped once by hand, or Kyverno cannot fetch the signature |
 
 ---
 
