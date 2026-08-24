@@ -1,0 +1,18 @@
+# The image override for a local kind cluster, as an overlay rather than an edit.
+#
+# kubebuilder's `make deploy` runs `kustomize edit set image` against
+# config/manager, rewriting a tracked file every time it runs. That edit once
+# reached a commit, and git then described `k8s-lab-operator:1.0.0` — an image
+# that existed only on the machine which had last deployed, and which Argo CD
+# would have tried and failed to pull.
+#
+# Same job, no mutation: this overlay names the locally built image and leaves
+# config/manager holding kubebuilder's placeholder. gitops/operator.yaml does
+# the equivalent for the published image, so every destination carries its own
+# override and none of them write to the base.
+resources:
+  - ../default
+images:
+  - name: controller
+    newName: k8s-lab-operator
+    newTag: 1.0.0

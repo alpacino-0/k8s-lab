@@ -82,7 +82,7 @@ operator-deploy: ## Build the operator image, load it into kind and deploy it
 	docker build -t k8s-lab-operator:1.0.0 ./operator
 	kind load docker-image k8s-lab-operator:1.0.0 --name k8s-lab
 	$(MAKE) -C operator install
-	$(MAKE) -C operator deploy IMG=k8s-lab-operator:1.0.0
+	$(MAKE) -C operator deploy-local
 	kubectl -n k8s-lab-platform-system rollout status \
 	  deployment/k8s-lab-platform-controller-manager --timeout=180s
 
