@@ -39,7 +39,7 @@ spec:
               {{- include "web.selectorLabels" . | nindent 14 }}
       containers:
         - name: web
-          image: "{{ .Values.web.image.repository }}:{{ .Values.web.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "app.image" (dict "image" .Values.web.image "defaultTag" .Chart.AppVersion) | quote }}
           imagePullPolicy: {{ .Values.web.image.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false

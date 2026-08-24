@@ -94,3 +94,32 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/part-of: k8s-lab
 app.kubernetes.io/component: cache
 {{- end -}}
+
+{{/*
+  An image reference, joined the way the reference grammar requires: ":" before
+  a tag and "@" before a digest.
+
+  The difference is not cosmetic — "repo:sha256:abc" is not a valid reference at
+  all — and the colon used to be hardcoded at both call sites. That made the two
+  images this pipeline publishes the only two in the chart that could not be
+  pinned by digest; postgres and redis take the whole string from values and
+  always could.
+
+  Pinning matters more than it looks. Kyverno verifies the signature and rewrites
+  the reference to the digest it verified, on the Deployment as well as on the
+  Pod. Against a tag, git and the cluster then disagree permanently: Argo CD
+  reports OutOfSync forever while being exactly what git asked for, rewriting the
+  field every reconcile with Kyverno rewriting it straight back. A digest is the
+  only form where what git asks for and what admission produces are one string.
+
+  digest wins when both are set. tag stays for whoever runs helm by hand, and to
+  say in readable form which release the digest belongs to.
+*/}}
+{{- define "app.image" -}}
+{{- $img := .image -}}
+{{- if $img.digest -}}
+{{- printf "%s@%s" $img.repository $img.digest -}}
+{{- else -}}
+{{- printf "%s:%s" $img.repository ($img.tag | default .defaultTag) -}}
+{{- end -}}
+{{- end -}}

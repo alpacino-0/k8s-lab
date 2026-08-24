@@ -5,6 +5,10 @@ replicaCount: 3
 image:
   repository: k8s-lab-app
   tag: ""              # defaults to .Chart.AppVersion
+  # A digest wins over the tag when set, and is what a GitOps deployment should
+  # carry: admission rewrites a verified tag to its digest anyway, so a tag here
+  # leaves git and the cluster permanently disagreeing about the same image.
+  digest: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
@@ -74,6 +78,7 @@ web:
   image:
     repository: k8s-lab-web
     tag: ""              # defaults to .Chart.AppVersion
+    digest: ""           # wins over tag; see image.digest above
     pullPolicy: IfNotPresent
   resources:
     requests:

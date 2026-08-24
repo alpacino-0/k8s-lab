@@ -65,7 +65,7 @@ spec:
       # The cost is that a release bumps this line. Argo CD Image Updater exists
       # to write it, and that is Phase 1's work.
       images:
-        - controller=ghcr.io/alpacino-0/k8s-lab-operator@sha256:7ba089bac6e81c150bc3028eb61a709cae1e28c08ba23519fd9fc4ad4b310bde
+        - controller=ghcr.io/alpacino-0/k8s-lab-operator@sha256:173579293d9f17ceea3d042836afc4aca2b398840b1250d92f47093f574f03cf
 
   destination:
     server: https://kubernetes.default.svc
