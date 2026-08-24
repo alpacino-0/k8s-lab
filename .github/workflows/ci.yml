@@ -89,7 +89,7 @@ jobs:
           ./kubeconform -strict -summary \
             -schema-location default \
             -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
-            policies/
+            policies/ gitops/
 
       - name: Validate rendered manifests against the Kubernetes schema
         run: |

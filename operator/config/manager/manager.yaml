@@ -1,3 +1,8 @@
+# The operator renders hardened workloads into namespaces that enforce Pod
+# Security Admission and this project's ValidatingAdmissionPolicies. Its own
+# namespace carried none of those labels, so the one component with permission
+# to create Deployments across the cluster was the one component no rule
+# applied to. These labels put it under the rules it exists to impose.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -5,6 +10,11 @@ metadata:
     control-plane: controller-manager
     app.kubernetes.io/name: k8s-lab-platform
     app.kubernetes.io/managed-by: kustomize
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    k8s-lab.dev/policies: enforced
   name: system
 ---
 apiVersion: apps/v1
@@ -29,7 +39,15 @@ spec:
       labels:
         control-plane: controller-manager
         app.kubernetes.io/name: k8s-lab-platform
+        # A controller is the one workload that genuinely cannot run without a
+        # service-account token, and k8s-lab-workload-hygiene requires every
+        # pod to refuse one unless it says otherwise here. Declared rather than
+        # assumed: the mount below is deliberate, and this label is what makes
+        # `kubectl get pods -l k8s-lab.dev/api-access` list every pod in the
+        # cluster holding a credential for the API server.
+        k8s-lab.dev/api-access: required
     spec:
+      automountServiceAccountToken: true
       # TODO(user): Uncomment the following code to configure the nodeAffinity expression
       # according to the platforms which are supported by your solution.
       # It is considered best practice to support multiple architectures. You can

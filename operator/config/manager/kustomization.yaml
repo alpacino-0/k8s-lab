@@ -2,7 +2,21 @@ resources:
 - manager.yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+# kubebuilder's placeholder, and it has to stay one.
+#
+# `make deploy` rewrites these two fields to whatever IMG names, which is
+# convenient locally and was committed by accident: git carried
+# `k8s-lab-operator:1.0.0`, an image that exists only on the machine that last
+# ran the target. Argo CD renders these manifests straight out of git, so the
+# cluster would have pulled a name no registry serves.
+#
+# It also broke the fix silently. Once this layer renames `controller`, an
+# image override declared further up — the one in gitops/operator.yaml — no
+# longer matches anything, so it applies cleanly and changes nothing.
+#
+# Leave it as `controller`. The deploy target still overwrites it in a working
+# copy; that edit is a local artefact and does not belong in a commit.
 images:
 - name: controller
-  newName: k8s-lab-operator
-  newTag: 1.0.0
+  newName: controller
+  newTag: latest

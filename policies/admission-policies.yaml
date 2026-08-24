@@ -131,6 +131,29 @@ spec:
           : (has(object.metadata.labels)
              && 'app.kubernetes.io/component' in object.metadata.labels
              && object.metadata.labels['app.kubernetes.io/component'] == 'database-job'))
+    # The token rule's escape hatch, and the only one.
+    #
+    # A controller cannot run without a token, so a rule with no way to say so
+    # has exactly one outcome in practice: the namespace holding the controller
+    # is left out of the bindings, and every other rule here goes with it. That
+    # is what happened to this project's own operator — it enforces these rules
+    # on the workloads it renders while running outside all of them.
+    #
+    # Naming the exception costs one label that lives in git and greps in one
+    # command. Leaving it unnameable costs a whole namespace.
+    #
+    # Written out per branch rather than sharing a resolved label map with
+    # isTask above: this policy fails closed, and refactoring a rule that is
+    # currently enforcing is not worth the saved lines.
+    - name: needsAPIAccess
+      expression: >-
+        (has(object.spec.template)
+          ? (has(object.spec.template.metadata) && has(object.spec.template.metadata.labels)
+             && 'k8s-lab.dev/api-access' in object.spec.template.metadata.labels
+             && object.spec.template.metadata.labels['k8s-lab.dev/api-access'] == 'required')
+          : (has(object.metadata.labels)
+             && 'k8s-lab.dev/api-access' in object.metadata.labels
+             && object.metadata.labels['k8s-lab.dev/api-access'] == 'required'))
   validations:
     - expression: >-
         variables.podSpec.containers.all(c,
@@ -142,12 +165,15 @@ spec:
         does, PostgreSQL included.
       reason: Invalid
     - expression: >-
-        has(variables.podSpec.automountServiceAccountToken)
-        && variables.podSpec.automountServiceAccountToken == false
+        variables.needsAPIAccess
+        || (has(variables.podSpec.automountServiceAccountToken)
+            && variables.podSpec.automountServiceAccountToken == false)
       message: >-
         Set automountServiceAccountToken to false. A token mounted into a pod
         that never calls the Kubernetes API is a credential waiting to be
-        stolen; opt in explicitly where one is genuinely needed.
+        stolen. A workload that genuinely needs one opts in by carrying the
+        label k8s-lab.dev/api-access: required, which makes every exception
+        greppable instead of invisible.
       reason: Invalid
     # A task that runs once and exits has nothing to probe, so it is exempt.
     - expression: >-

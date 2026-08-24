@@ -441,7 +441,7 @@ chart/                Helm chart — tek deploy yolu
   values-prod.yaml    otomatik ölçekleme, yedekleme, izleme, ağ politikaları
   values-public.yaml  GHCR imajları, TLS, harici secret — herkese açık adres için
 terraform/            platform katmanı: ingress, cert-manager, Argo CD, politikalar
-gitops/               Argo CD Application'ı: cluster'da ne olmalı
+gitops/               Argo CD Application'ları: sürüm ve operator
 cluster/              cluster kapsamlı eklentiler, chart'ın dışında
   issuers.yaml        yerel CA — TLS yolu varsayılmıyor, çalıştırılıyor
   loki-values.yaml    tek-binary Loki, filesystem depolama, 72 saat saklama
@@ -452,7 +452,7 @@ policies/             cluster politikası, bilerek chart'ın dışında
   admission-*.yaml    ValidatingAdmissionPolicy kuralları ve bağlamaları
 scripts/
   bootstrap.sh        idempotent cluster + ingress + politikalar + deploy
-  policy-test.sh      her kuralın doğru şeyi reddettiğini kanıtlayan 8 kontrol
+  policy-test.sh      her kuralın doğru şeyi reddettiğini kanıtlayan 12 kontrol
   smoke-test.sh       güvenlik duruşu ve izolasyon dahil 35 uçtan uca kontrol
   teardown.sh         cluster'ı siler
 ```

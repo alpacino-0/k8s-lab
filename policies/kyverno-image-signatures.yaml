@@ -27,7 +27,12 @@ spec:
         any:
           - resources:
               kinds: [Pod]
-              namespaces: ["k8s-lab", "k8s-lab-gitops"]
+              # The operator's namespace belongs here for the same reason the
+              # others do, and more so: it is the only workload that can create
+              # Deployments in namespaces it does not live in. Its image is
+              # published and signed by the same pipeline and was, until this
+              # line, the one image nothing ever checked.
+              namespaces: ["k8s-lab", "k8s-lab-gitops", "k8s-lab-platform-system"]
       verifyImages:
         - imageReferences:
             - "ghcr.io/alpacino-0/k8s-lab*"

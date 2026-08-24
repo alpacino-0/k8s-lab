@@ -444,7 +444,7 @@ chart/                Helm chart — the single deployment path
   values-prod.yaml    autoscaling, backups, monitoring, network policies
   values-public.yaml  GHCR images, TLS, external secret — for a public address
 terraform/            the platform layer: ingress, cert-manager, Argo CD, policies
-gitops/               the Argo CD Application: what the cluster should contain
+gitops/               the Argo CD Applications: the release, and the operator
 cluster/              cluster-scoped add-ons, kept out of the chart
   issuers.yaml        a local CA, so the TLS path is exercised not assumed
   loki-values.yaml    single-binary Loki, filesystem storage, 72h retention
@@ -455,7 +455,7 @@ policies/             cluster policy, kept out of the chart on purpose
   admission-*.yaml    ValidatingAdmissionPolicy rules and their bindings
 scripts/
   bootstrap.sh        idempotent cluster + ingress + policies + deploy
-  policy-test.sh      10 checks that each rule rejects what it should
+  policy-test.sh      12 checks that each rule rejects what it should
   smoke-test.sh       35 end-to-end checks including security posture and isolation
   teardown.sh         destroy the cluster
 ```

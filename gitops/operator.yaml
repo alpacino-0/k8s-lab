@@ -1,0 +1,70 @@
+# The operator, reconciled from git like everything else.
+#
+# It was the exception. `make operator-deploy` pipes kustomize into kubectl,
+# which is fine for a kind cluster that gets thrown away and wrong for one that
+# persists: the platform's own control plane was the single component reaching
+# the cluster outside the write path the platform exists to enforce. The
+# product's one-sentence claim — nothing touches the cluster except through git
+# — had an exception, and the exception was the newest and most privileged
+# component in it.
+#
+# Not Terraform, deliberately. Terraform installs the third-party charts a
+# cluster needs before this repository's code can run at all: ingress,
+# cert-manager, Kyverno, Argo CD itself. The operator is this repository's
+# code, versioned with it, released with it, and signed by the same pipeline.
+# It belongs on the side of the line that reconciles from git.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: k8s-lab-platform
+  namespace: argocd
+  # No resources-finalizer here, unlike the application Application.
+  #
+  # This source carries the Workload CRD, and deleting a CRD deletes every
+  # custom resource of that kind cluster-wide, without confirmation and without
+  # a way back. Deleting this Application should stop managing the operator; it
+  # should not be able to take every Workload in the cluster with it as a side
+  # effect nobody typed.
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/alpacino-0/k8s-lab.git
+    targetRevision: main
+    path: operator/config/default
+    kustomize:
+      # The manifest in git carries kubebuilder's `controller:latest`
+      # placeholder, which k8s-lab-image-provenance rejects twice over — for
+      # the :latest tag and for the unknown registry. That is the useful
+      # behaviour: an override that goes missing fails at admission with a
+      # message naming the reason, rather than deploying a placeholder.
+      #
+      # The tag is the same moving 1.0.0 the application chart uses. Kyverno
+      # resolves it to the digest it verified before the kubelet ever pulls, so
+      # what runs is pinned even though what is written here is not. Pinning
+      # the digest in git is Argo CD Image Updater's job, and that is Phase 1.
+      images:
+        - controller=ghcr.io/alpacino-0/k8s-lab-operator:1.0.0
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: k8s-lab-platform-system
+
+  syncPolicy:
+    automated:
+      prune: true      # something deleted from git is deleted from the cluster
+      selfHeal: true   # something changed by hand is changed back
+    syncOptions:
+      # Deliberately no CreateNamespace. The Namespace is one of the manifests
+      # this source renders, and it carries the Pod Security Admission labels
+      # and the k8s-lab.dev/policies label that subject the operator to the
+      # rules it enforces on everyone else. A namespace conjured by Argo CD
+      # would carry none of them and every policy would silently not apply —
+      # the failure this whole change exists to close.
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

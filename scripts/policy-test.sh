@@ -136,6 +136,50 @@ write_pod "alpine:latest";             must_reject "a :latest image is rejected"
 write_pod "quay.io/someone/thing:1.0"; must_reject "an unknown registry is rejected" "must come from"
 write_pod "$IMAGE" false;              must_reject "a writable root filesystem is rejected" "read-only root filesystem"
 
+# The service-account token rule, and the one exception to it.
+#
+# The rule shipped untested, and its message promised an opt-in the expression
+# did not have: it told authors to "opt in explicitly where one is genuinely
+# needed" while rejecting every pod that mounted a token, unconditionally. A
+# controller cannot run without one, so the only way to run this project's own
+# operator was to leave its entire namespace out of the bindings — which is
+# what had happened, and it took every other rule with it.
+#
+# Both halves are checked. A rule with an exception nobody proves is a rule
+# with a hole, and an exception nobody proves is a feature that has never run.
+token_pod() {
+  local name="$1" label="$2"
+  {
+    printf 'apiVersion: v1\nkind: Pod\nmetadata:\n  name: %s\n' "$name"
+    [[ -n "$label" ]] && printf '  labels: { %s }\n' "$label"
+    cat <<EOF
+spec:
+  automountServiceAccountToken: true
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: c
+      image: ${IMAGE}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: { drop: ["ALL"] }
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { memory: 32Mi }
+      readinessProbe: { httpGet: { path: /healthz, port: 3000 } }
+      livenessProbe: { httpGet: { path: /healthz, port: 3000 } }
+EOF
+  } > "$WORK/manifest.yaml"
+}
+
+token_pod policy-probe-token ""
+must_reject "a pod mounting a token without saying why is rejected" "automountServiceAccountToken"
+token_pod policy-probe-token-ok "k8s-lab.dev/api-access: required"
+must_admit  "a pod that declares it needs the API keeps its token"
+
 # Pod Security Admission runs before any of the above.
 cat > "$WORK/manifest.yaml" <<EOF
 apiVersion: v1

@@ -127,8 +127,9 @@ gitops: ## Install Argo CD and let it reconcile the release from git
 	  --from-literal=POSTGRES_PASSWORD="$$(openssl rand -base64 24)" \
 	  --dry-run=client -o yaml | kubectl apply -f -
 	kubectl apply -f gitops/application.yaml
+	kubectl apply -f gitops/operator.yaml
 	@echo ""
-	@echo "  Watch it converge:  kubectl -n argocd get application k8s-lab -w"
+	@echo "  Watch it converge:  kubectl -n argocd get application -w"
 	@echo "  Then break it:      kubectl -n k8s-lab-gitops scale deploy/k8s-lab-k8s-lab-app --replicas=5"
 	@echo "  UI password:        kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
 
