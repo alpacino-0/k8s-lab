@@ -7,8 +7,8 @@
 # that must pass — a rule that rejects everything is as broken as one that
 # rejects nothing.
 set -uo pipefail
-NAMESPACE="${NAMESPACE:-k8s-lab}"
-IMAGE="${IMAGE:-k8s-lab-app:1.0.0}"
+NAMESPACE="${NAMESPACE:-damga}"
+IMAGE="${IMAGE:-damga-app:1.0.0}"
 FAILED=0
 WORK=$(mktemp -d)
 # A namespace that grants the token exemption. Created here rather than
@@ -184,15 +184,15 @@ EOF
 
 kubectl create namespace "$PERMIT_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl label namespace "$PERMIT_NS" --overwrite >/dev/null \
-  k8s-lab.dev/policies=enforced \
-  k8s-lab.dev/api-access=permitted \
+  damga.co/policies=enforced \
+  damga.co/api-access=permitted \
   pod-security.kubernetes.io/enforce=restricted
 
 token_pod policy-probe-token ""
 must_reject "a pod mounting a token without saying why is rejected" "automountServiceAccountToken"
-token_pod policy-probe-token-ok "k8s-lab.dev/api-access: required"
+token_pod policy-probe-token-ok "damga.co/api-access: required"
 must_reject "the pod label alone does not grant a token" "automountServiceAccountToken"
-token_pod policy-probe-token-ok "k8s-lab.dev/api-access: required"
+token_pod policy-probe-token-ok "damga.co/api-access: required"
 TARGET_NS="$PERMIT_NS" must_admit "a permitted namespace plus the pod label keeps the token"
 
 # Pod Security Admission runs before any of the above.
@@ -280,7 +280,7 @@ spec:
 EOF
   }
 
-  signed_pod "${SIGNED_IMAGE:-ghcr.io/alpacino-0/k8s-lab:1.0.0}" sig-ok
+  signed_pod "${SIGNED_IMAGE:-ghcr.io/damgahq/damga:1.0.0}" sig-ok
   must_admit "an image signed by the pipeline is admitted"
 
   # An image that exists but was published before signing was added. Testing

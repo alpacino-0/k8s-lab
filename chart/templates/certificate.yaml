@@ -1,16 +1,18 @@
 {{- if and .Values.ingress.enabled .Values.ingress.tls.enabled .Values.ingress.tls.clusterIssuer }}
 # Created explicitly rather than through cert-manager's ingress annotation.
 #
-# Two Ingress objects share one hostname and one TLS secret. With the
-# annotation, cert-manager's ingress-shim makes the first Ingress the owner of
-# the Certificate and then refuses to manage it on behalf of the second:
+# That started when two Ingress objects shared one hostname and one TLS secret.
+# With the annotation, cert-manager's ingress-shim makes the first Ingress the
+# owner of the Certificate and then refuses to manage it on behalf of the second:
 #
 #   certificate resource is not owned by this object.
 #   refusing to update non-owned certificate resource
 #
-# It works until the owning Ingress is deleted, at which point the Certificate
-# is garbage-collected and the other one silently loses its certificate. An
-# explicit Certificate owned by the release has one owner and no race.
+# It worked until the owning Ingress was deleted, at which point the Certificate
+# was garbage-collected and the other one silently lost its certificate. There is
+# one Ingress now, but this stays explicit: the release owns it, so its lifecycle
+# is independent of any Ingress, and the key algorithm, the rotation policy and
+# the renewal window below are chart values rather than annotations.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:

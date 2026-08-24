@@ -1,12 +1,12 @@
-# k8s-lab
+# Damga
 
-[![CI](https://github.com/alpacino-0/k8s-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/alpacino-0/k8s-lab/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/damgahq/damga/actions/workflows/ci.yml/badge.svg)](https://github.com/damgahq/damga/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 ![Kubernetes](https://img.shields.io/badge/kubernetes-1.36-326ce5?logo=kubernetes&logoColor=white)
 ![Helm](https://img.shields.io/badge/helm-3-0f1689?logo=helm&logoColor=white)
 
-A Node.js + PostgreSQL service and its browser interface, deployed to Kubernetes
-the way they would be run in production: non-root containers with a read-only root filesystem, default-deny
+A Node.js + PostgreSQL service, deployed to Kubernetes
+the way it would be run in production: non-root containers with a read-only root filesystem, default-deny
 network policies, a schema migration that runs once per release, verified
 nightly backups, autoscaling, disruption budgets, Prometheus metrics, and a CI
 pipeline that deploys to a real cluster on every push.
@@ -31,8 +31,7 @@ flowchart TB
     subgraph CL["kind cluster — 1 control-plane + 2 workers"]
         ING["ingress-nginx<br/>NodePort 30080"]
 
-        subgraph NS["namespace: k8s-lab"]
-            WEB["web<br/>Deployment · 2 replicas<br/>nginx, uid 101, read-only"]
+        subgraph NS["namespace: damga"]
             RD[("redis<br/>shared window + cache")]
             APP["app<br/>Deployment · HPA 3-10 · PDB min 2<br/>non-root · read-only rootfs"]
             PG[("postgres-0<br/>StatefulSet · PVC")]
@@ -48,8 +47,7 @@ flowchart TB
         NP{{"default-deny NetworkPolicy<br/>ingress-nginx + Prometheus in<br/>DNS + PostgreSQL out"}}
     end
 
-    U -->|"app.local/"| ING --> WEB
-    U -->|"app.local/api"| ING --> NP --> APP
+    U -->|"app.local/"| ING --> NP --> APP
     APP --> PG
     APP -->|"rate window, note count"| RD
     MIG -.->|once per release| PG
@@ -62,38 +60,32 @@ flowchart TB
 
 ## Quick start
 
-Requires Docker, [kind](https://kind.sigs.k8s.io/), kubectl and Helm.
+Requires Docker, [kind](https://kind.sigs.k8s.io/), kubectl, Helm and Terraform.
 
 ```bash
-git clone https://github.com/alpacino-0/k8s-lab.git && cd k8s-lab
+git clone https://github.com/damgahq/damga.git && cd damga
 make up                                    # cluster + ingress + build + deploy
 echo "127.0.0.1 app.local" | sudo tee -a /etc/hosts
-open http://app.local:8080                 # the interface
-make smoke                                 # 35 end-to-end checks
+curl http://app.local:8080/stats           # the service
+make smoke                                 # 30 end-to-end checks
 ```
 
-## The interface
+## The service
 
-`http://app.local:8080` is a working notes application. It is also the quickest
-explanation of what is underneath it.
+`http://app.local:8080` is a working notes API. Every response carries the
+identity of the replica that produced it, so a handful of requests is enough to
+watch the load spread across replicas.
 
-Every response carries the identity of the replica that produced it, and the
-page keeps a running ledger: each request drops a mark into the lane of the pod
-that answered. Use the app for a few seconds and the load distribution draws
-itself. Below that, each platform decision is stated with the measurement that
-justified it.
-
-The ledger deliberately does **not** query the Kubernetes API. Doing so would
-mean mounting a service-account token into a pod that has no other reason to
-hold one. Pod identity comes from the downward API instead — environment
-variables the kubelet injects — and the browser simply counts what came back.
+That identity deliberately does **not** come from the Kubernetes API. Reading it
+from there would mean mounting a service-account token into a pod that has no
+other reason to hold one. It comes from the downward API instead — environment
+variables the kubelet injects.
 
 | Command | What it does |
 |---|---|
 | `make test` | Unit and integration tests (29 tests, no cluster needed) |
 | `make lint` | ESLint + `helm lint` + renders every values profile |
-| `make deploy` | Rebuild both images and upgrade the release |
-| `make web` | Run the interface locally against a port-forwarded backend |
+| `make deploy` | Rebuild the image and upgrade the release |
 | `make smoke` | End-to-end checks against the running deployment |
 | `make policies` | Apply the admission policies |
 | `make policy-test` | Prove each policy rejects what it is supposed to |
@@ -117,15 +109,14 @@ variables the kubelet injects — and the browser simply counts what came back.
 | Read-only root filesystem | `containerSecurityContext` + `emptyDir` for `/tmp` | container starts under `--read-only` in CI |
 | All Linux capabilities dropped | `capabilities.drop: [ALL]` | asserted against the running pod spec |
 | No privilege escalation, seccomp `RuntimeDefault` | pod and container security context | rendered manifests validated by kubeconform |
-| No service-account token mounted | `automountServiceAccountToken: false` | neither tier calls the Kubernetes API |
-| Scrape endpoint is not publicly routable | metrics on a separate port (9090) | CI asserts `/api/metrics` returns 404 |
-| Interface sends CSP and frame-deny headers | `web/security-headers.conf` | asserted on the running container |
-| Default-deny networking | 5 NetworkPolicies | an unauthorized pod is proven unable to reach the app |
+| No service-account token mounted | `automountServiceAccountToken: false` | the service never calls the Kubernetes API |
+| Scrape endpoint is not publicly routable | metrics on a separate port (9090) | CI asserts `/metrics` returns 404 |
+| Default-deny networking | 4 NetworkPolicies | an unauthorized pod is proven unable to reach the app |
 | Multi-stage image, production deps only | `app/Dockerfile` | Trivy blocks CRITICAL/HIGH findings in CI |
 | npm removed from the runtime image | `app/Dockerfile` | eliminated **every** Node.js package CVE (see below) |
 | No secrets in git | `.gitignore` + chart values | password is a required chart value |
 | TLS, the redirect and the Secure cookie | cert-manager + explicit Certificate | verified on every push against a certificate a real CA issued |
-| Security settings are enforced, not just set | Pod Security Admission + ValidatingAdmissionPolicy | 10 policy tests: two compliant manifests admitted, eight broken ones each rejected |
+| Security settings are enforced, not just set | Pod Security Admission + ValidatingAdmissionPolicy | 13 policy tests: three compliant manifests admitted, ten broken ones each rejected |
 | Notes isolated per visitor | anonymous cookie, owner-scoped queries | a second visitor cannot read or delete the first one's notes |
 | Writes bounded | ingress `limit-rps` + a shared window + a note cap | oversized and over-quota writes are rejected |
 | Rate limits bind across replicas | Redis sliding window | 60 requests against a limit of 30: **29 allowed** shared, **60 allowed** per replica |
@@ -191,7 +182,7 @@ two pods, and it is the only reason Kyverno is installed at all:
 attestors:
   - entries:
       - keyless:
-          subject: "https://github.com/alpacino-0/k8s-lab/*"
+          subject: "https://github.com/damgahq/damga/*"
           issuer:  "https://token.actions.githubusercontent.com"
 mutateDigest: true      # the tag is rewritten to the digest that was verified
 ```
@@ -238,7 +229,7 @@ check now verifies every platform a cluster could resolve to.
 ### TLS
 
 cert-manager issues the certificate; the chart creates the `Certificate` and
-both Ingress objects consume the secret it produces.
+the Ingress consumes the secret it produces.
 
 It would have been easy to prepare this and never run it — a public
 deployment needs a domain, and there is no domain. So CI issues a real
@@ -247,8 +238,8 @@ path on every push:
 
 | | |
 |---|---|
-| `https://…/api/healthz` | 200, certificate issued by the expected CA |
-| `http://…/api/healthz` | **308** — redirected, never served |
+| `https://…/healthz` | 200, certificate issued by the expected CA |
+| `http://…/healthz` | **308** — redirected, never served |
 | `Set-Cookie` | carries `Secure` |
 
 The only difference from a public deployment is who signed the certificate.
@@ -257,17 +248,20 @@ and the cookie flag are the same objects doing the same work. Switching to
 Let's Encrypt is one value: `--set ingress.tls.clusterIssuer=letsencrypt-prod`.
 
 The `Certificate` is created by the chart rather than by cert-manager's Ingress
-annotation, because two Ingress objects share one hostname and one secret. With
-the annotation, cert-manager makes the first Ingress the owner and then refuses
-to act for the second:
+annotation. That started when two Ingress objects shared one hostname and one
+secret: with the annotation, cert-manager makes the first Ingress the owner and
+then refuses to act for the second.
 
 ```
 certificate resource is not owned by this object.
 refusing to update non-owned certificate resource
 ```
 
-It works until the owning Ingress is deleted, at which point the certificate is
-garbage-collected and the other Ingress quietly loses it.
+It worked until the owning Ingress was deleted, at which point the certificate
+was garbage-collected and the other Ingress quietly lost it. There is one
+Ingress now, but the `Certificate` stayed: owned by the release, its lifecycle
+does not depend on any Ingress, and the key algorithm, the rotation policy and
+the renewal window are chart values rather than annotations.
 
 Locally: `make tls`, then `https://localhost:8443`. The browser warns, because
 the CA is local — that is the one thing that is not real.
@@ -301,9 +295,9 @@ queried with the same name:
 
 ```
 promql:  topk(1, sum by (pod) (http_requests_total{status=~"4.."}))
-         → app-k8s-lab-app-557bc659bb-dpp6p, 4×404 and 1×400
+         → app-damga-app-557bc659bb-dpp6p, 4×404 and 1×400
 
-logql:   {namespace="k8s-lab", pod="app-k8s-lab-app-557bc659bb-dpp6p"}
+logql:   {namespace="damga", pod="app-damga-app-557bc659bb-dpp6p"}
            | json | level=`warn`
          → warn request rejected POST /notes -> 400 (2.95ms)
 ```
@@ -415,15 +409,18 @@ up costs users, being hasty to scale down causes thrashing.
 
 ### CI/CD
 
-Five jobs on every push ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
+Eight jobs ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) — five on
+every push, three more on `main`:
 
 | Job | Gate |
 |---|---|
-| `test` | ESLint and 29 tests for the API; ESLint and a production build for the interface |
-| `manifests` | `helm lint`, renders all values profiles, kubeconform schema validation, `terraform fmt -check` and `validate`, hadolint on both Dockerfiles |
-| `image` | Builds both images, asserts each is non-root, boots each read-only, Trivy scan (fails on CRITICAL/HIGH) |
-| `e2e` | Creates a real kind cluster, applies the policies **before** the chart so the release has to satisfy them, runs the 10 policy checks and the 35-check smoke test, then proves an upgrade drops zero requests |
-| `publish` | Pushes both images to GHCR for amd64 and arm64, with SBOM and provenance attestation (main only) |
+| `test` | ESLint and 29 tests for the API |
+| `manifests` | `helm lint`, renders all values profiles, kubeconform schema validation, `terraform fmt -check` and `validate`, hadolint on every Dockerfile |
+| `image` | Builds each image, asserts each is non-root, boots each read-only, Trivy scan (fails on CRITICAL/HIGH) |
+| `operator` | The Go suite, plus a check that the committed generated code matches what the types produce |
+| `e2e` | Creates a real kind cluster, applies the policies **before** the chart so the release has to satisfy them, runs the 11 policy checks that need no Kyverno and the 30-check smoke test, proves an upgrade drops zero requests, then deploys the operator and takes a `Workload` to Ready through admission |
+| `build` · `publish` | Builds each architecture natively, pushes to GHCR with SBOM and provenance attestation, signs with keyless cosign (main only) |
+| `supply-chain` | Installs Kyverno in a fresh cluster and proves the image this run signed is admitted while an unsigned one is rejected (main only) |
 
 ---
 
@@ -434,16 +431,16 @@ app/                  Node.js service
   src/                config · logger · metrics · db · app · index
   test/               unit and integration tests (node:test, no framework)
   Dockerfile          multi-stage, pinned base, non-root
-web/                  React interface (Vite), served by unprivileged nginx
-  src/                app · pod ledger · notes · mechanisms
-  nginx.conf          SPA fallback, CSP, writes confined to /tmp
 chart/                Helm chart — the single deployment path
-  templates/          19 resource templates + helpers
+  templates/          18 resource templates + helpers
   values.yaml         documented defaults
   values-dev.yaml     minimal footprint, demo endpoints on
   values-prod.yaml    autoscaling, backups, monitoring, network policies
-  values-public.yaml  GHCR images, TLS, external secret — for a public address
-terraform/            the platform layer: ingress, cert-manager, Argo CD, policies
+  values-public.yaml  GHCR image, TLS, external secret — for a public address
+operator/             the Workload CRD and the controller that renders it
+  api/v1alpha1/       the types — there is no field that disables hardening
+  internal/controller/  the reconciler and the resources it renders
+terraform/            the platform layer: ingress, cert-manager, Argo CD, Kyverno, policies
 gitops/               the Argo CD Applications: the release, and the operator
 cluster/              cluster-scoped add-ons, kept out of the chart
   issuers.yaml        a local CA, so the TLS path is exercised not assumed
@@ -453,10 +450,11 @@ cluster/              cluster-scoped add-ons, kept out of the chart
 policies/             cluster policy, kept out of the chart on purpose
   namespace.yaml      Pod Security Admission labels
   admission-*.yaml    ValidatingAdmissionPolicy rules and their bindings
+  kyverno-*.yaml      the image signature policy, applied by `make platform`
 scripts/
   bootstrap.sh        idempotent cluster + ingress + policies + deploy
   policy-test.sh      13 checks that each rule rejects what it should
-  smoke-test.sh       35 end-to-end checks including security posture and isolation
+  smoke-test.sh       30 end-to-end checks including security posture and isolation
   teardown.sh         destroy the cluster
 ```
 
@@ -513,18 +511,12 @@ and binds the volume.
 
 ### Another, found by reading the traffic
 
-Wiring the interface exposed something the manifests had claimed but never
-enforced: the ingress routed `/api` to the service, and `/metrics` sat on that
-same port, so the raw Prometheus scrape endpoint was publicly reachable. The fix
-was not an ingress rule but a second listener — telemetry now serves on port
-9090, which nothing outside the cluster is routed to and which the network
-policy opens only to Prometheus. CI asserts `/api/metrics` returns 404.
-
-Two smaller ones came from the same session: nginx silently drops every
-inherited `add_header` as soon as a nested block sets one of its own, so the
-security headers were never sent; and the interface's Service was carrying the
-API's `app.kubernetes.io/name` label, which made Prometheus try to scrape
-`/metrics` from nginx.
+Routing traffic to the service exposed something the manifests had claimed but
+never enforced: `/metrics` sat on the same port the ingress published, so the raw
+Prometheus scrape endpoint was publicly reachable. The fix was not an ingress
+rule but a second listener — telemetry now serves on port 9090, which nothing
+outside the cluster is routed to and which the network policy opens only to
+Prometheus. CI asserts `/metrics` returns 404.
 
 ## Ready for a public address
 
@@ -562,16 +554,16 @@ hours. Rows written before the owner column existed carry a sentinel owner:
 invisible to everyone, and removed by the same job.
 
 **Text is sanitised, not trusted.** Control characters are stripped, length is
-capped at 500, the JSON body at 32kb, and the interface renders text as text.
+capped at 500, and the JSON body at 32kb.
 
 **Everything needed to publish is prepared but unused.** `chart/values-public.yaml`
-points at the published GHCR images, turns on TLS through cert-manager, marks
+points at the published GHCR image, turns on TLS through cert-manager, marks
 the visitor cookie `Secure`, and takes the database password from a secret
 created outside the chart so it never appears in a file or a shell history.
 [docs/DEPLOY.md](docs/DEPLOY.md) is the runbook: k3s on a small VPS,
 ingress-nginx, cert-manager, one `helm upgrade`. The path was validated by
-deploying that profile from GHCR into a throwaway namespace — 31/31 checks —
-so what remains is a server and a domain, not unknowns.
+deploying that profile from GHCR into a throwaway namespace and running the
+smoke test against it, so what remains is a server and a domain, not unknowns.
 
 Still missing before this is a product rather than a reachable demo:
 off-cluster backups, and someone who gets paged.
@@ -603,4 +595,14 @@ What is still missing:
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+AGPL-3.0 — see [LICENSE](LICENSE).
+
+Running it costs nothing and obliges nothing, commercial use included: install
+it on your own machines, deploy whatever you like on it, modify it, never tell
+anyone. The licence asks for source from one group only — whoever offers this
+software to other people as a service. Run a modified copy as a product for
+third parties and those modifications have to be published too.
+
+Contributions are accepted under a CLA. It keeps the copyright in one place so
+that a commercial licence can still be offered to organisations the AGPL does
+not suit — see [CONTRIBUTING.md](CONTRIBUTING.md).

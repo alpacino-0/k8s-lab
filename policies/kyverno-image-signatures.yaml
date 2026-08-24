@@ -15,7 +15,7 @@
 # enforcing nothing at all. The one capability Kyverno is here for was the one
 # thing no path turned on.
 #
-# Scoped to this project's own registry namespace. Locally built k8s-lab-*
+# Scoped to this project's own registry namespace. Locally built damga-*
 # images are unsigned by design — they never leave the machine — and the
 # official postgres and redis images are signed by other identities entirely.
 apiVersion: kyverno.io/v1
@@ -42,10 +42,10 @@ spec:
               # Deployments in namespaces it does not live in. Its image is
               # published and signed by the same pipeline and was, until this
               # line, the one image nothing ever checked.
-              namespaces: ["k8s-lab", "k8s-lab-gitops", "k8s-lab-platform-system"]
+              namespaces: ["damga", "damga-gitops", "damga-platform-system"]
       verifyImages:
         - imageReferences:
-            - "ghcr.io/alpacino-0/k8s-lab*"
+            - "ghcr.io/damgahq/damga*"
           # Rewrite the tag to the digest that was actually verified. Without
           # this a signed digest is checked and then a mutable tag is pulled,
           # which is a different image by the time it matters.
@@ -58,7 +58,7 @@ spec:
                 # that a workflow in this repository produced this digest, and
                 # Fulcio and Rekor are what make that checkable.
                 - keyless:
-                    subject: "https://github.com/alpacino-0/k8s-lab/*"
+                    subject: "https://github.com/damgahq/damga/*"
                     issuer: "https://token.actions.githubusercontent.com"
                     rekor:
                       url: https://rekor.sigstore.dev

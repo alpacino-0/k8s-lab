@@ -10,11 +10,11 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: k8s-lab
+  name: damga
   labels:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
     # Opts this namespace into the ValidatingAdmissionPolicy bindings.
-    k8s-lab.dev/policies: enforced
+    damga.co/policies: enforced

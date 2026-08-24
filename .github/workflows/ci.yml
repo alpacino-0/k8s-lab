@@ -43,18 +43,6 @@ jobs:
       - run: npm test
         working-directory: app
 
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '20'
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - run: npm ci
-        working-directory: web
-      - run: npm run lint
-        working-directory: web
-      - run: npm run build
-        working-directory: web
-
   # ------------------------------------------------------- static analysis
   manifests:
     name: Validate manifests
@@ -116,12 +104,6 @@ jobs:
           dockerfile: app/Dockerfile
           failure-threshold: warning
 
-      - name: Lint the web Dockerfile
-        uses: hadolint/hadolint-action@v3.4.0
-        with:
-          dockerfile: web/Dockerfile
-          failure-threshold: warning
-
       - name: Lint the operator Dockerfile
         uses: hadolint/hadolint-action@v3.4.0
         with:
@@ -138,18 +120,18 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Build image
-        run: docker build -t "k8s-lab-app:${IMAGE_TAG}" ./app
+        run: docker build -t "damga-app:${IMAGE_TAG}" ./app
 
       - name: Container must not run as root
         run: |
-          uid=$(docker run --rm "k8s-lab-app:${IMAGE_TAG}" id -u)
+          uid=$(docker run --rm "damga-app:${IMAGE_TAG}" id -u)
           echo "container uid: $uid"
           [ "$uid" != "0" ] || { echo "image runs as root"; exit 1; }
 
       - name: Container must start with a read-only root filesystem
         run: |
           docker run -d --name ro --read-only --cap-drop ALL \
-            --security-opt no-new-privileges -p 8080:3000 "k8s-lab-app:${IMAGE_TAG}"
+            --security-opt no-new-privileges -p 8080:3000 "damga-app:${IMAGE_TAG}"
           for _ in $(seq 1 20); do curl -sf localhost:8080/healthz && break || sleep 1; done
           curl -sf localhost:8080/healthz | grep -q ok
           docker rm -f ro
@@ -157,54 +139,25 @@ jobs:
       - name: Scan the API image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: k8s-lab-app:${{ env.IMAGE_TAG }}
-          format: table
-          exit-code: '1'
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Build the web image
-        run: docker build -t "k8s-lab-web:${IMAGE_TAG}" ./web
-
-      - name: Web container must not run as root
-        run: |
-          uid=$(docker run --rm --entrypoint id "k8s-lab-web:${IMAGE_TAG}" -u)
-          echo "web container uid: $uid"
-          [ "$uid" != "0" ] || { echo "web image runs as root"; exit 1; }
-
-      - name: Web container must start with a read-only root filesystem
-        run: |
-          docker run -d --name web-ro --read-only --cap-drop ALL \
-            --security-opt no-new-privileges \
-            --tmpfs /tmp --tmpfs /var/cache/nginx --tmpfs /var/run \
-            -p 8081:8080 "k8s-lab-web:${IMAGE_TAG}"
-          for _ in $(seq 1 20); do curl -sf localhost:8081/healthz && break || sleep 1; done
-          curl -sf localhost:8081/healthz | grep -q ok
-          curl -s -D - -o /dev/null localhost:8081/ | grep -qi 'content-security-policy'
-          docker rm -f web-ro
-
-      - name: Scan the web image
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: k8s-lab-web:${{ env.IMAGE_TAG }}
+          image-ref: damga-app:${{ env.IMAGE_TAG }}
           format: table
           exit-code: '1'
           severity: CRITICAL,HIGH
           ignore-unfixed: true
 
       - name: Build the operator image
-        run: docker build -t "k8s-lab-operator:${IMAGE_TAG}" ./operator
+        run: docker build -t "damga-operator:${IMAGE_TAG}" ./operator
 
       - name: Operator container must not run as root
         run: |
-          uid=$(docker inspect "k8s-lab-operator:${IMAGE_TAG}" --format '{{.Config.User}}')
+          uid=$(docker inspect "damga-operator:${IMAGE_TAG}" --format '{{.Config.User}}')
           echo "operator user: $uid"
           case "$uid" in 0|root|""|0:*|root:*) echo "operator image runs as root"; exit 1 ;; esac
 
       - name: Scan the operator image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: k8s-lab-operator:${{ env.IMAGE_TAG }}
+          image-ref: damga-operator:${{ env.IMAGE_TAG }}
           format: table
           exit-code: '1'
           severity: CRITICAL,HIGH
@@ -280,40 +233,37 @@ jobs:
           kubectl patch svc ingress-nginx-controller -n ingress-nginx --type=json \
             -p='[{"op":"replace","path":"/spec/ports/0/nodePort","value":30080},{"op":"replace","path":"/spec/ports/1/nodePort","value":30443}]'
 
-      - name: Build and load the images
+      - name: Build and load the image
         run: |
-          docker build -t "k8s-lab-app:${IMAGE_TAG}" ./app
-          docker build -t "k8s-lab-web:${IMAGE_TAG}" ./web
-          kind load docker-image "k8s-lab-app:${IMAGE_TAG}" "k8s-lab-web:${IMAGE_TAG}" --name ci
+          docker build -t "damga-app:${IMAGE_TAG}" ./app
+          kind load docker-image "damga-app:${IMAGE_TAG}" --name ci
 
       # No Kyverno here, so policy-test skips its signature block. Signatures are
       # checked in the supply-chain job instead, against the image this run just
       # published — testing a previously published tag made the pipeline unable
       # to land a change to signing, because publish needs this job to pass.
       - name: Policies must reject what they are meant to
-        run: NAMESPACE=k8s-lab IMAGE="k8s-lab-app:${IMAGE_TAG}" ./scripts/policy-test.sh
+        run: NAMESPACE=damga IMAGE="damga-app:${IMAGE_TAG}" ./scripts/policy-test.sh
 
       - name: Install the chart
         run: |
           helm upgrade --install app ./chart \
-            --namespace k8s-lab \
+            --namespace damga \
             --set image.tag="${IMAGE_TAG}" \
-            --set web.image.tag="${IMAGE_TAG}" \
             --set postgres.auth.password=ci-password \
             --set networkPolicy.enabled=true \
             --timeout 10m
-          kubectl -n k8s-lab rollout status deployment/app-redis --timeout=300s
-          kubectl -n k8s-lab rollout status statefulset/app-postgres --timeout=300s
-          kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app --timeout=300s
-          kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app-web --timeout=300s
+          kubectl -n damga rollout status deployment/app-redis --timeout=300s
+          kubectl -n damga rollout status statefulset/app-postgres --timeout=300s
+          kubectl -n damga rollout status deployment/app-damga-app --timeout=300s
 
       - name: The shared limit must bind across replicas
         run: |
           # With per-replica counters, N replicas give a client N times its
           # allowance. This is the regression test for that.
-          kubectl -n k8s-lab set env deployment/app-k8s-lab-app READS_PER_MINUTE=30
-          kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app --timeout=300s
-          kubectl -n k8s-lab port-forward svc/app-k8s-lab-app 18080:80 &
+          kubectl -n damga set env deployment/app-damga-app READS_PER_MINUTE=30
+          kubectl -n damga rollout status deployment/app-damga-app --timeout=300s
+          kubectl -n damga port-forward svc/app-damga-app 18080:80 &
           sleep 5
           jar=$(mktemp); curl -sf -c "$jar" -o /dev/null http://127.0.0.1:18080/stats
           allowed=0
@@ -326,8 +276,8 @@ jobs:
           # Shared: about 30. Per replica: all 60 would pass.
           [ "$allowed" -le 35 ]
           kill %1 || true
-          kubectl -n k8s-lab set env deployment/app-k8s-lab-app READS_PER_MINUTE-
-          kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app --timeout=300s
+          kubectl -n damga set env deployment/app-damga-app READS_PER_MINUTE-
+          kubectl -n damga rollout status deployment/app-damga-app --timeout=300s
 
       # TLS is exercised, not just prepared. The only difference from a public
       # deployment is who signed the certificate: the Certificate resource, the
@@ -340,34 +290,34 @@ jobs:
           kubectl apply -f cluster/issuers.yaml
           kubectl wait --for=condition=Ready clusterissuer/selfsigned-ca --timeout=120s
 
-          helm upgrade app ./chart -n k8s-lab \
-            --set image.tag="${IMAGE_TAG}" --set web.image.tag="${IMAGE_TAG}" \
+          helm upgrade app ./chart -n damga \
+            --set image.tag="${IMAGE_TAG}" \
             --set postgres.auth.password=ci-password \
             --set ingress.tls.enabled=true \
             --set ingress.tls.clusterIssuer=selfsigned-ca \
             --set config.SECURE_COOKIE=true --timeout 10m
-          kubectl -n k8s-lab wait --for=condition=Ready certificate/k8s-lab-app-tls --timeout=180s
-          kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app --timeout=300s
+          kubectl -n damga wait --for=condition=Ready certificate/damga-app-tls --timeout=180s
+          kubectl -n damga rollout status deployment/app-damga-app --timeout=300s
 
       - name: HTTPS, the redirect and the Secure cookie must all work
         run: |
           kubectl get svc -n ingress-nginx ingress-nginx-controller \
             -o jsonpath='{range .spec.ports[*]}{.name}={.nodePort} {end}{"\n"}'
           for _ in $(seq 1 30); do
-            curl -sk -o /dev/null https://localhost:8443/api/healthz -H 'Host: app.local' && break || sleep 2
+            curl -sk -o /dev/null https://localhost:8443/healthz -H 'Host: app.local' && break || sleep 2
           done
 
           # served over TLS
-          curl -sk -H 'Host: app.local' https://localhost:8443/api/healthz | grep -q ok
+          curl -sk -H 'Host: app.local' https://localhost:8443/healthz | grep -q ok
           echo "tls: ok"
 
           # the certificate is the one cert-manager issued
           echo | openssl s_client -connect localhost:8443 -servername app.local 2>/dev/null \
-            | openssl x509 -noout -issuer | grep -q 'k8s-lab local CA'
+            | openssl x509 -noout -issuer | grep -q 'damga local CA'
           echo "issuer: ok"
 
           # plain HTTP is redirected, not served
-          code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: app.local' http://localhost:8080/api/healthz)
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: app.local' http://localhost:8080/healthz)
           echo "http -> $code"; [ "$code" = "308" ]
 
           # The visitor cookie must be marked Secure. Retried, because the
@@ -377,7 +327,7 @@ jobs:
           # the feature working, not a flake to paper over — so the check waits
           # it out rather than asserting once and hoping.
           for attempt in $(seq 1 20); do
-            headers=$(curl -sk -D - -o /dev/null -H 'Host: app.local' https://localhost:8443/api/stats)
+            headers=$(curl -sk -D - -o /dev/null -H 'Host: app.local' https://localhost:8443/stats)
             if grep -i 'set-cookie' <<<"$headers" | grep -q 'Secure'; then
               echo "secure cookie: ok (attempt $attempt)"
               exit 0
@@ -386,28 +336,27 @@ jobs:
           done
           echo "the visitor cookie never came back marked Secure. Last headers:"
           echo "$headers"
-          kubectl -n k8s-lab get pods -l app.kubernetes.io/name=k8s-lab-app \
+          kubectl -n damga get pods -l app.kubernetes.io/name=damga-app \
             -o custom-columns=NAME:.metadata.name,AGE:.metadata.creationTimestamp
           exit 1
 
       - name: Back to plain HTTP for the remaining checks
         run: |
-          helm upgrade app ./chart -n k8s-lab \
-            --set image.tag="${IMAGE_TAG}" --set web.image.tag="${IMAGE_TAG}" \
+          helm upgrade app ./chart -n damga \
+            --set image.tag="${IMAGE_TAG}" \
             --set postgres.auth.password=ci-password --timeout 10m
-          kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app --timeout=300s
+          kubectl -n damga rollout status deployment/app-damga-app --timeout=300s
 
-      - name: Ingress must route both tiers
+      - name: Ingress must route to the service
         run: |
           for _ in $(seq 1 30); do
-            curl -sf -H 'Host: app.local' http://localhost:8080/api/healthz && break || sleep 2
+            curl -sf -H 'Host: app.local' http://localhost:8080/healthz && break || sleep 2
           done
-          # / goes to the interface, /api to the service behind it
-          curl -sf -H 'Host: app.local' http://localhost:8080/ | grep -q '<div id="root"'
-          curl -sf -H 'Host: app.local' http://localhost:8080/api/stats | grep -q servedBy
-          # the scrape endpoint must not be publicly routable
-          code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: app.local' http://localhost:8080/api/metrics)
-          echo "GET /api/metrics -> $code"
+          curl -sf -H 'Host: app.local' http://localhost:8080/stats | grep -q servedBy
+          # The scrape endpoint listens on another port, so routing the whole
+          # host to the service must still not expose it.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: app.local' http://localhost:8080/metrics)
+          echo "GET /metrics -> $code"
           [ "$code" = "404" ]
 
       - name: Smoke test
@@ -422,12 +371,11 @@ jobs:
               sleep 0.2
             done > /tmp/rollout.log ) &
           LOOP=$!
-          helm upgrade app ./chart -n k8s-lab \
+          helm upgrade app ./chart -n damga \
             --set image.tag="${IMAGE_TAG}" \
-            --set web.image.tag="${IMAGE_TAG}" \
             --set postgres.auth.password=ci-password \
             --set config.GREETING=Upgraded --timeout 10m
-          kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app --timeout=300s
+          kubectl -n damga rollout status deployment/app-damga-app --timeout=300s
           wait $LOOP
           TOTAL=$(wc -l < /tmp/rollout.log)
           FAILED=$(grep -c DOWN /tmp/rollout.log || true)
@@ -440,12 +388,12 @@ jobs:
       # output has to satisfy the platform's own rules, with nothing exempted.
       - name: Deploy the operator
         run: |
-          docker build -t "k8s-lab-operator:${IMAGE_TAG}" ./operator
-          kind load docker-image "k8s-lab-operator:${IMAGE_TAG}" --name ci
+          docker build -t "damga-operator:${IMAGE_TAG}" ./operator
+          kind load docker-image "damga-operator:${IMAGE_TAG}" --name ci
           make -C operator install
-          make -C operator deploy IMG="k8s-lab-operator:${IMAGE_TAG}"
-          kubectl -n k8s-lab-platform-system rollout status \
-            deployment/k8s-lab-platform-controller-manager --timeout=180s
+          make -C operator deploy IMG="damga-operator:${IMAGE_TAG}"
+          kubectl -n damga-platform-system rollout status \
+            deployment/damga-platform-controller-manager --timeout=180s
 
       - name: A Workload must reach Ready through the admission policies
         run: |
@@ -454,19 +402,19 @@ jobs:
           # InvalidImageName, which the wait below then reported only as a
           # timeout.
           cat <<EOF | kubectl apply -f -
-          apiVersion: platform.k8s-lab.dev/v1alpha1
+          apiVersion: platform.damga.co/v1alpha1
           kind: Workload
           metadata:
             name: ci-probe
-            namespace: k8s-lab
+            namespace: damga
           spec:
-            image: k8s-lab-app:${IMAGE_TAG}
+            image: damga-app:${IMAGE_TAG}
             port: 3000
             replicas: 2
           EOF
-          if ! kubectl -n k8s-lab wait --for=condition=Ready workload/ci-probe --timeout=180s; then
-            kubectl -n k8s-lab get workload ci-probe -o jsonpath='{.status.conditions}' | tr ',' '\n'
-            kubectl -n k8s-lab get pod -l app.kubernetes.io/instance=ci-probe \
+          if ! kubectl -n damga wait --for=condition=Ready workload/ci-probe --timeout=180s; then
+            kubectl -n damga get workload ci-probe -o jsonpath='{.status.conditions}' | tr ',' '\n'
+            kubectl -n damga get pod -l app.kubernetes.io/instance=ci-probe \
               -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,IMAGE:.spec.containers[0].image,REASON:.status.containerStatuses[0].state.waiting.reason
             exit 1
           fi
@@ -476,46 +424,46 @@ jobs:
       # server accepted it, which is a different claim.
       - name: The rendered pod must actually carry the hardening
         run: |
-          pod=$(kubectl -n k8s-lab get pod -l app.kubernetes.io/instance=ci-probe \
+          pod=$(kubectl -n damga get pod -l app.kubernetes.io/instance=ci-probe \
                   -o jsonpath='{.items[0].metadata.name}')
-          get() { kubectl -n k8s-lab get pod "$pod" -o jsonpath="$1"; }
+          get() { kubectl -n damga get pod "$pod" -o jsonpath="$1"; }
           [ "$(get '{.spec.securityContext.runAsNonRoot}')" = true ] || { echo "runs as root"; exit 1; }
           [ "$(get '{.spec.automountServiceAccountToken}')" = false ] || { echo "carries a token"; exit 1; }
           [ "$(get '{.spec.containers[0].securityContext.readOnlyRootFilesystem}')" = true ] || { echo "writable rootfs"; exit 1; }
           [ "$(get '{.spec.containers[0].securityContext.capabilities.drop[0]}')" = ALL ] || { echo "capabilities kept"; exit 1; }
-          [ "$(kubectl -n k8s-lab exec "$pod" -- id -u)" != 0 ] || { echo "effective uid is 0"; exit 1; }
+          [ "$(kubectl -n damga exec "$pod" -- id -u)" != 0 ] || { echo "effective uid is 0"; exit 1; }
           echo "the operator's output satisfies the cluster's own policies"
 
       - name: Deleting the Workload must leave nothing behind
         run: |
-          kubectl -n k8s-lab delete workload ci-probe --wait=true
+          kubectl -n damga delete workload ci-probe --wait=true
           for _ in $(seq 1 30); do
-            left=$(kubectl -n k8s-lab get deploy,svc,sa,networkpolicy,pdb \
-                     -l app.kubernetes.io/managed-by=k8s-lab-platform \
+            left=$(kubectl -n damga get deploy,svc,sa,networkpolicy,pdb \
+                     -l app.kubernetes.io/managed-by=damga-platform \
                      --no-headers 2>/dev/null | wc -l)
             [ "$left" -eq 0 ] && { echo "owner references cascaded"; exit 0; }
             sleep 2
           done
           echo "objects outlived the Workload that owned them:"
-          kubectl -n k8s-lab get all -l app.kubernetes.io/managed-by=k8s-lab-platform
+          kubectl -n damga get all -l app.kubernetes.io/managed-by=damga-platform
           exit 1
 
       - name: Diagnostics on failure
         if: failure()
         run: |
-          kubectl -n k8s-lab get all,pvc,networkpolicy,ingress
-          kubectl -n k8s-lab describe pods
+          kubectl -n damga get all,pvc,networkpolicy,ingress
+          kubectl -n damga describe pods
           kubectl -n ingress-nginx get pods
-          kubectl -n k8s-lab logs -l app.kubernetes.io/name=k8s-lab-app --tail=100 --all-containers || true
-          kubectl -n k8s-lab get events --sort-by=.lastTimestamp | tail -40
+          kubectl -n damga logs -l app.kubernetes.io/name=damga-app --tail=100 --all-containers || true
+          kubectl -n damga get events --sort-by=.lastTimestamp | tail -40
 
   # ---------------------------------------------------------------- build
   # Each architecture is built on a runner of that architecture.
   #
-  # The earlier version built both from one amd64 runner under QEMU. That
-  # worked for the API image, whose `npm ci --omit=dev` installs no native
-  # code, and did not for the web one, whose build stage installs esbuild and
-  # rollup:
+  # An earlier version built every architecture from one amd64 runner under
+  # QEMU. That worked for the API image, whose `npm ci --omit=dev` installs no
+  # native code, and did not for an image whose build stage compiled native
+  # modules:
   #
   #   #25 [linux/arm64 build 4/7] RUN npm ci
   #   #25 13.93 qemu: uncaught target signal 4 (Illegal instruction) - core dumped
@@ -573,18 +521,6 @@ jobs:
           provenance: true
           sbom: true
 
-      - name: Build the web image
-        id: web
-        uses: docker/build-push-action@v7
-        with:
-          context: ./web
-          platforms: linux/${{ matrix.arch }}
-          outputs: type=image,name=${{ env.IMAGE_NAME }}-web,push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=web-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=web-${{ matrix.arch }}
-          provenance: true
-          sbom: true
-
       - name: Build the operator image
         id: operator
         uses: docker/build-push-action@v7
@@ -602,10 +538,9 @@ jobs:
       - name: Record the digests for assembly
         env:
           API_DIGEST: ${{ steps.api.outputs.digest }}
-          WEB_DIGEST: ${{ steps.web.outputs.digest }}
           OPERATOR_DIGEST: ${{ steps.operator.outputs.digest }}
         run: |
-          for pair in "api:${API_DIGEST}" "web:${WEB_DIGEST}" "operator:${OPERATOR_DIGEST}"; do
+          for pair in "api:${API_DIGEST}" "operator:${OPERATOR_DIGEST}"; do
             name="${pair%%:*}"
             digest="${pair#*:}"
             [ -n "$digest" ] || { echo "$name: the build reported no digest"; exit 1; }
@@ -659,12 +594,12 @@ jobs:
           merge-multiple: true
 
       # imagetools works on descriptors the registry already holds, so this
-      # assembles three multi-architecture images without pulling a layer.
+      # assembles both multi-architecture images without pulling a layer.
       - name: Assemble the multi-architecture images
         id: assemble
         working-directory: ${{ runner.temp }}/digests
         run: |
-          for pair in "api:${IMAGE_NAME}" "web:${IMAGE_NAME}-web" "operator:${IMAGE_NAME}-operator"; do
+          for pair in "api:${IMAGE_NAME}" "operator:${IMAGE_NAME}-operator"; do
             name="${pair%%:*}"
             repo="${pair#*:}"
 
@@ -703,13 +638,11 @@ jobs:
           COSIGN_YES: "true"
         run: |
           cosign sign --recursive "${IMAGE_NAME}@${{ steps.assemble.outputs.api_digest }}"
-          cosign sign --recursive "${IMAGE_NAME}-web@${{ steps.assemble.outputs.web_digest }}"
           cosign sign --recursive "${IMAGE_NAME}-operator@${{ steps.assemble.outputs.operator_digest }}"
 
       - name: Verify the signatures the way the cluster will
         run: |
           for ref in "${IMAGE_NAME}@${{ steps.assemble.outputs.api_digest }}" \
-                     "${IMAGE_NAME}-web@${{ steps.assemble.outputs.web_digest }}" \
                      "${IMAGE_NAME}-operator@${{ steps.assemble.outputs.operator_digest }}"; do
             repo="${ref%@*}"
             # The index, plus every platform a cluster could resolve to. Verifying
@@ -783,12 +716,20 @@ jobs:
             sleep 2
           done
 
-      - name: A signed image is admitted, an unsigned one is not
+      # The unsigned half of this check is skipped for now, and policy-test.sh
+      # says so on the run rather than passing quietly.
+      #
+      # UNSIGNED_IMAGE used to name a build published before signing existed. It
+      # lives under the pre-move namespace, which no longer clears the
+      # ghcr.io/damgahq allowlist in policies/admission-policies.yaml — so it is
+      # now rejected by the registry rule and never reaches the signature rule.
+      # It would still go red, but for the wrong reason, which proves nothing.
+      #
+      # Restoring it needs a fixture published under this org, deliberately never
+      # signed, named to match Kyverno's ghcr.io/damgahq/damga* references. The
+      # package has to be public: Kyverno fetches the manifest itself, and an
+      # auth failure is one more wrong reason to be rejected.
+      - name: A signed image is admitted
         env:
           SIGNED_IMAGE: ghcr.io/${{ github.repository }}@${{ needs.publish.outputs.api_digest }}
-          # Published before signing existed, so it is present in the registry and
-          # carries no signature. A tag that was never pushed would be rejected
-          # too, with "manifest unknown" — a different failure wearing the same
-          # colour, which would prove nothing about the rule.
-          UNSIGNED_IMAGE: ghcr.io/alpacino-0/k8s-lab:c5cc9e7e18a9a438bcabf3c03b7a7353d84148c4
-        run: NAMESPACE=k8s-lab IMAGE="$SIGNED_IMAGE" ./scripts/policy-test.sh
+        run: NAMESPACE=damga IMAGE="$SIGNED_IMAGE" ./scripts/policy-test.sh

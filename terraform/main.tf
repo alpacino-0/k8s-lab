@@ -17,7 +17,7 @@
 
 locals {
   common_labels = {
-    "app.kubernetes.io/part-of"    = "k8s-lab"
+    "app.kubernetes.io/part-of"    = "damga"
     "app.kubernetes.io/managed-by" = "terraform"
   }
 }
@@ -151,13 +151,13 @@ resource "kubernetes_manifest" "admission_bindings" {
 
 resource "kubernetes_namespace_v1" "app" {
   metadata {
-    name = "k8s-lab"
+    name = "damga"
     labels = merge(local.common_labels, {
       "pod-security.kubernetes.io/enforce"         = "restricted"
       "pod-security.kubernetes.io/enforce-version" = "latest"
       "pod-security.kubernetes.io/audit"           = "restricted"
       "pod-security.kubernetes.io/warn"            = "restricted"
-      "k8s-lab.dev/policies"                       = "enforced"
+      "damga.co/policies"                          = "enforced"
     })
   }
 }

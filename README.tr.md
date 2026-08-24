@@ -1,11 +1,11 @@
-# k8s-lab
+# Damga
 
-[![CI](https://github.com/alpacino-0/k8s-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/alpacino-0/k8s-lab/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/damgahq/damga/actions/workflows/ci.yml/badge.svg)](https://github.com/damgahq/damga/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 ![Kubernetes](https://img.shields.io/badge/kubernetes-1.36-326ce5?logo=kubernetes&logoColor=white)
 ![Helm](https://img.shields.io/badge/helm-3-0f1689?logo=helm&logoColor=white)
 
-Node.js + PostgreSQL servisi ve tarayıcı arayüzünün Kubernetes'e **üretimde
+Node.js + PostgreSQL servisinin Kubernetes'e **üretimde
 çalıştırılacağı gibi** kurulduğu proje: root olmayan konteynerler, salt-okunur dosya sistemi,
 varsayılan-reddet ağ politikaları, sürüm başına bir kez çalışan şema migration'ı,
 doğrulanmış gecelik yedekler, otomatik ölçekleme, kesinti bütçesi, Prometheus
@@ -30,8 +30,7 @@ flowchart TB
     subgraph CL["kind cluster — 1 control-plane + 2 worker"]
         ING["ingress-nginx<br/>NodePort 30080"]
 
-        subgraph NS["namespace: k8s-lab"]
-            WEB["web<br/>Deployment · 2 replika<br/>nginx, uid 101, salt-okunur"]
+        subgraph NS["namespace: damga"]
             RD[("redis<br/>paylaşımlı pencere + cache")]
             APP["app<br/>Deployment · HPA 3-10 · PDB min 2<br/>root değil · salt-okunur rootfs"]
             PG[("postgres-0<br/>StatefulSet · PVC")]
@@ -47,8 +46,7 @@ flowchart TB
         NP{{"varsayılan-reddet NetworkPolicy<br/>giriş: ingress-nginx + Prometheus<br/>çıkış: DNS + PostgreSQL"}}
     end
 
-    U -->|"app.local/"| ING --> WEB
-    U -->|"app.local/api"| ING --> NP --> APP
+    U -->|"app.local/"| ING --> NP --> APP
     APP --> PG
     APP -->|"hız penceresi, not sayısı"| RD
     MIG -.->|sürüm başına bir kez| PG
@@ -61,37 +59,31 @@ flowchart TB
 
 ## Hızlı başlangıç
 
-Gerekenler: Docker, [kind](https://kind.sigs.k8s.io/), kubectl, Helm.
+Gerekenler: Docker, [kind](https://kind.sigs.k8s.io/), kubectl, Helm, Terraform.
 
 ```bash
-git clone https://github.com/alpacino-0/k8s-lab.git && cd k8s-lab
+git clone https://github.com/damgahq/damga.git && cd damga
 make up                                    # cluster + ingress + build + deploy
 echo "127.0.0.1 app.local" | sudo tee -a /etc/hosts
-open http://app.local:8080                 # arayüz
-make smoke                                 # 35 uçtan uca kontrol
+curl http://app.local:8080/stats           # servis
+make smoke                                 # 30 uçtan uca kontrol
 ```
 
-## Arayüz
+## Servis
 
-`http://app.local:8080` çalışan bir notlar uygulaması. Aynı zamanda altında ne
-olduğunun en hızlı açıklaması.
+`http://app.local:8080` çalışan bir notlar API'si. Her yanıt, onu üreten
+replikanın kimliğini taşıyor; birkaç istek yük dağılımını görmeye yetiyor.
 
-Her yanıt, onu üreten replikanın kimliğini taşıyor ve sayfa bunu bir deftere
-işliyor: her istek, cevap veren pod'un şeridine bir çentik düşürüyor. Uygulamayı
-birkaç saniye kullandığında yük dağılımı kendini çiziyor. Altında ise her
-platform kararı, onu haklı çıkaran ölçümle birlikte anlatılıyor.
-
-Defter Kubernetes API'sini **bilerek sorgulamıyor**. Sorgulasaydı, başka hiçbir
-sebebi olmayan bir pod'a ServiceAccount token'ı bağlamak gerekirdi. Pod kimliği
+Bu kimlik Kubernetes API'sinden **bilerek** gelmiyor. Oradan okumak, başka
+hiçbir sebebi olmayan bir pod'a ServiceAccount token'ı bağlamak demekti. Kimlik
 bunun yerine downward API'den geliyor — kubelet'in enjekte ettiği ortam
-değişkenleri — ve tarayıcı sadece geleni sayıyor.
+değişkenleri.
 
 | Komut | Ne yapar |
 |---|---|
 | `make test` | Birim ve entegrasyon testleri (29 test, cluster gerekmez) |
 | `make lint` | ESLint + `helm lint` + tüm values profillerini üretir |
-| `make deploy` | İki imajı da yeniden derler ve sürümü günceller |
-| `make web` | Arayüzü yerelde, port-forward edilmiş backend'e karşı çalıştırır |
+| `make deploy` | İmajı yeniden derler ve sürümü günceller |
 | `make smoke` | Çalışan deployment'a karşı uçtan uca kontroller |
 | `make policies` | Kabul politikalarını uygular |
 | `make policy-test` | Her politikanın doğru şeyi reddettiğini kanıtlar |
@@ -115,15 +107,14 @@ değişkenleri — ve tarayıcı sadece geleni sayıyor.
 | Salt-okunur kök dosya sistemi | `containerSecurityContext` + `/tmp` için `emptyDir` | CI'da konteyner `--read-only` ile başlatılır |
 | Tüm Linux capability'leri düşürülmüş | `capabilities.drop: [ALL]` | çalışan pod spec'i üzerinden doğrulanır |
 | Yetki yükseltme kapalı, seccomp `RuntimeDefault` | pod ve konteyner security context | üretilen manifest'ler kubeconform ile denetlenir |
-| ServiceAccount token'ı monte edilmez | `automountServiceAccountToken: false` | iki katman da Kubernetes API'sini kullanmaz |
-| Kazıma ucu dışarıya yönlendirilmez | metrikler ayrı portta (9090) | CI `/api/metrics` için 404 doğrular |
-| Arayüz CSP ve frame-deny başlıkları gönderir | `web/security-headers.conf` | çalışan konteyner üzerinde doğrulanır |
-| Varsayılan-reddet ağ | 5 NetworkPolicy | yetkisiz bir pod'un erişemediği **kanıtlanır** |
+| ServiceAccount token'ı monte edilmez | `automountServiceAccountToken: false` | servis Kubernetes API'sini hiç kullanmaz |
+| Kazıma ucu dışarıya yönlendirilmez | metrikler ayrı portta (9090) | CI `/metrics` için 404 doğrular |
+| Varsayılan-reddet ağ | 4 NetworkPolicy | yetkisiz bir pod'un erişemediği **kanıtlanır** |
 | Multi-stage imaj, yalnız üretim bağımlılıkları | `app/Dockerfile` | CI'da Trivy CRITICAL/HIGH bulguda durdurur |
 | npm runtime imajından çıkarıldı | `app/Dockerfile` | **tüm** Node.js paket CVE'lerini sıfırladı (aşağıda) |
 | Git'te secret yok | `.gitignore` + chart values | parola zorunlu bir chart değeri |
 | TLS, yönlendirme ve Secure çerez | cert-manager + açık Certificate | gerçek bir CA'nın verdiği sertifikayla her push'ta doğrulanır |
-| Güvenlik ayarları zorunlu, sadece yazılı değil | Pod Security Admission + ValidatingAdmissionPolicy | 10 politika testi: iki uyumlu manifest kabul, sekiz bozuk manifest ayrı ayrı red |
+| Güvenlik ayarları zorunlu, sadece yazılı değil | Pod Security Admission + ValidatingAdmissionPolicy | 13 politika testi: üç uyumlu manifest kabul, on bozuk manifest ayrı ayrı red |
 | Notlar ziyaretçi başına izole | anonim çerez, owner'a göre filtrelenmiş sorgular | ikinci bir ziyaretçi ilkinin notunu ne görür ne siler |
 | Yazma sınırlı | ingress `limit-rps` + paylaşımlı pencere + not tavanı | uzun ve kota aşan yazmalar reddedilir |
 | Limitler replikalar arası bağlayıcı | Redis kayan pencere | limit 30 iken 60 istek: paylaşımlı **29 geçti**, replika başına **60 geçti** |
@@ -191,7 +182,7 @@ ve bir şeffaflık günlüğüne erişmek demek, ki bir admission eklentisi bunu
 attestors:
   - entries:
       - keyless:
-          subject: "https://github.com/alpacino-0/k8s-lab/*"
+          subject: "https://github.com/damgahq/damga/*"
           issuer:  "https://token.actions.githubusercontent.com"
 mutateDigest: true      # etiket, doğrulanan digest ile değiştirilir
 ```
@@ -239,7 +230,7 @@ imzalıyor, ve kontrol artık bir cluster'ın çözebileceği her platformu doğ
 ### TLS
 
 Sertifikayı cert-manager veriyor; `Certificate` kaynağını chart oluşturuyor ve
-iki Ingress de ürettiği secret'ı tüketiyor.
+Ingress ürettiği secret'ı tüketiyor.
 
 Bunu hazırlayıp hiç çalıştırmamak kolay olurdu — herkese açık kurulum bir alan
 adı ister, alan adı yok. Bu yüzden CI, yerel bir sertifika otoritesinden
@@ -247,8 +238,8 @@ adı ister, alan adı yok. Bu yüzden CI, yerel bir sertifika otoritesinden
 
 | | |
 |---|---|
-| `https://…/api/healthz` | 200, sertifikayı beklenen CA vermiş |
-| `http://…/api/healthz` | **308** — yönlendiriliyor, servis edilmiyor |
+| `https://…/healthz` | 200, sertifikayı beklenen CA vermiş |
+| `http://…/healthz` | **308** — yönlendiriliyor, servis edilmiyor |
 | `Set-Cookie` | `Secure` taşıyor |
 
 Herkese açık bir kurulumdan tek farkı sertifikayı kimin imzaladığı. `Certificate`
@@ -256,17 +247,21 @@ kaynağı, secret, nginx TLS dinleyicisi, yönlendirme ve çerez bayrağı aynı
 yapan aynı nesneler. Let's Encrypt'e geçiş tek değer:
 `--set ingress.tls.clusterIssuer=letsencrypt-prod`.
 
-`Certificate`'ı cert-manager'ın Ingress anotasyonu yerine chart oluşturuyor,
-çünkü iki Ingress aynı host ve aynı secret'ı paylaşıyor. Anotasyonla,
-cert-manager ilk Ingress'i sahip yapıyor ve ikincisi için çalışmayı reddediyor:
+`Certificate`'ı cert-manager'ın Ingress anotasyonu yerine chart oluşturuyor.
+Bu, aynı host ve aynı secret'ı paylaşan iki Ingress varken zorunluydu:
+anotasyonla cert-manager ilk Ingress'i sahip yapıyor ve ikincisi için çalışmayı
+reddediyordu.
 
 ```
 certificate resource is not owned by this object.
 refusing to update non-owned certificate resource
 ```
 
-Sahip Ingress silinene kadar çalışır; silindiğinde sertifika çöp toplanır ve
-diğer Ingress sessizce sertifikasız kalır.
+Sahip Ingress silinene kadar çalışıyordu; silindiğinde sertifika çöp toplanıyor
+ve diğer Ingress sessizce sertifikasız kalıyordu. Bugün tek Ingress var, ama
+`Certificate` yerinde kaldı: sahibi sürüm olduğu için ömrü hiçbir Ingress'e
+bağlı değil, ve anahtar algoritması, rotasyon politikası ve yenileme penceresi
+anotasyon değil chart değeri.
 
 Yerelde: `make tls`, sonra `https://localhost:8443`. Tarayıcı uyarır — CA yerel
 olduğu için. Gerçek olmayan tek şey o.
@@ -300,9 +295,9 @@ Loki aynı adla sorgulanıyor:
 
 ```
 promql:  topk(1, sum by (pod) (http_requests_total{status=~"4.."}))
-         → app-k8s-lab-app-557bc659bb-dpp6p, 4×404 ve 1×400
+         → app-damga-app-557bc659bb-dpp6p, 4×404 ve 1×400
 
-logql:   {namespace="k8s-lab", pod="app-k8s-lab-app-557bc659bb-dpp6p"}
+logql:   {namespace="damga", pod="app-damga-app-557bc659bb-dpp6p"}
            | json | level=`warn`
          → warn request rejected POST /notes -> 400 (2.95ms)
 ```
@@ -412,15 +407,18 @@ Büyüme anında, küçülme kasten yavaştır: büyümede geç kalmanın bedeli
 
 ### CI/CD
 
-Her push'ta beş job ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
+Sekiz job ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) — beşi her
+push'ta, üçü yalnız `main`'de:
 
 | Job | Neyi denetler |
 |---|---|
-| `test` | API için ESLint + 29 test; arayüz için ESLint + üretim derlemesi |
-| `manifests` | `helm lint`, values profilleri, kubeconform şema denetimi, `terraform fmt -check` ve `validate`, iki Dockerfile için hadolint |
-| `image` | İki imajı derler, ikisinin de root olmadığını doğrular, salt-okunur başlatır, Trivy taraması |
-| `e2e` | Gerçek kind cluster kurar, politikaları **chart'tan önce** uygular (yani sürüm onlara uymak zorunda), 10 politika kontrolünü ve 35 duman kontrolünü çalıştırır, ardından bir upgrade'in **sıfır istek düşürdüğünü** kanıtlar |
-| `publish` | İki imajı da amd64 + arm64 için GHCR'a, SBOM ve provenance ile push eder (yalnız main) |
+| `test` | API için ESLint + 29 test |
+| `manifests` | `helm lint`, values profilleri, kubeconform şema denetimi, `terraform fmt -check` ve `validate`, her Dockerfile için hadolint |
+| `image` | İmajları derler, hiçbirinin root olmadığını doğrular, salt-okunur başlatır, Trivy taraması |
+| `operator` | Go test paketi, ve commit'lenmiş üretilmiş kodun tiplerden çıkanla aynı olduğunun denetimi |
+| `e2e` | Gerçek kind cluster kurar, politikaları **chart'tan önce** uygular (yani sürüm onlara uymak zorunda), Kyverno gerektirmeyen 11 politika kontrolünü ve 30 duman kontrolünü çalıştırır, bir upgrade'in **sıfır istek düşürdüğünü** kanıtlar, sonra operatörü kurup bir `Workload`'ı admission'dan geçirerek Ready'ye götürür |
+| `build` · `publish` | Her mimariyi kendi üstünde derler, SBOM ve provenance ile GHCR'a push eder, keyless cosign ile imzalar (yalnız main) |
+| `supply-chain` | Temiz bir cluster'a Kyverno kurar, bu koşunun imzaladığı imajın kabul, imzasızın red edildiğini kanıtlar (yalnız main) |
 
 ---
 
@@ -431,16 +429,16 @@ app/                  Node.js servisi
   src/                config · logger · metrics · db · app · index
   test/               birim ve entegrasyon testleri (node:test, framework yok)
   Dockerfile          multi-stage, sabit sürüm, root değil
-web/                  React arayüzü (Vite), yetkisiz nginx ile servis edilir
-  src/                app · pod defteri · notlar · mekanizmalar
-  nginx.conf          SPA fallback, CSP, yazma işlemleri /tmp ile sınırlı
 chart/                Helm chart — tek deploy yolu
-  templates/          19 kaynak şablonu + helper'lar
+  templates/          18 kaynak şablonu + helper'lar
   values.yaml         açıklamalı varsayılanlar
   values-dev.yaml     minimum ayak izi, demo uçları açık
   values-prod.yaml    otomatik ölçekleme, yedekleme, izleme, ağ politikaları
-  values-public.yaml  GHCR imajları, TLS, harici secret — herkese açık adres için
-terraform/            platform katmanı: ingress, cert-manager, Argo CD, politikalar
+  values-public.yaml  GHCR imajı, TLS, harici secret — herkese açık adres için
+operator/             Workload CRD'si ve onu render eden controller
+  api/v1alpha1/       tipler — sertleştirmeyi kapatan bir alan yok
+  internal/controller/  reconciler ve ürettiği kaynaklar
+terraform/            platform katmanı: ingress, cert-manager, Argo CD, Kyverno, politikalar
 gitops/               Argo CD Application'ları: sürüm ve operator
 cluster/              cluster kapsamlı eklentiler, chart'ın dışında
   issuers.yaml        yerel CA — TLS yolu varsayılmıyor, çalıştırılıyor
@@ -450,10 +448,11 @@ cluster/              cluster kapsamlı eklentiler, chart'ın dışında
 policies/             cluster politikası, bilerek chart'ın dışında
   namespace.yaml      Pod Security Admission etiketleri
   admission-*.yaml    ValidatingAdmissionPolicy kuralları ve bağlamaları
+  kyverno-*.yaml      imza politikası, `make platform` tarafından uygulanır
 scripts/
   bootstrap.sh        idempotent cluster + ingress + politikalar + deploy
   policy-test.sh      her kuralın doğru şeyi reddettiğini kanıtlayan 13 kontrol
-  smoke-test.sh       güvenlik duruşu ve izolasyon dahil 35 uçtan uca kontrol
+  smoke-test.sh       güvenlik duruşu ve izolasyon dahil 30 uçtan uca kontrol
   teardown.sh         cluster'ı siler
 ```
 
@@ -510,18 +509,12 @@ yolunun çalıştığını kanıtlar hem de volume'ü bağlar.
 
 ### Trafiği okurken çıkan bir diğeri
 
-Arayüzü bağlamak, manifest'lerin iddia ettiği ama hiç uygulamadığı bir açığı
-ortaya çıkardı: ingress `/api`'yi servise yönlendiriyordu ve `/metrics` aynı
-portta duruyordu — yani ham Prometheus kazıma ucu dışarıdan erişilebilirdi.
-Çözüm bir ingress kuralı değil, ikinci bir dinleyici oldu: telemetri artık 9090
-portunda, dışarıdan hiçbir yönlendirme almıyor ve ağ politikası o portu yalnızca
-Prometheus'a açıyor. CI `/api/metrics` için 404 bekliyor.
-
-Aynı oturumda iki küçük hata daha çıktı: nginx, bir alt blok kendi `add_header`
-direktifini koyar koymaz miras alınan **tüm** başlıkları sessizce düşürüyor —
-güvenlik başlıkları hiç gönderilmiyordu. Ve arayüzün Service'i, API'nin
-`app.kubernetes.io/name` etiketini taşıdığı için Prometheus nginx'ten `/metrics`
-kazımaya çalışıyordu.
+Trafiği servise yönlendirmek, manifest'lerin iddia ettiği ama hiç uygulamadığı
+bir açığı ortaya çıkardı: `/metrics`, ingress'in yayımladığı portta duruyordu —
+yani ham Prometheus kazıma ucu dışarıdan erişilebilirdi. Çözüm bir ingress
+kuralı değil, ikinci bir dinleyici oldu: telemetri artık 9090 portunda,
+dışarıdan hiçbir yönlendirme almıyor ve ağ politikası o portu yalnızca
+Prometheus'a açıyor. CI `/metrics` için 404 bekliyor.
 
 ## Herkese açık bir adrese hazır
 
@@ -559,17 +552,18 @@ Owner sütunu eklenmeden önce yazılmış satırlar bir sentinel sahiple işare
 kimseye görünmüyorlar ve aynı iş tarafından temizleniyorlar.
 
 **Metin temizleniyor, güvenilmiyor.** Kontrol karakterleri ayıklanıyor, uzunluk
-500 karakterle, JSON gövdesi 32kb ile sınırlı; arayüz metni metin olarak basıyor.
+500 karakterle, JSON gövdesi 32kb ile sınırlı.
 
 **Yayına almak için gereken her şey hazır, ama kullanılmıyor.**
-`chart/values-public.yaml` yayınlanmış GHCR imajlarını gösteriyor, cert-manager
+`chart/values-public.yaml` yayınlanmış GHCR imajını gösteriyor, cert-manager
 ile TLS'i açıyor, ziyaretçi çerezini `Secure` işaretliyor ve veritabanı
 parolasını chart dışında oluşturulmuş bir secret'tan alıyor — yani parola ne bir
 dosyaya ne kabuk geçmişine giriyor.
 [docs/DEPLOY.md](docs/DEPLOY.md) adım adım kılavuz: küçük bir VPS'te k3s,
 ingress-nginx, cert-manager, tek `helm upgrade`.
-Bu yol, aynı profil GHCR'dan geçici bir namespace'e kurularak doğrulandı —
-31/31 kontrol — yani geriye kalan bir sunucu ve bir alan adı, bilinmeyen değil.
+Bu yol, aynı profil GHCR'dan geçici bir namespace'e kurulup üstünde duman
+testi çalıştırılarak doğrulandı — yani geriye kalan bir sunucu ve bir alan adı,
+bilinmeyen değil.
 
 Ürün olması için hâlâ eksik olanlar: cluster dışı yedekler ve gece uyandırılacak
 bir sorumlu.
@@ -601,4 +595,14 @@ olanlar:
 
 ## Lisans
 
-MIT — [LICENSE](LICENSE).
+AGPL-3.0 — [LICENSE](LICENSE).
+
+Çalıştırmak bedava ve hiçbir yükümlülük doğurmuyor, ticari kullanım dahil:
+kendi makinene kur, üstünde ne istersen çalıştır, değiştir, kimseye söyleme.
+Lisans yalnızca tek bir gruptan kaynak istiyor — bu yazılımı başkalarına
+**servis olarak sunandan**. Değiştirilmiş bir kopyayı üçüncü kişilere ürün
+olarak koşuyorsan, o değişiklikler de yayımlanmak zorunda.
+
+Katkılar CLA ile kabul ediliyor. Telif hakkını tek elde tutuyor, böylece
+AGPL'in uymadığı kurumlara ticari lisans sunulabiliyor —
+[CONTRIBUTING.md](CONTRIBUTING.md).

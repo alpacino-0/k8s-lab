@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Remove everything this project created.
 set -euo pipefail
-CLUSTER="${CLUSTER:-k8s-lab}"
+CLUSTER="${CLUSTER:-damga}"
 
 read -r -p "Delete kind cluster '$CLUSTER' and all its data? [y/N] " reply
 case "$reply" in

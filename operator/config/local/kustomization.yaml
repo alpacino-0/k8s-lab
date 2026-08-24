@@ -2,7 +2,7 @@
 #
 # kubebuilder's `make deploy` runs `kustomize edit set image` against
 # config/manager, rewriting a tracked file every time it runs. That edit once
-# reached a commit, and git then described `k8s-lab-operator:1.0.0` — an image
+# reached a commit, and git then described `damga-operator:1.0.0` — an image
 # that existed only on the machine which had last deployed, and which Argo CD
 # would have tried and failed to pull.
 #
@@ -14,5 +14,5 @@ resources:
   - ../default
 images:
   - name: controller
-    newName: k8s-lab-operator
+    newName: damga-operator
     newTag: 1.0.0

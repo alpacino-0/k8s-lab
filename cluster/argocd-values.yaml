@@ -16,7 +16,7 @@ applicationSet:
 configs:
   params:
     server.insecure: true          # TLS terminates at the ingress, not here
-    application.namespaces: "k8s-lab-*"
+    application.namespaces: "damga-*"
   cm:
     # Reconcile more often than the 3-minute default so drift correction is
     # observable in a demo rather than something you wait out.

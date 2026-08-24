@@ -1,9 +1,9 @@
 {
-  "name": "k8s-lab-app",
+  "name": "damga-app",
   "version": "1.0.0",
   "description": "Sample Node.js service used to demonstrate production Kubernetes practices",
   "main": "src/index.js",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "engines": {
     "node": ">=20"
   },

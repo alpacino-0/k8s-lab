@@ -12,35 +12,35 @@
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: k8s-lab-resource-bounds
+  name: damga-resource-bounds
 spec:
-  policyName: k8s-lab-resource-bounds
+  policyName: damga-resource-bounds
   validationActions: [Deny, Audit]
   matchResources:
     namespaceSelector:
       matchLabels:
-        k8s-lab.dev/policies: enforced
+        damga.co/policies: enforced
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: k8s-lab-image-provenance
+  name: damga-image-provenance
 spec:
-  policyName: k8s-lab-image-provenance
+  policyName: damga-image-provenance
   validationActions: [Deny, Audit]
   matchResources:
     namespaceSelector:
       matchLabels:
-        k8s-lab.dev/policies: enforced
+        damga.co/policies: enforced
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: k8s-lab-workload-hygiene
+  name: damga-workload-hygiene
 spec:
-  policyName: k8s-lab-workload-hygiene
+  policyName: damga-workload-hygiene
   validationActions: [Deny, Audit]
   matchResources:
     namespaceSelector:
       matchLabels:
-        k8s-lab.dev/policies: enforced
+        damga.co/policies: enforced

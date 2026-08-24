@@ -1,8 +1,16 @@
-# k8s-lab-platform
-// TODO(user): Add simple overview of use/purpose
+# damga-platform
+
+The operator behind Damga: a `Workload` custom resource, and the controller that
+renders it into a Deployment, Service, Ingress, HorizontalPodAutoscaler,
+PodDisruptionBudget, NetworkPolicy and ServiceAccount.
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+
+What the `Workload` type leaves out is the point. There is no field that turns
+off `runAsNonRoot` and no field that makes the root filesystem writable, so a
+hardened pod is the only pod this controller can render. The comments in
+`api/v1alpha1/workload_types.go` record why each default is the value it is —
+several of them because something broke in a measurable way first.
 
 ## Getting Started
 
@@ -16,7 +24,7 @@
 **Build and push your image to the location specified by `IMG`:**
 
 ```sh
-make docker-build docker-push IMG=<some-registry>/k8s-lab-platform:tag
+make docker-build docker-push IMG=<some-registry>/damga-platform:tag
 ```
 
 **NOTE:** This image ought to be published in the personal registry you specified.
@@ -32,7 +40,7 @@ make install
 **Deploy the Manager to the cluster with the image specified by `IMG`:**
 
 ```sh
-make deploy IMG=<some-registry>/k8s-lab-platform:tag
+make deploy IMG=<some-registry>/damga-platform:tag
 ```
 
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
@@ -75,7 +83,7 @@ Following the options to release and provide this solution to the users.
 1. Build the installer for the image built and published in the registry:
 
 ```sh
-make build-installer IMG=<some-registry>/k8s-lab-platform:tag
+make build-installer IMG=<some-registry>/damga-platform:tag
 ```
 
 **NOTE:** The makefile target mentioned above generates an 'install.yaml'
@@ -89,7 +97,7 @@ Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
 the project, i.e.:
 
 ```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/k8s-lab-platform/<tag or branch>/dist/install.yaml
+kubectl apply -f https://raw.githubusercontent.com/<org>/damga-platform/<tag or branch>/dist/install.yaml
 ```
 
 ### By providing a Helm Chart
@@ -111,7 +119,10 @@ previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml
 is manually re-applied afterwards.
 
 ## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
+
+The contribution rules, the CI gates and the commit conventions are in
+[../CONTRIBUTING.md](../CONTRIBUTING.md). Contributions are accepted under the
+agreement in [../CLA.md](../CLA.md).
 
 **NOTE:** Run `make help` for more information on all potential `make` targets
 
@@ -119,17 +130,10 @@ More information can be found via the [Kubebuilder Documentation](https://book.k
 
 ## License
 
-Copyright 2026.
+Copyright 2026 Orhan Yavuz.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+AGPL-3.0 — see [LICENSE](../LICENSE) at the repository root. This directory is
+part of that project and carries no separate terms; the Apache-2.0 notice that
+stood here came from the kubebuilder scaffold and never matched the repository
+it was committed into.
 

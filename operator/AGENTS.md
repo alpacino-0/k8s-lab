@@ -1,4 +1,4 @@
-# k8s-lab-platform - AI Agent Guide
+# damga-platform - AI Agent Guide
 
 ## Project Structure
 

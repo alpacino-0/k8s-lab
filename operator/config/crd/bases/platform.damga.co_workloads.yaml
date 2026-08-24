@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: workloads.platform.k8s-lab.dev
+  name: workloads.platform.damga.co
 spec:
-  group: platform.k8s-lab.dev
+  group: platform.damga.co
   names:
     kind: Workload
     listKind: WorkloadList

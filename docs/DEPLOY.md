@@ -5,7 +5,8 @@ single small VPS, which is the cheapest way to run this without giving up
 anything the project demonstrates.
 
 Everything here has been prepared and validated except the parts that need a
-real server and a real domain — those are marked. Nothing is published yet.
+real server and a real domain — those are marked. Nothing is deployed at a
+public address yet.
 
 ---
 
@@ -16,7 +17,7 @@ real server and a real domain — those are marked. Nothing is published yet.
 | Server | 1 vCPU / 2 GB RAM is comfortable; 1 GB works. Hetzner CX22 or similar, ~€4-5/month |
 | Domain | A record pointing at the server's IP. A subdomain is fine |
 | Local tools | `kubectl`, `helm` |
-| Images | Already published: `ghcr.io/alpacino-0/k8s-lab` and `-web`, public, amd64 + arm64 |
+| Images | Built and pushed by CI on the first push to `main` (amd64 + arm64). Before you start, confirm `ghcr.io/damgahq/damga` exists and is **public** — a new organisation's GHCR packages start private, and the visibility has to be flipped once by hand |
 
 ---
 
@@ -27,7 +28,8 @@ API, same `kubectl`, same charts — it simply leaves out what a small cluster
 does not need and bundles what it does.
 
 Traefik is disabled because this chart depends on ingress-nginx annotations
-(`rewrite-target`, `limit-rps`) that Traefik does not implement.
+(`limit-rps`, `limit-burst-multiplier`, `limit-connections`) that Traefik does
+not implement.
 
 ```bash
 # on the server
@@ -102,7 +104,7 @@ kubectl apply -f policies/admission-policies.yaml -f policies/admission-bindings
 ```
 
 Four of those labels put the namespace under Pod Security Admission at
-`restricted`; the fifth, `k8s-lab.dev/policies: enforced`, is what the
+`restricted`; the fifth, `damga.co/policies: enforced`, is what the
 ValidatingAdmissionPolicy bindings select on. A namespace created without them
 is not a namespace with weaker rules — it is a namespace with **no** rules, and
 nothing says so. The release installs, every pod starts, and the enforcement
@@ -111,8 +113,8 @@ layer this project is built around is silently absent.
 Confirm it is on before going further:
 
 ```bash
-kubectl get namespace k8s-lab -o jsonpath='{.metadata.labels}' | tr ',' '\n'
-NAMESPACE=k8s-lab ./scripts/policy-test.sh     # each rule must reject what it should
+kubectl get namespace damga -o jsonpath='{.metadata.labels}' | tr ',' '\n'
+NAMESPACE=damga ./scripts/policy-test.sh     # each rule must reject what it should
 ```
 
 Optionally, image signature verification. It is the one rule the built-in
@@ -122,7 +124,13 @@ registry and a transparency log — so it costs two pods:
 ```bash
 helm repo add kyverno https://kyverno.github.io/kyverno/
 helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace \
-  --version 3.5.2 --wait
+  --version 3.5.2 --wait \
+  --set admissionController.replicas=1 \
+  --set backgroundController.replicas=1 \
+  --set cleanupController.enabled=false \
+  --set reportsController.enabled=false \
+  --set admissionController.container.resources.requests.memory=128Mi \
+  --set admissionController.container.resources.limits.memory=384Mi
 kubectl apply -f policies/kyverno-image-signatures.yaml
 ```
 
@@ -138,7 +146,7 @@ is rewritten to its digest on admission so a moved tag cannot change what runs.
 The password never goes into a values file or a shell history:
 
 ```bash
-kubectl -n k8s-lab create secret generic db-credentials \
+kubectl -n damga create secret generic db-credentials \
   --from-literal=POSTGRES_USER=labuser \
   --from-literal=POSTGRES_DB=labdb \
   --from-literal=POSTGRES_PASSWORD="$(openssl rand -base64 24)"
@@ -152,15 +160,14 @@ own — the credentials exist only in the cluster, never in this repository.
 
 ```bash
 helm upgrade --install app ./chart \
-  --namespace k8s-lab \
+  --namespace damga \
   -f chart/values-public.yaml \
   --set ingress.host=demo.your-domain.com \
   --timeout 10m
 
-kubectl -n k8s-lab rollout status statefulset/app-postgres --timeout=300s
-kubectl -n k8s-lab rollout status deployment/app-redis --timeout=300s
-kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app --timeout=300s
-kubectl -n k8s-lab rollout status deployment/app-k8s-lab-app-web --timeout=300s
+kubectl -n damga rollout status statefulset/app-postgres --timeout=300s
+kubectl -n damga rollout status deployment/app-redis --timeout=300s
+kubectl -n damga rollout status deployment/app-damga-app --timeout=300s
 ```
 
 Redis comes from the chart, so there is nothing extra to install. It holds the
@@ -176,31 +183,32 @@ job mounts it, which would block the release forever.
 
 ```bash
 curl -sI https://demo.your-domain.com | head -3          # 200, valid certificate
-curl -s  https://demo.your-domain.com/api/stats | jq .   # which pod answered
+curl -s  https://demo.your-domain.com/stats | jq .       # which pod answered
 curl -s -o /dev/null -w '%{http_code}\n' \
-     https://demo.your-domain.com/api/metrics            # 404 — scrape port is not public
+     https://demo.your-domain.com/metrics                # 404 — scrape port is not public
 ```
 
 Then run the full check against the live release:
 
 ```bash
-NAMESPACE=k8s-lab RELEASE=app ./scripts/smoke-test.sh
+NAMESPACE=damga RELEASE=app ./scripts/smoke-test.sh
 ```
 
 Certificate issuance takes a minute or two on the first request:
 
 ```bash
-kubectl -n k8s-lab get certificate
-kubectl -n k8s-lab describe certificate k8s-lab-tls | tail -20
+kubectl -n damga get certificate
+kubectl -n damga describe certificate damga-tls | tail -20
 ```
 
 ---
 
 ## What a single node costs you
 
-Three replicas all land on the same machine. The pod ledger still fills with
-three lanes, so the demo works — but "pods spread across nodes" and the
-zero-downtime drain both need a second machine. Adding one is a single command:
+Three replicas all land on the same machine. Repeated requests to `/` still
+come back from different pods and every response names the one that answered,
+so the demo works — but "pods spread across nodes" and the zero-downtime drain
+both need a second machine. Adding one is a single command:
 
 ```bash
 # on the server: print the join token
@@ -228,8 +236,8 @@ second node appears. No redeploy.
 ## Teardown
 
 ```bash
-helm uninstall app -n k8s-lab
-kubectl delete namespace k8s-lab
+helm uninstall app -n damga
+kubectl delete namespace damga
 # on the server
 /usr/local/bin/k3s-uninstall.sh
 ```
@@ -240,9 +248,9 @@ kubectl delete namespace k8s-lab
 
 Coolify runs Docker, not Kubernetes. The application itself would deploy there
 happily — and TLS and the deploy pipeline would be easier. What would not
-survive: multiple replicas behind one Service, the pod ledger that makes the
-demo worth opening, autoscaling, network policies, disruption budgets and the
-Prometheus integration. Roughly everything this project exists to show.
+survive: multiple replicas behind one Service, autoscaling, network policies,
+disruption budgets and the Prometheus integration. Roughly everything this
+project exists to show.
 
-Docker Swarm mode with `deploy.replicas: 3` would restore the ledger, at the
-cost of everything else on that list.
+Docker Swarm mode with `deploy.replicas: 3` would restore multi-replica
+routing, at the cost of everything else on that list.

@@ -11,7 +11,7 @@ variable "kube_context" {
     is the point of keeping cluster creation out of here.
   EOT
   type        = string
-  default     = "kind-k8s-lab"
+  default     = "kind-damga"
 }
 
 variable "ingress_nginx_version" {

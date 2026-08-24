@@ -129,7 +129,7 @@ function createApp({ config, logger, metrics, db, redis = null }) {
     // Never expose credentials, and never expose internal addresses either.
     // The database hostname is not a secret, but it is a free piece of the
     // cluster's map for anyone probing from outside, and nothing needs it —
-    // the interface reads /stats, not this.
+    // callers read /stats, not this.
     res.json({
       env: config.env,
       logLevel: config.logLevel,
@@ -191,7 +191,7 @@ function createApp({ config, logger, metrics, db, redis = null }) {
     }
   });
 
-  // Curated read-only summary for the UI. The raw /metrics endpoint stays
+  // Curated read-only summary for callers. The raw /metrics endpoint stays
   // internal — Prometheus scrapes it, the public ingress does not route to it.
   app.get('/stats', limited(readLimiter, limits.readsPerMinute), async (req, res) => {
     let notes = null;
@@ -199,8 +199,9 @@ function createApp({ config, logger, metrics, db, redis = null }) {
     let cached = false;
     if (db) {
       try {
-        // The interface polls this every few seconds and the burst button hits
-        // it sixty times, so the count is read far more often than it changes.
+        // /stats is the polled endpoint: callers ask for it repeatedly and the
+        // rate-limit checks fire it in bursts, so the count is read far more
+        // often than it changes.
         // Short TTL, invalidated on every write, scoped to the caller —
         // /stats must not leak how much other people have stored.
         const key = statsCacheKey(req.visitorId);

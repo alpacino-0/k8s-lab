@@ -2,7 +2,7 @@
 
 const client = require('prom-client');
 
-function createMetrics({ appName = 'k8s-lab-app' } = {}) {
+function createMetrics({ appName = 'damga-app' } = {}) {
   const registry = new client.Registry();
   registry.setDefaultLabels({ app: appName });
   client.collectDefaultMetrics({ register: registry });

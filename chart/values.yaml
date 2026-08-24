@@ -3,7 +3,7 @@
 replicaCount: 3
 
 image:
-  repository: k8s-lab-app
+  repository: damga-app
   tag: ""              # defaults to .Chart.AppVersion
   # A digest wins over the tag when set, and is what a GitOps deployment should
   # carry: admission rewrites a verified tag to its digest anyway, so a tag here
@@ -69,28 +69,6 @@ service:
   type: ClusterIP
   port: 80
 
-# The browser interface. A separate image, Deployment and Service: it scales,
-# fails and is released independently of the API, which is the point of running
-# two services rather than serving static files from the API container.
-web:
-  enabled: true
-  replicaCount: 2
-  image:
-    repository: k8s-lab-web
-    tag: ""              # defaults to .Chart.AppVersion
-    digest: ""           # wins over tag; see image.digest above
-    pullPolicy: IfNotPresent
-  resources:
-    requests:
-      cpu: 10m
-      memory: 24Mi
-    limits:
-      cpu: 100m
-      memory: 96Mi
-  podDisruptionBudget:
-    enabled: true
-    minAvailable: 1
-
 # Shared counters across replicas, plus a short read cache.
 #
 # The in-process limiter counts per pod, so a client spread over N replicas got
@@ -141,9 +119,9 @@ ingress:
     connections: 20
   tls:
     enabled: false
-    secretName: k8s-lab-app-tls
+    secretName: damga-app-tls
     # Name of a cert-manager ClusterIssuer. When set, the chart creates a
-    # Certificate that both Ingress objects consume. Leave empty to supply the
+    # Certificate that the Ingress consumes. Leave empty to supply the
     # secret yourself.
     clusterIssuer: ""
     # Let's Encrypt issues for 90 days and cert-manager renews at two thirds of

@@ -1,12 +1,13 @@
 # Platform, as code
 
 Terraform manages what a cluster needs before this project's chart can be
-installed into it: the ingress controller, cert-manager, Argo CD, the admission
-policies and the namespace they apply to.
+installed into it: the ingress controller, cert-manager, Argo CD, Kyverno (for
+image signature verification only — `install_kyverno`, on by default), the
+admission policies and the namespace they apply to.
 
 ```bash
 terraform init
-terraform apply -var kube_context=kind-k8s-lab
+terraform apply -var kube_context=kind-damga
 ```
 
 `make up` runs this — it is the installation path, not a second one.
@@ -18,13 +19,13 @@ k3s remotely. Keeping it out means the only thing that changes between the two
 is `kube_context`, and it keeps a community-maintained `kind` provider out of
 the dependency list of a repository meant to be read as an example.
 
-**cert-manager `ClusterIssuer`s and the Argo CD `Application`.** Both are custom
-resources whose CRDs are installed by a release in this configuration.
-`kubernetes_manifest` resolves a resource's schema at plan time, so it cannot
-plan against a CRD that does not exist yet — the standard chicken-and-egg of
-Terraform against Kubernetes. They are plain YAML applied after this runs. The
-admission policies do not have the problem: `ValidatingAdmissionPolicy` is a
-built-in API, so there is no CRD to wait for.
+**cert-manager `ClusterIssuer`s, the Argo CD `Application` and the Kyverno
+`ClusterPolicy`.** All three are custom resources whose CRDs are installed by a
+release in this configuration. `kubernetes_manifest` resolves a resource's
+schema at plan time, so it cannot plan against a CRD that does not exist yet —
+the standard chicken-and-egg of Terraform against Kubernetes. They are plain
+YAML applied after this runs. The admission policies do not have the problem:
+`ValidatingAdmissionPolicy` is a built-in API, so there is no CRD to wait for.
 
 **The application release.** That belongs to Argo CD. Two controllers
 reconciling the same objects is how you get a fight.
@@ -38,7 +39,8 @@ again and fails on the name. Existing Helm releases import cleanly:
 terraform import helm_release.ingress_nginx ingress-nginx/ingress-nginx
 terraform import helm_release.cert_manager  cert-manager/cert-manager
 terraform import 'helm_release.argocd[0]'   argocd/argocd
-terraform import kubernetes_namespace.app   k8s-lab
+terraform import 'helm_release.kyverno[0]'  kyverno/kyverno
+terraform import kubernetes_namespace_v1.app damga
 terraform plan     # should report no changes
 ```
 
@@ -63,7 +65,7 @@ one wins by accident:
 terraform {
   backend "s3" {
     bucket       = "…"
-    key          = "k8s-lab/platform.tfstate"
+    key          = "damga/platform.tfstate"
     region       = "…"
     use_lockfile = true
   }

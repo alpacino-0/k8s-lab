@@ -1,34 +1,26 @@
 # Profile for a publicly reachable deployment.
 #
 # Differences from values-prod.yaml, which targets a local cluster:
-#   - images come from GHCR instead of being side-loaded into kind
+#   - the image comes from GHCR instead of being side-loaded into kind
 #   - TLS is on and cert-manager issues the certificate
 #   - the visitor cookie is marked Secure, which requires TLS
 #   - the database password comes from a secret created out of band
 #
 # Deploy with:
-#   kubectl -n k8s-lab create secret generic db-credentials \
+#   kubectl -n damga create secret generic db-credentials \
 #     --from-literal=POSTGRES_USER=labuser \
 #     --from-literal=POSTGRES_DB=labdb \
 #     --from-literal=POSTGRES_PASSWORD="$(openssl rand -base64 24)"
 #
-#   helm upgrade --install app ./chart -n k8s-lab --create-namespace \
+#   helm upgrade --install app ./chart -n damga --create-namespace \
 #     -f chart/values-public.yaml --set ingress.host=demo.your-domain.com
 #
-# The deployment runbook is kept outside this repository.
+# See docs/DEPLOY.md for the full runbook.
 
 image:
-  repository: ghcr.io/alpacino-0/k8s-lab
+  repository: ghcr.io/damgahq/damga
   tag: "1.0.0"
   pullPolicy: IfNotPresent
-
-web:
-  enabled: true
-  replicaCount: 2
-  image:
-    repository: ghcr.io/alpacino-0/k8s-lab-web
-    tag: "1.0.0"
-    pullPolicy: IfNotPresent
 
 config:
   APP_ENV: production
@@ -48,7 +40,7 @@ ingress:
   extraHosts: []
   tls:
     enabled: true
-    secretName: k8s-lab-tls
+    secretName: damga-tls
     clusterIssuer: letsencrypt-prod
   rateLimit:
     requestsPerSecond: 25

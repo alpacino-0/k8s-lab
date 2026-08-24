@@ -16,7 +16,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: k8s-lab-platform
+  name: damga-platform
   namespace: argocd
   # No resources-finalizer here, unlike the application Application.
   #
@@ -29,12 +29,12 @@ spec:
   project: default
 
   source:
-    repoURL: https://github.com/alpacino-0/k8s-lab.git
+    repoURL: https://github.com/damgahq/damga.git
     targetRevision: main
     path: operator/config/default
     kustomize:
       # The manifest in git carries kubebuilder's `controller:latest`
-      # placeholder, which k8s-lab-image-provenance rejects twice over — for
+      # placeholder, which damga-image-provenance rejects twice over — for
       # the :latest tag and for the unknown registry. That is the useful
       # behaviour: an override that goes missing fails at admission with a
       # message naming the reason, rather than deploying a placeholder.
@@ -52,8 +52,8 @@ spec:
       #
       # The obvious patch is an ignoreDifferences on the image field. It was
       # tried and it is worse: the field then has no guard at all. Kyverno only
-      # rejects unsigned images matching ghcr.io/alpacino-0/k8s-lab*, and a
-      # locally built `k8s-lab-operator:1.0.0` matches neither that pattern nor
+      # rejects unsigned images matching ghcr.io/damgahq/damga*, and a
+      # locally built `damga-operator:1.0.0` matches neither that pattern nor
       # anything image-provenance forbids. Measured on a live cluster: the image
       # was changed by hand, Argo CD reported Synced, and nothing moved it back.
       #
@@ -64,12 +64,17 @@ spec:
       #
       # The cost is that a release bumps this line. Argo CD Image Updater exists
       # to write it, and that is Phase 1's work.
+      #
+      # This digest was published under the previous namespace and does not
+      # exist under this one yet. The first push to main republishes the image,
+      # and this line has to be re-pinned to whatever that run produced —
+      # until then Argo CD cannot pull it.
       images:
-        - controller=ghcr.io/alpacino-0/k8s-lab-operator@sha256:173579293d9f17ceea3d042836afc4aca2b398840b1250d92f47093f574f03cf
+        - controller=ghcr.io/damgahq/damga-operator@sha256:173579293d9f17ceea3d042836afc4aca2b398840b1250d92f47093f574f03cf
 
   destination:
     server: https://kubernetes.default.svc
-    namespace: k8s-lab-platform-system
+    namespace: damga-platform-system
 
   syncPolicy:
     automated:
@@ -78,7 +83,7 @@ spec:
     syncOptions:
       # Deliberately no CreateNamespace. The Namespace is one of the manifests
       # this source renders, and it carries the Pod Security Admission labels
-      # and the k8s-lab.dev/policies label that subject the operator to the
+      # and the damga.co/policies label that subject the operator to the
       # rules it enforces on everyone else. A namespace conjured by Argo CD
       # would carry none of them and every policy would silently not apply —
       # the failure this whole change exists to close.

@@ -26,3 +26,6 @@ kubeconform
 # an excluded directory to find a negation.
 docs/*
 !docs/DEPLOY.md
+
+# Claude Code — local session config, never shared with the repo
+.claude/

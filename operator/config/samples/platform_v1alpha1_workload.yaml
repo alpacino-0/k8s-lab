@@ -1,8 +1,8 @@
-apiVersion: platform.k8s-lab.dev/v1alpha1
+apiVersion: platform.damga.co/v1alpha1
 kind: Workload
 metadata:
   labels:
-    app.kubernetes.io/name: k8s-lab-platform
+    app.kubernetes.io/name: damga-platform
     app.kubernetes.io/managed-by: kustomize
   name: workload-sample
 spec:

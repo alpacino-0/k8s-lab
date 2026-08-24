@@ -8,18 +8,18 @@ kind: Namespace
 metadata:
   labels:
     control-plane: controller-manager
-    app.kubernetes.io/name: k8s-lab-platform
+    app.kubernetes.io/name: damga-platform
     app.kubernetes.io/managed-by: kustomize
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
-    k8s-lab.dev/policies: enforced
+    damga.co/policies: enforced
     # Permits the token exemption its own pod claims. Both keys are
     # required: the pod asks, the namespace allows, and neither alone is
     # enough — so no workload can hand itself a credential by editing its
     # own manifest.
-    k8s-lab.dev/api-access: permitted
+    damga.co/api-access: permitted
   name: system
 ---
 apiVersion: apps/v1
@@ -29,13 +29,13 @@ metadata:
   namespace: system
   labels:
     control-plane: controller-manager
-    app.kubernetes.io/name: k8s-lab-platform
+    app.kubernetes.io/name: damga-platform
     app.kubernetes.io/managed-by: kustomize
 spec:
   selector:
     matchLabels:
       control-plane: controller-manager
-      app.kubernetes.io/name: k8s-lab-platform
+      app.kubernetes.io/name: damga-platform
   replicas: 1
   template:
     metadata:
@@ -43,14 +43,14 @@ spec:
         kubectl.kubernetes.io/default-container: manager
       labels:
         control-plane: controller-manager
-        app.kubernetes.io/name: k8s-lab-platform
+        app.kubernetes.io/name: damga-platform
         # A controller is the one workload that genuinely cannot run without a
-        # service-account token, and k8s-lab-workload-hygiene requires every
+        # service-account token, and damga-workload-hygiene requires every
         # pod to refuse one unless it says otherwise here. Declared rather than
         # assumed: the mount below is deliberate, and this label is what makes
-        # `kubectl get pods -l k8s-lab.dev/api-access` list every pod in the
+        # `kubectl get pods -l damga.co/api-access` list every pod in the
         # cluster holding a credential for the API server.
-        k8s-lab.dev/api-access: required
+        damga.co/api-access: required
     spec:
       automountServiceAccountToken: true
       # TODO(user): Uncomment the following code to configure the nodeAffinity expression

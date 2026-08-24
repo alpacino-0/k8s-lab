@@ -8,7 +8,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: k8s-lab
+  name: damga
   namespace: argocd
   finalizers:
     # Deleting the Application should take its resources with it rather than
@@ -18,7 +18,7 @@ spec:
   project: default
 
   source:
-    repoURL: https://github.com/alpacino-0/k8s-lab.git
+    repoURL: https://github.com/damgahq/damga.git
     targetRevision: main
     path: chart
     helm:
@@ -37,11 +37,16 @@ spec:
         #
         # 1.0.0 would not have helped even as a version: CI republishes that tag
         # on every push to main, so it means "whatever is there today" as surely
-        # as :latest does. It passes k8s-lab-image-provenance only because that
+        # as :latest does. It passes damga-image-provenance only because that
         # rule can test for the string ":latest" and cannot test for mutability.
         #
-        # A release moves these two lines. Argo CD Image Updater is what writes
-        # them, and that is Phase 1.
+        # A release moves this line. Argo CD Image Updater is what writes it,
+        # and that is Phase 1.
+        #
+        # This digest was published under the previous namespace and does not
+        # exist under this one yet. The first push to main republishes the
+        # image, and this line has to be re-pinned to whatever that run
+        # produced — until then Argo CD cannot sync this Application.
         image:
           digest: sha256:5b2411cd004596d06b1806380c4dbb4f60b2c4d8c7e4845289ea7c382adda3ca
         ingress:
@@ -56,10 +61,6 @@ spec:
           enabled: false
         podDisruptionBudget:
           enabled: false
-        web:
-          replicaCount: 1
-          image:
-            digest: sha256:39043776884399369355a769980d9284ee5196135fc2ca1907d5db960310912a
         postgres:
           persistence:
             size: 1Gi
@@ -71,7 +72,7 @@ spec:
 
   destination:
     server: https://kubernetes.default.svc
-    namespace: k8s-lab-gitops
+    namespace: damga-gitops
 
   # StatefulSet volumeClaimTemplates come back from the API server carrying
   # apiVersion, kind and a status block that no manifest can set. Without this
@@ -103,7 +104,7 @@ spec:
         pod-security.kubernetes.io/enforce: restricted
         pod-security.kubernetes.io/audit: restricted
         pod-security.kubernetes.io/warn: restricted
-        k8s-lab.dev/policies: enforced
+        damga.co/policies: enforced
     retry:
       limit: 5
       backoff:

@@ -3,8 +3,8 @@
 # Idempotent: safe to re-run.
 set -euo pipefail
 
-CLUSTER="${CLUSTER:-k8s-lab}"
-NAMESPACE="${NAMESPACE:-k8s-lab}"
+CLUSTER="${CLUSTER:-damga}"
+NAMESPACE="${NAMESPACE:-damga}"
 RELEASE="${RELEASE:-app}"
 IMAGE_TAG="${IMAGE_TAG:-1.0.0}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,17 +22,16 @@ else
   log "cluster '$CLUSTER' already exists"
 fi
 
-log "building images"
-docker build -q -t "k8s-lab-app:$IMAGE_TAG" "$ROOT/app" >/dev/null
-docker build -q -t "k8s-lab-web:$IMAGE_TAG" "$ROOT/web" >/dev/null
+log "building the image"
+docker build -q -t "damga-app:$IMAGE_TAG" "$ROOT/app" >/dev/null
 
-log "loading images into cluster nodes"
-kind load docker-image "k8s-lab-app:$IMAGE_TAG" "k8s-lab-web:$IMAGE_TAG" --name "$CLUSTER" >/dev/null
+log "loading the image into cluster nodes"
+kind load docker-image "damga-app:$IMAGE_TAG" --name "$CLUSTER" >/dev/null
 
-# The platform layer — ingress controller, cert-manager, Argo CD, the admission
-# policies and the namespace they apply to — is Terraform's. Installing the
-# same components from a shell script as well would be two sources of truth
-# disagreeing at the worst possible moment.
+# The platform layer — ingress controller, cert-manager, Argo CD, the Kyverno
+# engine, the admission policies and the namespace they apply to — is
+# Terraform's. Installing the same components from a shell script as well
+# would be two sources of truth disagreeing at the worst possible moment.
 log "applying the platform with terraform"
 terraform -chdir="$ROOT/terraform" init -input=false >/dev/null
 terraform -chdir="$ROOT/terraform" apply -input=false -auto-approve \
@@ -45,6 +44,27 @@ log "applying certificate issuers"
 kubectl apply -f "$ROOT/cluster/issuers.yaml"
 kubectl wait --for=condition=Ready clusterissuer/selfsigned-ca --timeout=180s
 
+# The signature rule belongs to the same category and had been left out of it.
+# Terraform installs the Kyverno engine and cannot install this, so a cluster
+# built by the documented path ran two Kyverno pods enforcing nothing at all —
+# the one capability the engine is here for, switched off by omission.
+#
+# Guarded rather than unconditional: install_kyverno can be turned off, and a
+# missing CRD should skip the rule, not fail the bootstrap.
+if kubectl get crd clusterpolicies.kyverno.io >/dev/null 2>&1; then
+  log "applying the image signature policy"
+  # helm --wait returns when the pods report Ready, which is earlier than the
+  # moment Kyverno's webhook accepts connections — and this policy travels
+  # through that webhook.
+  for attempt in $(seq 1 30); do
+    kubectl apply -f "$ROOT/policies/kyverno-image-signatures.yaml" && break
+    [ "$attempt" -eq 30 ] && { echo "kyverno webhook never became reachable" >&2; exit 1; }
+    sleep 2
+  done
+else
+  log "kyverno not installed — skipping the image signature policy"
+fi
+
 log "deploying release '$RELEASE' to namespace '$NAMESPACE'"
 # Deliberately no --wait: it also waits for the backup PVC, which stays Pending
 # under a WaitForFirstConsumer StorageClass until its first consumer runs.
@@ -52,15 +72,13 @@ log "deploying release '$RELEASE' to namespace '$NAMESPACE'"
 helm upgrade --install "$RELEASE" "$ROOT/chart" \
   --namespace "$NAMESPACE" --create-namespace \
   --set image.tag="$IMAGE_TAG" \
-  --set web.image.tag="$IMAGE_TAG" \
   --set postgres.auth.password="${PGPASSWORD:-local-dev-password}" \
   --set 'ingress.extraHosts[0]=localhost' \
   --timeout 10m "$@"
 
 log "waiting for workloads"
 kubectl -n "$NAMESPACE" rollout status "statefulset/${RELEASE}-postgres" --timeout=300s
-kubectl -n "$NAMESPACE" rollout status "deployment/${RELEASE}-k8s-lab-app" --timeout=300s
-kubectl -n "$NAMESPACE" rollout status "deployment/${RELEASE}-k8s-lab-app-web" --timeout=300s
+kubectl -n "$NAMESPACE" rollout status "deployment/${RELEASE}-damga-app" --timeout=300s
 
 log "done"
 kubectl -n "$NAMESPACE" get deploy,sts,svc,ingress,hpa

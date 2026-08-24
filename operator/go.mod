@@ -1,4 +1,4 @@
-module github.com/alpacino-0/k8s-lab/operator
+module github.com/damgahq/damga/operator
 
 go 1.26.0
 

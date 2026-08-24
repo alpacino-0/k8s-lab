@@ -150,7 +150,7 @@ test('the telemetry port serves nothing else', async () => {
 
 test('responses identify the replica that served them', async () => {
   await withServer(
-    { config: { pod: { name: 'app-abc', node: 'worker-2', ip: '10.0.0.9', namespace: 'k8s-lab' } },
+    { config: { pod: { name: 'app-abc', node: 'worker-2', ip: '10.0.0.9', namespace: 'damga' } },
       db: { countNotesFor: async () => 3 } },
     async (base) => {
       const body = await (await fetch(`${base}/stats`)).json();

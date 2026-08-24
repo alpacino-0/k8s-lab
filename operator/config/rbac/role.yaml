@@ -62,7 +62,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - platform.k8s-lab.dev
+  - platform.damga.co
   resources:
   - workloads
   verbs:
@@ -74,13 +74,13 @@ rules:
   - update
   - watch
 - apiGroups:
-  - platform.k8s-lab.dev
+  - platform.damga.co
   resources:
   - workloads/finalizers
   verbs:
   - update
 - apiGroups:
-  - platform.k8s-lab.dev
+  - platform.damga.co
   resources:
   - workloads/status
   verbs:

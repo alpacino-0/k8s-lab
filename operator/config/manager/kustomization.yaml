@@ -6,7 +6,7 @@ kind: Kustomization
 #
 # `make deploy` rewrites these two fields to whatever IMG names, which is
 # convenient locally and was committed by accident: git carried
-# `k8s-lab-operator:1.0.0`, an image that exists only on the machine that last
+# `damga-operator:1.0.0`, an image that exists only on the machine that last
 # ran the target. Argo CD renders these manifests straight out of git, so the
 # cluster would have pulled a name no registry serves.
 #

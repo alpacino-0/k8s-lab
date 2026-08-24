@@ -1,6 +1,6 @@
 apiVersion: v2
-name: k8s-lab-app
-description: Production-oriented Helm chart for the k8s-lab sample service and its PostgreSQL backend
+name: damga-app
+description: Production-oriented Helm chart for the Damga sample service and its PostgreSQL backend
 type: application
 version: 1.0.0
 appVersion: "1.0.0"
@@ -8,4 +8,4 @@ keywords: [kubernetes, nodejs, postgresql, observability]
 maintainers:
   - name: orhan
 sources:
-  - https://github.com/alpacino-0/k8s-lab
+  - https://github.com/damgahq/damga

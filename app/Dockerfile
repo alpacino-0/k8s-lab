@@ -14,9 +14,9 @@ RUN npm ci --omit=dev && npm cache clean --force
 # ---------- Stage 2: runtime ----------
 FROM node:${NODE_VERSION} AS runtime
 
-LABEL org.opencontainers.image.title="k8s-lab-app" \
+LABEL org.opencontainers.image.title="damga-app" \
       org.opencontainers.image.description="Sample service demonstrating production Kubernetes practices" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="AGPL-3.0-only"
 
 ENV NODE_ENV=production \
     NPM_CONFIG_UPDATE_NOTIFIER=false

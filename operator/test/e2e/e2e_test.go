@@ -2,19 +2,20 @@
 // +build e2e
 
 /*
-Copyright 2026.
+Copyright 2026 Orhan Yavuz.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-    http://www.apache.org/licenses/LICENSE-2.0
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
 package e2e
@@ -30,20 +31,20 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/alpacino-0/k8s-lab/operator/test/utils"
+	"github.com/damgahq/damga/operator/test/utils"
 )
 
 // namespace where the project is deployed in
-const namespace = "k8s-lab-platform-system"
+const namespace = "damga-platform-system"
 
 // serviceAccountName created for the project
-const serviceAccountName = "k8s-lab-platform-controller-manager"
+const serviceAccountName = "damga-platform-controller-manager"
 
 // metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "k8s-lab-platform-controller-manager-metrics-service"
+const metricsServiceName = "damga-platform-controller-manager-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
-const metricsRoleBindingName = "k8s-lab-platform-metrics-binding"
+const metricsRoleBindingName = "damga-platform-metrics-binding"
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
@@ -176,7 +177,7 @@ var _ = Describe("Manager", Ordered, func() {
 		It("should ensure the metrics endpoint is serving metrics", func() {
 			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
 			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
-				"--clusterrole=k8s-lab-platform-metrics-reader",
+				"--clusterrole=damga-platform-metrics-reader",
 				fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
 			)
 			_, err := utils.Run(cmd)

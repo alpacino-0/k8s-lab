@@ -28,7 +28,7 @@ metadata:
   namespace: cert-manager      # where cert-manager looks for CA issuer secrets
 spec:
   isCA: true
-  commonName: k8s-lab local CA
+  commonName: damga local CA
   secretName: local-ca-key-pair
   duration: 8760h              # a year; it never leaves the cluster
   privateKey:

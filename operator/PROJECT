@@ -3,19 +3,19 @@
 # and allow the plugins properly work.
 # More info: https://book.kubebuilder.io/reference/project-config.html
 cliVersion: 4.15.0
-domain: k8s-lab.dev
+domain: damga.co
 layout:
 - go.kubebuilder.io/v4
-projectName: k8s-lab-platform
-repo: github.com/alpacino-0/k8s-lab/operator
+projectName: damga-platform
+repo: github.com/damgahq/damga/operator
 resources:
 - api:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: k8s-lab.dev
+  domain: damga.co
   group: platform
   kind: Workload
-  path: github.com/alpacino-0/k8s-lab/operator/api/v1alpha1
+  path: github.com/damgahq/damga/operator/api/v1alpha1
   version: v1alpha1
 version: "3"
