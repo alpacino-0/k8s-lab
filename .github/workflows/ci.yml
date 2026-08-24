@@ -217,6 +217,7 @@ jobs:
         run: |
           kubectl apply -f policies/namespace.yaml
           kubectl apply -f policies/admission-policies.yaml -f policies/admission-bindings.yaml
+          kubectl apply -f policies/tenant-quota.yaml
 
       # The zero-downtime check below measures through the ingress controller,
       # the same path a real user takes. `kubectl port-forward` is bound to one
@@ -727,6 +728,7 @@ jobs:
         run: |
           kubectl apply -f policies/namespace.yaml
           kubectl apply -f policies/admission-policies.yaml -f policies/admission-bindings.yaml
+          kubectl apply -f policies/tenant-quota.yaml
 
       - name: Install Kyverno
         run: |

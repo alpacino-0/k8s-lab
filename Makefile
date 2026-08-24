@@ -48,6 +48,7 @@ smoke: ## Run the end-to-end smoke test against the deployed release
 policies: ## Apply Pod Security Admission labels and the admission policies
 	kubectl apply -f policies/namespace.yaml
 	kubectl apply -f policies/admission-policies.yaml -f policies/admission-bindings.yaml
+	kubectl apply -f policies/tenant-quota.yaml
 
 policy-test: ## Prove each policy rejects what it is supposed to
 	NAMESPACE=$(NAMESPACE) ./scripts/policy-test.sh

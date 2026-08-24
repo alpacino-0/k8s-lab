@@ -16,7 +16,13 @@ WORK=$(mktemp -d)
 # installed, so the one namespace that carries the label does not exist yet,
 # and a case that silently skips is a case that never ran.
 PERMIT_NS="${PERMIT_NS:-policy-probe-permitted}"
-trap 'rm -rf "$WORK"; kubectl delete namespace "$PERMIT_NS" --ignore-not-found --wait=false >/dev/null 2>&1' EXIT
+# A namespace with the policy label and no ResourceQuota. Two cases below submit
+# a pod carrying no resources at all, and in a tenant namespace the quota rejects
+# that before the rule under test ever sees it — measured: with requests.cpu in
+# the quota the API server answers "exceeded quota: requested: requests.cpu=2"
+# for a pod that requested nothing. The rule would look proven and would not be.
+BOUNDS_NS="${BOUNDS_NS:-policy-probe-bounds}"
+trap 'rm -rf "$WORK"; kubectl delete namespace "$PERMIT_NS" "$BOUNDS_NS" --ignore-not-found --wait=false >/dev/null 2>&1' EXIT
 
 pass() { printf '  \033[0;32mPASS\033[0m  %s\n' "$1"; }
 fail() { printf '  \033[0;31mFAIL\033[0m  %s\n' "$1"; FAILED=1; }
@@ -71,13 +77,33 @@ spec:
         readOnlyRootFilesystem: ${readonly_fs}
         capabilities: { drop: ["ALL"] }
 EOF
-    if [[ "$resources" == "full" ]]; then
-      cat <<'EOF'
+    case "$resources" in
+      full)
+        cat <<'EOF'
       resources:
         requests: { cpu: 10m, memory: 16Mi }
         limits: { memory: 32Mi }
 EOF
-    fi
+        ;;
+      # Above the per-container ceiling, and well inside the namespace quota, so
+      # the rejection can only come from the ceiling rule.
+      ceiling)
+        cat <<'EOF'
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { memory: 4Gi }
+EOF
+        ;;
+      # Past the namespace quota on its own, whatever else is running, and under
+      # the ceiling so that rule stays out of it.
+      oversized)
+        cat <<'EOF'
+      resources:
+        requests: { cpu: "3", memory: 16Mi }
+        limits: { memory: 32Mi }
+EOF
+        ;;
+    esac
     cat <<'EOF'
       readinessProbe: { httpGet: { path: /healthz, port: 3000 } }
       livenessProbe: { httpGet: { path: /healthz, port: 3000 } }
@@ -130,18 +156,34 @@ EOF
 
 echo "admission policy checks in namespace '$NAMESPACE'"
 
+kubectl create namespace "$BOUNDS_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl label namespace "$BOUNDS_NS" --overwrite >/dev/null \
+  damga.co/policies=enforced
+
+# The two resourceless cases, where no quota can answer first.
+TARGET_NS="$BOUNDS_NS"
 if wait_for_enforcement; then
   pass "policies are being enforced"
 else
   fail "policies never took effect — every check below would be meaningless"
   echo; echo "some policy checks failed"; exit 1
 fi
+write_pod "$IMAGE" true none;          must_reject "a pod without resource bounds is rejected" "requests and a memory limit"
+unset TARGET_NS
 
 write_pod;                             must_admit  "a compliant pod is admitted"
-write_pod "$IMAGE" true none;          must_reject "a pod without resource bounds is rejected" "requests and a memory limit"
 write_pod "alpine:latest";             must_reject "a :latest image is rejected" "explicit version"
 write_pod "quay.io/someone/thing:1.0"; must_reject "an unknown registry is rejected" "must come from"
 write_pod "$IMAGE" false;              must_reject "a writable root filesystem is rejected" "read-only root filesystem"
+write_pod "$IMAGE" true ceiling;       must_reject "a container above the memory ceiling is rejected" "memory limit above 2Gi"
+
+# The namespace fence. Skipped rather than silently passed where no quota is
+# applied, because a green run without one proves nothing about it.
+if kubectl -n "$NAMESPACE" get resourcequota damga-tenant >/dev/null 2>&1; then
+  write_pod "$IMAGE" true oversized;   must_reject "a pod beyond the namespace quota is rejected" "exceeded quota"
+else
+  echo "  ....  skipping the quota case: no ResourceQuota named damga-tenant in $NAMESPACE"
+fi
 
 # The service-account token rule, and the one exception to it.
 #

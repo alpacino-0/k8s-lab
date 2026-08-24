@@ -22,6 +22,7 @@ covers what PSA has no opinion about, in CEL evaluated inside the API server:
 | Read-only root filesystem | PSA `restricted` does not require it, and every workload here manages without a writable root — PostgreSQL included |
 | `automountServiceAccountToken: false` | A token in a pod that never calls the API is a credential waiting to be stolen |
 | Readiness and liveness probes | Except for run-once jobs, which have nothing to probe |
+| No memory limit above 2Gi | One container asking for more than a small node can give is how a namespace stops scheduling at all. A `LimitRange` is the usual way to say this and cannot be used here — see below |
 
 ## Why the built-in engine carries almost every rule
 
@@ -59,15 +60,34 @@ make policies      # label the namespace, apply the policies and bindings
 make policy-test   # prove each rule rejects what it is supposed to
 ```
 
+**ResourceQuota** (`tenant-quota.yaml`) is the other half of the fence: a
+ceiling on what the namespace may take in total, so one tenant cannot starve the
+rest. There is deliberately no `LimitRange` beside it. Measured on this cluster,
+a `LimitRange` carrying only `max` injects that max as the default request and
+limit, so a pod that arrives with no resources at all is silently given 2Gi
+instead of being rejected — and the first rule in the table above could never
+fire again. The per-container ceiling is a rule instead, because a rule rejects
+without injecting anything.
+
+The quota has no `limits.cpu` for a related reason: with it, the API server
+rejects every pod that does not set a CPU limit, and the operator sets none on
+purpose. One line would have made every Workload it renders unschedulable.
+
+A quota on `requests.*` does answer before the rule that requires them, with its
+own message. That is fine for a tenant — both messages are clear — but it means
+the proof of that rule has to run somewhere without a quota, and `policy-test.sh`
+creates a namespace for exactly that.
+
 The fourth file here, `kyverno-image-signatures.yaml`, is not in that first
 command — `make platform` applies it. The `ClusterPolicy` CRD does not exist
 until Terraform has installed Kyverno, so `make policies` cannot apply the rule
 on a cluster that has no engine yet, the same reason the cert-manager issuers
 sit outside Terraform.
 
-`policy-test.sh` submits eleven cases unconditionally: two compliant manifests
-that must be admitted, and nine broken ones that must each be rejected with a
-specific message. A rule that rejects everything is as broken as one that
+`policy-test.sh` submits twelve cases unconditionally: two compliant manifests
+that must be admitted, and ten broken ones that must each be rejected with a
+specific message. A thirteenth runs wherever a `damga-tenant` ResourceQuota is
+applied, and is skipped with a note where it is not. A rule that rejects everything is as broken as one that
 rejects nothing, which is why the compliant cases are in there.
 
 Two more run only when the signature policy is on the cluster — a signed image

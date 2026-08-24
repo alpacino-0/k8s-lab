@@ -47,6 +47,26 @@ spec:
         Without requests the scheduler is guessing and the autoscaler cannot
         work; without a memory limit one container can take down its node.
       reason: Invalid
+    # The per-container ceiling. A LimitRange is the usual way to express this
+    # and cannot be used here: measured on this cluster, a LimitRange carrying
+    # only `max` injects that max as the default request and limit, so a pod
+    # that arrives with no resources at all is silently given 2Gi instead of
+    # being rejected — and the rule above could never fire again. A rule that
+    # only rejects has no such side effect.
+    #
+    # Guarded, because the rule above owns the "no limit at all" case: reading
+    # a missing field would fail evaluation here first, and the author would
+    # get this message instead of the one that names what is missing.
+    - expression: >-
+        variables.containers.all(c,
+          !has(c.resources) || !has(c.resources.limits)
+          || !('memory' in c.resources.limits)
+          || !quantity(c.resources.limits.memory).isGreaterThan(quantity('2Gi')))
+      message: >-
+        No container may set a memory limit above 2Gi. One container asking for
+        more than a small node can give is how a namespace stops scheduling
+        anything at all.
+      reason: Invalid
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy

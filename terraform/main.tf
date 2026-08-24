@@ -149,6 +149,22 @@ resource "kubernetes_manifest" "admission_bindings" {
   depends_on = [kubernetes_manifest.admission_policies]
 }
 
+# The tenant fence. Applied from the same file `make policies` uses, so the two
+# entry points cannot drift. It has to come after the namespace exists, and it
+# is deliberately not a kubernetes_resource_quota_v1: keeping it as YAML means
+# one definition, reviewed in one place, whichever path applied it.
+resource "kubernetes_manifest" "tenant_quota" {
+  for_each = {
+    for doc in provider::kubernetes::manifest_decode_multi(
+      file("${path.module}/../policies/tenant-quota.yaml")
+    ) : doc.metadata.name => doc
+  }
+
+  manifest = each.value
+
+  depends_on = [kubernetes_namespace_v1.app]
+}
+
 resource "kubernetes_namespace_v1" "app" {
   metadata {
     name = "damga"

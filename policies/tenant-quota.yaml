@@ -1,0 +1,41 @@
+# The fence multi-tenancy needs: a ceiling on what one namespace may take in
+# total. Without it one tenant starves the rest and the platform has no answer.
+#
+# The per-container half of the fence is not here. A LimitRange is the usual way
+# to express it and cannot be used: measured on this cluster, a LimitRange
+# carrying only `max` injects that max as the default request and limit, so a pod
+# that arrives with no resources is silently given them instead of being
+# rejected. The ceiling is a rule in admission-policies.yaml instead, which
+# rejects without injecting anything.
+#
+# Sized against what this namespace actually uses. Measured 2026-08-25 with
+# everything running: 410m CPU requested, 536Mi memory requested, 2016Mi of
+# memory limits, 6 pods, 2 volume claims. The headroom covers the app
+# autoscaling to its maximum of 10, the surge replicas a rolling upgrade adds,
+# and the backup, verification and retention jobs running at once.
+#
+# Deliberately absent: limits.cpu. Measured — with it here the API server rejects
+# every pod that does not set a CPU limit:
+#
+#   pods "x" is forbidden: failed quota: must specify limits.cpu for: c
+#
+# The operator sets no CPU limit on purpose, because throttling a container is
+# better than the latency cliff a limit produces. One line here would have made
+# every Workload it renders unschedulable.
+#
+# A quota on requests.* also fires before the rule in admission-policies.yaml
+# that requires them, with its own message. That is fine for a tenant — both
+# messages are clear — but it means the proof of that rule has to run somewhere
+# without a quota. scripts/policy-test.sh does exactly that.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: damga-tenant
+  namespace: damga
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: 3Gi
+    limits.memory: 10Gi
+    pods: "30"
+    count/persistentvolumeclaims: "4"
