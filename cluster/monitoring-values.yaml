@@ -1,0 +1,49 @@
+# kube-prometheus-stack, with Alertmanager on.
+#
+# The rules in chart/templates/prometheusrule.yaml were written and tested by
+# making them fire, and then had nowhere to go. What Alertmanager adds here is
+# not delivery: the receiver is null on purpose, because where an alert should
+# land — a pager, a channel, an inbox — is a property of whoever runs the
+# cluster and not something this repository can guess. Configuring a real one
+# would need credentials nobody cloning this has.
+#
+# What it does add is the decision nobody had made: how many times one event is
+# allowed to wake someone. Six rules, and a single outage lights four of them.
+# When the service vanishes, TargetsMissing goes critical while InstanceDown,
+# HighErrorRate and HighLatency all go warning — same failure, same job label,
+# four pages. The inhibition rule turns that into one.
+alertmanager:
+  enabled: true
+
+  config:
+    route:
+      # Grouped by job as well as alertname, so two applications failing at once
+      # stay two conversations rather than one confusing thread.
+      group_by: [alertname, job]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      receiver: "null"
+      routes:
+        # The stack's own heartbeat. It fires forever by design — it is how you
+        # know the alerting path itself is alive — so it must never page.
+        - matchers: ['alertname = "Watchdog"']
+          receiver: "null"
+
+    inhibit_rules:
+      # A critical alert silences the warnings describing the same failure from
+      # further downstream, matched on the job they share.
+      #
+      # NoReadyReplicas is deliberately not covered: it comes from
+      # kube-state-metrics and carries that job label, not the application's, so
+      # `equal` has nothing to match. Making it match would mean rewriting the
+      # rule to relabel, which trades a real signal for a tidier table.
+      - source_matchers: ['severity = "critical"']
+        target_matchers: ['severity = "warning"']
+        equal: [job]
+
+    receivers:
+      - name: "null"
+
+grafana:
+  adminPassword: admin

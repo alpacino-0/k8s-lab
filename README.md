@@ -112,6 +112,7 @@ variables the kubelet injects.
 | `make smoke` | End-to-end checks against the running deployment |
 | `make policies` | Apply the admission policies |
 | `make policy-test` | Prove each policy rejects what it is supposed to |
+| `make alert-test` | Break the service and prove the alert reaches Alertmanager |
 | `make operator-test` | The operator's unit and envtest suites |
 | `make operator-install` | Install the Workload CRD into the current cluster |
 | `make operator-deploy` | Build the operator, load it into kind and deploy it |
@@ -517,6 +518,7 @@ cluster/              cluster-scoped add-ons, kept out of the chart
   loki-values.yaml    single-binary Loki, filesystem storage, 72h retention
   alloy-values.yaml   the log collector, labelled to match the metrics
   argocd-values.yaml  Argo CD without Dex, notifications or ApplicationSets
+  monitoring-values.yaml  Alertmanager: one outage, one page, not four
   metrics-server-values.yaml  no --kubelet-insecure-tls; the certificates are real
   sealed-secrets-values.yaml  the controller that lets a secret live in git
 policies/             cluster policy, kept out of the chart on purpose
@@ -528,6 +530,7 @@ scripts/
   bootstrap.sh        idempotent cluster + ingress + policies + deploy
   approve-kubelet-certs.sh  so metrics-server has a certificate to verify
   seal-secret.sh      a Secret in, a SealedSecret out, kubeseal in a container
+  alert-test.sh       causes a real outage and waits for the alert to arrive
   policy-test.sh      15 checks that each rule rejects what it should
   smoke-test.sh       30 end-to-end checks including security posture and isolation
   teardown.sh         destroy the cluster
@@ -665,8 +668,11 @@ What is still missing:
   every `kubernetes.io/kubelet-serving` request it finds, which is right for a
   cluster it created seconds earlier and wrong anywhere else. A real cluster
   needs a policy for who may claim which address.
-- **Alertmanager is off.** The `PrometheusRule` exists and its expressions were
-  tested by making them fire; nothing is wired to deliver what they produce.
+- **Alerts have nowhere to land.** Alertmanager runs, groups and inhibits —
+  `make alert-test` breaks the service for real and proves the alert arrives,
+  and that a critical silences the warnings describing the same failure. The
+  receiver is `null`. Where an alert should go is a property of whoever runs the
+  cluster, and every real option needs a credential nobody cloning this has.
 - **One quota, hand-written.** The namespace has a ceiling and containers have
   one, but both are sized by hand for this namespace. Nothing derives them per
   tenant, because there is only one tenant.

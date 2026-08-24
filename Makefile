@@ -7,7 +7,7 @@ IMAGE       ?= damga-app
 IMAGE_TAG   ?= 1.0.0
 
 .DEFAULT_GOAL := help
-.PHONY: help test lint build up down deploy smoke policies policy-test operator-test operator-install operator-deploy seal platform platform-plan tls logs logging gitops monitoring port-forward clean
+.PHONY: help test lint build up down deploy smoke policies policy-test alert-test operator-test operator-install operator-deploy seal platform platform-plan tls logs logging gitops monitoring port-forward clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -60,8 +60,8 @@ monitoring: ## Install Prometheus + Grafana
 	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 	helm repo update
 	helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
-	  -n monitoring --create-namespace --set grafana.adminPassword=admin \
-	  --set alertmanager.enabled=false --wait --timeout 15m
+	  -n monitoring --create-namespace \
+	  -f cluster/monitoring-values.yaml --wait --timeout 15m
 
 port-forward: ## Open Grafana on http://localhost:3000 (admin/admin)
 	kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80
@@ -132,6 +132,9 @@ gitops: ## Install Argo CD and let it reconcile the release from git
 	@echo "  Watch it converge:  kubectl -n argocd get application -w"
 	@echo "  Then break it:      kubectl -n damga-gitops scale deploy/damga-damga-app --replicas=5"
 	@echo "  UI password:        kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+
+alert-test: ## Prove a firing rule reaches Alertmanager and that inhibition works
+	NAMESPACE=$(NAMESPACE) ./scripts/alert-test.sh
 
 seal: ## Seal a Secret manifest from stdin into a SealedSecret (NS=namespace)
 	@./scripts/seal-secret.sh $(NS)

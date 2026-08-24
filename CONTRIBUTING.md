@@ -68,6 +68,7 @@ make test        # unit and integration tests, no cluster needed
 make lint        # ESLint + helm lint + terraform fmt/validate
 make smoke       # end-to-end checks against the running deployment
 make policy-test # prove each admission rule rejects what it should
+make alert-test  # break the service and prove the alert reaches Alertmanager
 ```
 
 The operator has its own suite:

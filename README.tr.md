@@ -108,6 +108,7 @@ değişkenleri.
 | `make smoke` | Çalışan deployment'a karşı uçtan uca kontroller |
 | `make policies` | Kabul politikalarını uygular |
 | `make policy-test` | Her politikanın doğru şeyi reddettiğini kanıtlar |
+| `make alert-test` | Servisi gerçekten bozup alarmın Alertmanager'a ulaştığını kanıtlar |
 | `make operator-test` | Operator'ın birim ve envtest paketleri |
 | `make operator-install` | Workload CRD'sini mevcut cluster'a kurar |
 | `make operator-deploy` | Operator'ı derler, kind'a yükler ve dağıtır |
@@ -511,6 +512,7 @@ cluster/              cluster kapsamlı eklentiler, chart'ın dışında
   loki-values.yaml    tek-binary Loki, filesystem depolama, 72 saat saklama
   alloy-values.yaml   log toplayıcı, metriklerle aynı etiketlerle
   argocd-values.yaml  Dex, bildirim ve ApplicationSet olmadan Argo CD
+  monitoring-values.yaml  Alertmanager: bir kesinti, dört değil bir uyarı
   metrics-server-values.yaml  --kubelet-insecure-tls yok; sertifikalar gerçek
   sealed-secrets-values.yaml  bir sırrın git'te yaşamasını sağlayan controller
 policies/             cluster politikası, bilerek chart'ın dışında
@@ -522,6 +524,7 @@ scripts/
   bootstrap.sh        idempotent cluster + ingress + politikalar + deploy
   approve-kubelet-certs.sh  metrics-server'ın doğrulayacağı sertifika için
   seal-secret.sh      Secret girer, SealedSecret çıkar; kubeseal konteynerde
+  alert-test.sh       gerçek bir kesinti yaratıp alarmın gelmesini bekler
   policy-test.sh      her kuralın doğru şeyi reddettiğini kanıtlayan 15 kontrol
   smoke-test.sh       güvenlik duruşu ve izolasyon dahil 30 uçtan uca kontrol
   teardown.sh         cluster'ı siler
@@ -661,8 +664,12 @@ olanlar:
   `kubernetes.io/kubelet-serving` isteğini onaylıyor; saniyeler önce kendi
   kurduğu bir cluster için doğru, başka her yerde yanlış. Gerçek bir cluster'da
   hangi node'un hangi adresi iddia edebileceğine dair bir politika gerekir.
-- **Alertmanager kapalı.** `PrometheusRule` var ve ifadeleri gerçekten ateşlenerek
-  test edildi; ürettiklerini teslim edecek hiçbir şey bağlı değil.
+- **Alarmların ineceği bir yer yok.** Alertmanager çalışıyor, gruplama ve
+  inhibition yapıyor — `make alert-test` servisi gerçekten bozup alarmın
+  ulaştığını ve bir critical'ın aynı arızayı anlatan warning'leri susturduğunu
+  kanıtlıyor. Ama receiver `null`. Bir alarmın nereye gideceği cluster'ı
+  işletenin özelliğidir, ve gerçek her seçenek klonlayan kimsede olmayan bir
+  kimlik bilgisi ister.
 - **Tek kota, elle yazılmış.** Namespace'in de konteynerlerin de tavanı var, ama
   ikisi de bu namespace için elle boyutlandırıldı. Kiracı başına türeten bir şey
   yok, çünkü tek kiracı var.
