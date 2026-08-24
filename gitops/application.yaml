@@ -42,13 +42,8 @@ spec:
         #
         # A release moves this line. Argo CD Image Updater is what writes it,
         # and that is Phase 1.
-        #
-        # This digest was published under the previous namespace and does not
-        # exist under this one yet. The first push to main republishes the
-        # image, and this line has to be re-pinned to whatever that run
-        # produced — until then Argo CD cannot sync this Application.
         image:
-          digest: sha256:5b2411cd004596d06b1806380c4dbb4f60b2c4d8c7e4845289ea7c382adda3ca
+          digest: sha256:f8b41ad0b0d4ae565dc0abbeca841ec3d91d4c1325db26beb4fbb9296abadba0
         ingress:
           host: gitops.local
           tls:
