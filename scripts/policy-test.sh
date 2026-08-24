@@ -283,9 +283,11 @@ EOF
   signed_pod "${SIGNED_IMAGE:-ghcr.io/damgahq/damga:1.0.0}" sig-ok
   must_admit "an image signed by the pipeline is admitted"
 
-  # An image that exists but was published before signing was added. Testing
-  # with a tag that does not exist would prove nothing: the rejection would say
-  # "manifest unknown", which is a different failure wearing the same colour.
+  # An image that exists and was deliberately never signed. Testing with a tag
+  # that does not exist would prove nothing: the rejection would say "manifest
+  # unknown", which is a different failure wearing the same colour. It also has
+  # to match the policy's imageReferences, or Kyverno never looks at it and the
+  # pod is admitted.
   if [[ -n "${UNSIGNED_IMAGE:-}" ]]; then
     signed_pod "$UNSIGNED_IMAGE" sig-unsigned
     must_reject "an unsigned image is rejected" "no signatures found"

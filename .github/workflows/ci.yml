@@ -661,6 +661,32 @@ jobs:
             done
           done
 
+      # Deliberately never signed, and built after the signing step so it cannot
+      # be caught by it. policy-test.sh needs an image that exists, clears the
+      # registry allowlist and reaches the Kyverno rule, so that a rejection can
+      # only mean "no signatures found". A tag that was never pushed would be
+      # rejected too, with "manifest unknown" — a different failure wearing the
+      # same colour, which would prove nothing about the rule.
+      #
+      # Built rather than retagged from a published image on purpose: Kyverno
+      # verifies by digest, so an identical digest would carry that image's
+      # signature and be admitted.
+      #
+      # buildx is the builder here, and its default driver does not load what it
+      # builds into the local image store — so this pushes directly rather than
+      # building and then pushing something that would not be there. Provenance
+      # and SBOM are off on purpose: they would wrap the image in an index, and
+      # the point is the plainest possible artifact carrying no signature.
+      - name: Publish the unsigned fixture
+        run: |
+          mkdir -p "${RUNNER_TEMP}/fixture"
+          echo 'Deliberately unsigned. Exists so policy-test.sh can prove the signature rule rejects.' \
+            > "${RUNNER_TEMP}/fixture/fixture.txt"
+          printf 'FROM scratch\nCOPY fixture.txt /\nLABEL org.opencontainers.image.description="Deliberately unsigned. Exists so the signature policy test has something that must be rejected."\n' \
+            > "${RUNNER_TEMP}/fixture/Dockerfile"
+          docker buildx build --push --provenance=false --sbom=false \
+            -t "${IMAGE_NAME}:unsigned-fixture" "${RUNNER_TEMP}/fixture"
+
   # The signature rule, proved against the image this run just signed rather than
   # one published earlier. Kept out of e2e deliberately: publish needs e2e, so a
   # signature check inside e2e can only ever test the *previous* run's artifact —
@@ -730,20 +756,12 @@ jobs:
             sleep 2
           done
 
-      # The unsigned half of this check is skipped for now, and policy-test.sh
-      # says so on the run rather than passing quietly.
-      #
-      # UNSIGNED_IMAGE used to name a build published before signing existed. It
-      # lives under the pre-move namespace, which no longer clears the
-      # ghcr.io/damgahq allowlist in policies/admission-policies.yaml — so it is
-      # now rejected by the registry rule and never reaches the signature rule.
-      # It would still go red, but for the wrong reason, which proves nothing.
-      #
-      # Restoring it needs a fixture published under this org, deliberately never
-      # signed, named to match Kyverno's ghcr.io/damgahq/damga* references. The
-      # package has to be public: Kyverno fetches the manifest itself, and an
-      # auth failure is one more wrong reason to be rejected.
-      - name: A signed image is admitted
+      - name: A signed image is admitted, an unsigned one is not
         env:
           SIGNED_IMAGE: ghcr.io/${{ github.repository }}@${{ needs.publish.outputs.api_digest }}
+          # Published by the job above, after signing, and never signed. It shares
+          # the product's package so it inherits that package's visibility —
+          # Kyverno fetches the manifest itself with no credentials, and an auth
+          # failure would be one more wrong reason to be rejected.
+          UNSIGNED_IMAGE: ghcr.io/${{ github.repository }}:unsigned-fixture
         run: NAMESPACE=damga IMAGE="$SIGNED_IMAGE" ./scripts/policy-test.sh

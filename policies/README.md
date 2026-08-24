@@ -74,8 +74,14 @@ Two more run only when the signature policy is on the cluster — a signed image
 that must be admitted, an unsigned one that must be rejected. With no
 `verify-image-signatures` `ClusterPolicy` present the script skips that block
 entirely, so a green run on a cluster that never had `make platform` proves
-nothing about that rule. The unsigned half of it needs `UNSIGNED_IMAGE` set to
-an image that exists but was published before signing.
+nothing about that rule. The unsigned half needs `UNSIGNED_IMAGE` set to an
+image that exists, carries no signature, and still reaches this rule: it has to
+clear the registry allowlist in `admission-policies.yaml` and match the
+`ghcr.io/damgahq/damga*` references in `kyverno-image-signatures.yaml`. Miss
+either and the rejection comes from a different rule, which proves nothing. CI
+passes `ghcr.io/damgahq/damga:unsigned-fixture`, built and pushed by the publish
+job after the signing step and deliberately never signed, so both halves run
+there; locally the case is skipped unless you set the variable yourself.
 
 ## Rolling this out somewhere that already has workloads
 
