@@ -510,7 +510,7 @@ chart/                Helm chart — the single deployment path
 operator/             the Workload CRD and the controller that renders it
   api/v1alpha1/       the types — there is no field that disables hardening
   internal/controller/  the reconciler and the resources it renders
-terraform/            the platform layer: ingress, cert-manager, Argo CD, Kyverno, metrics-server, policies
+terraform/            the platform layer: ingress, cert-manager, Argo CD, Kyverno, metrics-server, sealed-secrets, policies
 gitops/               the Argo CD Applications: the release, and the operator
 cluster/              cluster-scoped add-ons, kept out of the chart
   issuers.yaml        a local CA, so the TLS path is exercised not assumed
@@ -518,6 +518,7 @@ cluster/              cluster-scoped add-ons, kept out of the chart
   alloy-values.yaml   the log collector, labelled to match the metrics
   argocd-values.yaml  Argo CD without Dex, notifications or ApplicationSets
   metrics-server-values.yaml  no --kubelet-insecure-tls; the certificates are real
+  sealed-secrets-values.yaml  the controller that lets a secret live in git
 policies/             cluster policy, kept out of the chart on purpose
   namespace.yaml      Pod Security Admission labels
   admission-*.yaml    ValidatingAdmissionPolicy rules and their bindings
@@ -526,6 +527,7 @@ policies/             cluster policy, kept out of the chart on purpose
 scripts/
   bootstrap.sh        idempotent cluster + ingress + policies + deploy
   approve-kubelet-certs.sh  so metrics-server has a certificate to verify
+  seal-secret.sh      a Secret in, a SealedSecret out, kubeseal in a container
   policy-test.sh      15 checks that each rule rejects what it should
   smoke-test.sh       30 end-to-end checks including security posture and isolation
   teardown.sh         destroy the cluster
@@ -647,10 +649,14 @@ This runs on a local kind cluster. TLS, admission enforcement and signature
 verification are real and exercised on every push — they are not on this list.
 What is still missing:
 
-- **Secrets are plain Kubernetes Secrets** — base64, not encryption. Production
-  needs external secret management and etcd encryption at rest. This is the one
-  broken link in an otherwise complete GitOps chain: everything else in the
-  cluster can be reconstructed from this repository, and secrets cannot.
+- **The sealing key is the secret now.** `SealedSecret` objects are safe to
+  commit, so the database password stopped being the one thing GitOps could not
+  describe — `make gitops` seals it rather than creating it by hand. What that
+  moved rather than removed is the key: the controller generates it, keeps it,
+  and is the only thing that can decrypt what it sealed. A cluster rebuilt from
+  this repository alone reads none of what an older one sealed. Back the key up
+  or plan to reseal. etcd encryption at rest is still absent, so the decrypted
+  Secret is base64 on disk like any other.
 - **PostgreSQL is a single replica** with no failover, and backups land on a PVC
   in the same cluster. They are verified — `gzip -t` and a size floor, on every
   install and nightly — but a backup that shares a failure domain with its

@@ -7,7 +7,7 @@ IMAGE       ?= damga-app
 IMAGE_TAG   ?= 1.0.0
 
 .DEFAULT_GOAL := help
-.PHONY: help test lint build up down deploy smoke policies policy-test operator-test operator-install operator-deploy platform platform-plan tls logs logging gitops monitoring port-forward clean
+.PHONY: help test lint build up down deploy smoke policies policy-test operator-test operator-install operator-deploy seal platform platform-plan tls logs logging gitops monitoring port-forward clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -116,16 +116,25 @@ gitops: ## Install Argo CD and let it reconcile the release from git
 	helm upgrade --install argocd argo/argo-cd -n argocd --create-namespace \
 	  -f cluster/argocd-values.yaml --wait --timeout 12m
 	kubectl create namespace damga-gitops --dry-run=client -o yaml | kubectl apply -f -
+	@# Sealed rather than applied directly. The demo's password is random and
+	@# disposable, so there is nothing here worth committing — but the path a real
+	@# deployment takes is the one exercised, not a shortcut around it.
 	kubectl -n damga-gitops create secret generic db-credentials \
 	  --from-literal=POSTGRES_USER=labuser --from-literal=POSTGRES_DB=labdb \
 	  --from-literal=POSTGRES_PASSWORD="$$(openssl rand -base64 24)" \
-	  --dry-run=client -o yaml | kubectl apply -f -
+	  --dry-run=client -o yaml \
+	  | ./scripts/seal-secret.sh damga-gitops \
+	  | kubectl apply -f -
+	kubectl -n damga-gitops wait --for=create secret/db-credentials --timeout=60s
 	kubectl apply -f gitops/application.yaml
 	kubectl apply -f gitops/operator.yaml
 	@echo ""
 	@echo "  Watch it converge:  kubectl -n argocd get application -w"
 	@echo "  Then break it:      kubectl -n damga-gitops scale deploy/damga-damga-app --replicas=5"
 	@echo "  UI password:        kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+
+seal: ## Seal a Secret manifest from stdin into a SealedSecret (NS=namespace)
+	@./scripts/seal-secret.sh $(NS)
 
 platform: ## Apply the platform layer with Terraform (ingress, cert-manager, Argo CD, policies)
 	terraform -chdir=terraform init -input=false

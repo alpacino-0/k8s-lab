@@ -72,6 +72,18 @@ variable "install_metrics_server" {
   default     = true
 }
 
+variable "sealed_secrets_version" {
+  description = "sealed-secrets chart version. The chart repository moved: bitnami-labs.github.io/sealed-secrets is gone, and the project now lives at github.com/bitnami/sealed-secrets."
+  type        = string
+  default     = "2.5.19"
+}
+
+variable "install_sealed_secrets" {
+  description = "Install the sealed-secrets controller, so a GitOps repository can carry its own secrets."
+  type        = bool
+  default     = true
+}
+
 variable "install_argocd" {
   description = "Install Argo CD. The Application itself is applied separately — see README."
   type        = bool

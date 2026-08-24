@@ -149,6 +149,31 @@ resource "kubernetes_manifest" "admission_bindings" {
   depends_on = [kubernetes_manifest.admission_policies]
 }
 
+# The one thing GitOps could not describe in git. Everything else the Argo CD
+# Application needs is a manifest; the database password was a `kubectl create
+# secret` run by hand beforehand, which meant a cluster rebuilt from the
+# repository alone came up incomplete.
+#
+# This does not remove that out-of-band secret so much as move it: what a
+# SealedSecret is encrypted against is a key this controller generates and keeps,
+# so nothing else can read it and a cluster rebuilt from scratch reads none of
+# what an older one sealed. The password stops being the thing you have to carry;
+# the key becomes it.
+resource "helm_release" "sealed_secrets" {
+  count = var.install_sealed_secrets ? 1 : 0
+
+  name             = "sealed-secrets"
+  repository       = "https://charts.bitnami.com/bitnami"
+  chart            = "sealed-secrets"
+  version          = var.sealed_secrets_version
+  namespace        = "sealed-secrets"
+  create_namespace = true
+  wait             = true
+  timeout          = 300
+
+  values = [file("${path.module}/../cluster/sealed-secrets-values.yaml")]
+}
+
 # The HorizontalPodAutoscaler reads metrics.k8s.io, and nothing registers that
 # API until this runs. Measured before it existed: the app's HPA reported
 # ScalingActive=False and had logged the same FailedGetResourceMetric 837 times

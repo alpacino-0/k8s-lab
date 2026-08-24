@@ -504,7 +504,7 @@ chart/                Helm chart — tek deploy yolu
 operator/             Workload CRD'si ve onu render eden controller
   api/v1alpha1/       tipler — sertleştirmeyi kapatan bir alan yok
   internal/controller/  reconciler ve ürettiği kaynaklar
-terraform/            platform katmanı: ingress, cert-manager, Argo CD, Kyverno, metrics-server, politikalar
+terraform/            platform katmanı: ingress, cert-manager, Argo CD, Kyverno, metrics-server, sealed-secrets, politikalar
 gitops/               Argo CD Application'ları: sürüm ve operator
 cluster/              cluster kapsamlı eklentiler, chart'ın dışında
   issuers.yaml        yerel CA — TLS yolu varsayılmıyor, çalıştırılıyor
@@ -512,6 +512,7 @@ cluster/              cluster kapsamlı eklentiler, chart'ın dışında
   alloy-values.yaml   log toplayıcı, metriklerle aynı etiketlerle
   argocd-values.yaml  Dex, bildirim ve ApplicationSet olmadan Argo CD
   metrics-server-values.yaml  --kubelet-insecure-tls yok; sertifikalar gerçek
+  sealed-secrets-values.yaml  bir sırrın git'te yaşamasını sağlayan controller
 policies/             cluster politikası, bilerek chart'ın dışında
   namespace.yaml      Pod Security Admission etiketleri
   admission-*.yaml    ValidatingAdmissionPolicy kuralları ve bağlamaları
@@ -520,6 +521,7 @@ policies/             cluster politikası, bilerek chart'ın dışında
 scripts/
   bootstrap.sh        idempotent cluster + ingress + politikalar + deploy
   approve-kubelet-certs.sh  metrics-server'ın doğrulayacağı sertifika için
+  seal-secret.sh      Secret girer, SealedSecret çıkar; kubeseal konteynerde
   policy-test.sh      her kuralın doğru şeyi reddettiğini kanıtlayan 15 kontrol
   smoke-test.sh       güvenlik duruşu ve izolasyon dahil 30 uçtan uca kontrol
   teardown.sh         cluster'ı siler
@@ -643,10 +645,14 @@ Bu proje yerel bir kind cluster'ında çalışır. TLS, admission zorlaması ve 
 doğrulaması gerçek ve her push'ta sınanıyor — onlar bu listede değil. Hâlâ eksik
 olanlar:
 
-- **Secret'lar düz Kubernetes Secret'ı** — base64, şifreleme değil. Üretimde harici
-  secret yönetimi ve etcd'de şifreleme gerekir. Bu, aksi halde eksiksiz olan
-  GitOps zincirindeki tek kopuk halka: cluster'daki diğer her şey bu depodan
-  yeniden üretilebilir, secret'lar üretilemez.
+- **Artık asıl sır, mühürleme anahtarı.** `SealedSecret` nesneleri commit
+  edilebilir, yani veritabanı parolası GitOps'un tarif edemediği tek şey olmaktan
+  çıktı — `make gitops` onu elle yaratmak yerine mühürlüyor. Ama bu, sorunu
+  kaldırmadı, **yerini değiştirdi**: anahtarı controller üretiyor, kendinde
+  tutuyor ve mühürlediğini çözebilen tek şey o. Yalnızca bu depodan yeniden
+  kurulan bir cluster, eskisinin mühürlediği hiçbir şeyi okuyamaz. Anahtarı
+  yedekle ya da yeniden mühürlemeyi göze al. etcd'de şifreleme hâlâ yok, yani
+  çözülmüş Secret diskte diğerleri gibi base64.
 - **PostgreSQL tek replika**, failover yok; yedekler aynı cluster'daki bir PVC'ye
   yazılıyor. Yedekler doğrulanıyor — her kurulumda ve her gece `gzip -t` ve bir
   boyut tabanı — ama kaynağıyla aynı arıza alanını paylaşan bir yedek, yedek
