@@ -53,8 +53,12 @@ So you can tell a gap from a deliberate design decision:
 
 - `policies/kyverno-image-signatures.yaml` runs at `validationFailureAction:
   Enforce`. An unsigned image is rejected by the API server, not merely flagged.
-- Every admission policy has a matching test in `scripts/policy-test.sh` proving
-  it rejects what it should and admits what it should.
+- Every `ValidatingAdmissionPolicy` and Pod Security Admission rule here has a
+  matching test in `scripts/policy-test.sh` proving it rejects what it should
+  and admits what it should. The Kyverno signature rule is covered on its admit
+  half only: proving the reject half needs an image published under this
+  organisation and deliberately left unsigned, and until one exists
+  `policy-test.sh` skips that case and says so on the run.
 
 A report showing that one of these can be bypassed is exactly what this project
 wants to receive.

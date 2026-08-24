@@ -24,6 +24,7 @@ lint: ## Lint JavaScript, the Helm chart and the Terraform
 	terraform -chdir=terraform validate
 	helm template ci chart -f chart/values-prod.yaml > /dev/null
 	helm template ci chart -f chart/values-dev.yaml  > /dev/null
+	helm template ci chart -f chart/values-public.yaml > /dev/null
 
 build: ## Build the container image
 	docker build -t $(IMAGE):$(IMAGE_TAG) ./app

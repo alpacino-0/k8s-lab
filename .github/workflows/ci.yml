@@ -59,7 +59,7 @@ jobs:
 
       - name: Render every values profile
         run: |
-          for f in chart/values.yaml chart/values-dev.yaml chart/values-prod.yaml; do
+          for f in chart/values.yaml chart/values-dev.yaml chart/values-prod.yaml chart/values-public.yaml; do
             echo "::group::$f"
             helm template ci chart -f "$f" --set postgres.auth.password=ci
             echo "::endgroup::"
@@ -673,6 +673,20 @@ jobs:
     needs: [publish]
     steps:
       - uses: actions/checkout@v7
+
+      # A package created by the first publish under a new organisation starts
+      # private, and Kyverno fetches the manifest and the signature itself with
+      # no credentials. Checked here because otherwise that failure arrives
+      # twenty minutes later wearing the costume of a signature failure.
+      - name: The signed image must be anonymously pullable
+        run: |
+          token=$(curl -fsSL "https://ghcr.io/token?scope=repository:${{ github.repository }}:pull&service=ghcr.io" | jq -r .token)
+          curl -fsSL -o /dev/null \
+            -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json' \
+            "https://ghcr.io/v2/${{ github.repository }}/manifests/${{ needs.publish.outputs.api_digest }}" \
+          || { echo "::error::the GHCR package is not public, so Kyverno cannot fetch the signature"; exit 1; }
+
       - uses: azure/setup-helm@v5
         with:
           version: v3.16.3

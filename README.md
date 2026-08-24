@@ -116,7 +116,7 @@ variables the kubelet injects.
 | npm removed from the runtime image | `app/Dockerfile` | eliminated **every** Node.js package CVE (see below) |
 | No secrets in git | `.gitignore` + chart values | password is a required chart value |
 | TLS, the redirect and the Secure cookie | cert-manager + explicit Certificate | verified on every push against a certificate a real CA issued |
-| Security settings are enforced, not just set | Pod Security Admission + ValidatingAdmissionPolicy | 13 policy tests: three compliant manifests admitted, ten broken ones each rejected |
+| Security settings are enforced, not just set | Pod Security Admission + ValidatingAdmissionPolicy | 12 policy tests: three compliant manifests admitted, nine broken ones each rejected |
 | Notes isolated per visitor | anonymous cookie, owner-scoped queries | a second visitor cannot read or delete the first one's notes |
 | Writes bounded | ingress `limit-rps` + a shared window + a note cap | oversized and over-quota writes are rejected |
 | Rate limits bind across replicas | Redis sliding window | 60 requests against a limit of 30: **29 allowed** shared, **60 allowed** per replica |
@@ -420,7 +420,7 @@ every push, three more on `main`:
 | `operator` | The Go suite, plus a check that the committed generated code matches what the types produce |
 | `e2e` | Creates a real kind cluster, applies the policies **before** the chart so the release has to satisfy them, runs the 11 policy checks that need no Kyverno and the 30-check smoke test, proves an upgrade drops zero requests, then deploys the operator and takes a `Workload` to Ready through admission |
 | `build` · `publish` | Builds each architecture natively, pushes to GHCR with SBOM and provenance attestation, signs with keyless cosign (main only) |
-| `supply-chain` | Installs Kyverno in a fresh cluster and proves the image this run signed is admitted while an unsigned one is rejected (main only) |
+| `supply-chain` | Installs Kyverno in a fresh cluster and proves the image this run signed is admitted. The rejection half is skipped until a deliberately unsigned fixture exists under this org — the reason is in `ci.yml` (main only) |
 
 ---
 
@@ -453,7 +453,7 @@ policies/             cluster policy, kept out of the chart on purpose
   kyverno-*.yaml      the image signature policy, applied by `make platform`
 scripts/
   bootstrap.sh        idempotent cluster + ingress + policies + deploy
-  policy-test.sh      13 checks that each rule rejects what it should
+  policy-test.sh      12 checks that each rule rejects what it should
   smoke-test.sh       30 end-to-end checks including security posture and isolation
   teardown.sh         destroy the cluster
 ```

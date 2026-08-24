@@ -114,7 +114,7 @@ değişkenleri.
 | npm runtime imajından çıkarıldı | `app/Dockerfile` | **tüm** Node.js paket CVE'lerini sıfırladı (aşağıda) |
 | Git'te secret yok | `.gitignore` + chart values | parola zorunlu bir chart değeri |
 | TLS, yönlendirme ve Secure çerez | cert-manager + açık Certificate | gerçek bir CA'nın verdiği sertifikayla her push'ta doğrulanır |
-| Güvenlik ayarları zorunlu, sadece yazılı değil | Pod Security Admission + ValidatingAdmissionPolicy | 13 politika testi: üç uyumlu manifest kabul, on bozuk manifest ayrı ayrı red |
+| Güvenlik ayarları zorunlu, sadece yazılı değil | Pod Security Admission + ValidatingAdmissionPolicy | 12 politika testi: üç uyumlu manifest kabul, dokuz bozuk manifest ayrı ayrı red |
 | Notlar ziyaretçi başına izole | anonim çerez, owner'a göre filtrelenmiş sorgular | ikinci bir ziyaretçi ilkinin notunu ne görür ne siler |
 | Yazma sınırlı | ingress `limit-rps` + paylaşımlı pencere + not tavanı | uzun ve kota aşan yazmalar reddedilir |
 | Limitler replikalar arası bağlayıcı | Redis kayan pencere | limit 30 iken 60 istek: paylaşımlı **29 geçti**, replika başına **60 geçti** |
@@ -418,7 +418,7 @@ push'ta, üçü yalnız `main`'de:
 | `operator` | Go test paketi, ve commit'lenmiş üretilmiş kodun tiplerden çıkanla aynı olduğunun denetimi |
 | `e2e` | Gerçek kind cluster kurar, politikaları **chart'tan önce** uygular (yani sürüm onlara uymak zorunda), Kyverno gerektirmeyen 11 politika kontrolünü ve 30 duman kontrolünü çalıştırır, bir upgrade'in **sıfır istek düşürdüğünü** kanıtlar, sonra operatörü kurup bir `Workload`'ı admission'dan geçirerek Ready'ye götürür |
 | `build` · `publish` | Her mimariyi kendi üstünde derler, SBOM ve provenance ile GHCR'a push eder, keyless cosign ile imzalar (yalnız main) |
-| `supply-chain` | Temiz bir cluster'a Kyverno kurar, bu koşunun imzaladığı imajın kabul, imzasızın red edildiğini kanıtlar (yalnız main) |
+| `supply-chain` | Temiz bir cluster'a Kyverno kurar, bu koşunun imzaladığı imajın kabul edildiğini kanıtlar. Red yarısı, bu org altında bilerek imzasız bir fixture yayımlanana kadar atlanıyor — gerekçesi `ci.yml`'da (yalnız main) |
 
 ---
 
@@ -451,7 +451,7 @@ policies/             cluster politikası, bilerek chart'ın dışında
   kyverno-*.yaml      imza politikası, `make platform` tarafından uygulanır
 scripts/
   bootstrap.sh        idempotent cluster + ingress + politikalar + deploy
-  policy-test.sh      her kuralın doğru şeyi reddettiğini kanıtlayan 13 kontrol
+  policy-test.sh      her kuralın doğru şeyi reddettiğini kanıtlayan 12 kontrol
   smoke-test.sh       güvenlik duruşu ve izolasyon dahil 30 uçtan uca kontrol
   teardown.sh         cluster'ı siler
 ```
