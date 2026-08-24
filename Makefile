@@ -137,6 +137,7 @@ platform: ## Apply the platform layer with Terraform (ingress, cert-manager, Arg
 	terraform -chdir=terraform init -input=false
 	terraform -chdir=terraform apply -input=false -var kube_context=kind-$(CLUSTER)
 	kubectl apply -f cluster/issuers.yaml
+	kubectl apply -f policies/kyverno-image-signatures.yaml
 
 platform-plan: ## Show what Terraform would change, without changing it
 	terraform -chdir=terraform init -input=false -backend=false
