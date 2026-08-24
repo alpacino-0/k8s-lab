@@ -5,11 +5,32 @@
 ![Kubernetes](https://img.shields.io/badge/kubernetes-1.36-326ce5?logo=kubernetes&logoColor=white)
 ![Helm](https://img.shields.io/badge/helm-3-0f1689?logo=helm&logoColor=white)
 
-A Node.js + PostgreSQL service, deployed to Kubernetes
-the way it would be run in production: non-root containers with a read-only root filesystem, default-deny
-network policies, a schema migration that runs once per release, verified
-nightly backups, autoscaling, disruption budgets, Prometheus metrics, and a CI
-pipeline that deploys to a real cluster on every push.
+**Damga is a Kubernetes application platform, built in the open.** *Damga* is
+Turkish for a seal — the mark that says a thing is genuine, and says who put it
+there. That is the whole idea: a deploy should be able to prove itself. Which
+commit, which signature, which policies passed, when the backup was last
+checked.
+
+**What is here today is the foundation, not the product.** A `Workload` custom
+resource and the operator that renders it into a Deployment, Service, Ingress,
+HorizontalPodAutoscaler, PodDisruptionBudget and NetworkPolicy — with no field
+that turns the hardening off, because none is defined. Admission policies the
+API server enforces, each with a test proving it rejects what it should. Images
+signed with keyless cosign and verified at admission rather than at build time.
+Nightly backups, checked for readability. The release reconciled from git by
+Argo CD.
+
+Running alongside it is a Node.js + PostgreSQL service: non-root containers on
+a read-only root filesystem, default-deny network policies, a schema migration
+that runs once per release, autoscaling, disruption budgets and Prometheus
+metrics. It is not the product. It is the tenant everything else is measured
+against, and it is what makes the numbers below real — zero-downtime upgrades,
+network isolation, rate limits that bind across replicas, all exercised on a
+real cluster on every push.
+
+**Not here yet:** a user interface, multi-tenancy, an installer, or any way to
+deploy an application without knowing Kubernetes. That is the product. This is
+what it gets built on.
 
 Every number in this README was measured on the cluster this repository builds.
 The bugs found along the way are written up where the mechanism they broke is

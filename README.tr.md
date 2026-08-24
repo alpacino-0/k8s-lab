@@ -5,11 +5,30 @@
 ![Kubernetes](https://img.shields.io/badge/kubernetes-1.36-326ce5?logo=kubernetes&logoColor=white)
 ![Helm](https://img.shields.io/badge/helm-3-0f1689?logo=helm&logoColor=white)
 
-Node.js + PostgreSQL servisinin Kubernetes'e **üretimde
-çalıştırılacağı gibi** kurulduğu proje: root olmayan konteynerler, salt-okunur dosya sistemi,
-varsayılan-reddet ağ politikaları, sürüm başına bir kez çalışan şema migration'ı,
-doğrulanmış gecelik yedekler, otomatik ölçekleme, kesinti bütçesi, Prometheus
-metrikleri ve her push'ta gerçek bir cluster'a deploy eden CI hattı.
+**Damga, açıkta inşa edilen bir Kubernetes uygulama platformudur.** Adı, bir
+şeyin gerçek olduğunu ve onu kimin koyduğunu söyleyen mühürden geliyor. Fikrin
+tamamı bu: bir deploy kendini kanıtlayabilmeli. Hangi commit, hangi imza, hangi
+politikalar geçti, yedek en son ne zaman kontrol edildi.
+
+**Bugün burada olan şey temel, ürün değil.** Bir `Workload` özel kaynağı ve onu
+Deployment, Service, Ingress, HorizontalPodAutoscaler, PodDisruptionBudget ve
+NetworkPolicy'ye dönüştüren operator — sertleştirmeyi kapatan bir alan yok,
+çünkü tanımlı değil. API sunucusunun zorladığı admission politikaları, her biri
+neyi reddetmesi gerektiğini kanıtlayan bir testle. Keyless cosign ile imzalanan
+ve derleme anında değil **admission'da** doğrulanan imajlar. Okunabilirliği
+kontrol edilen gecelik yedekler. Argo CD'nin git'ten uzlaştırdığı sürüm.
+
+Yanında çalışan bir Node.js + PostgreSQL servisi var: root olmayan konteynerler,
+salt-okunur dosya sistemi, varsayılan-reddet ağ politikaları, sürüm başına bir
+kez çalışan şema migration'ı, otomatik ölçekleme, kesinti bütçesi ve Prometheus
+metrikleri. Ürün o değil. O, geri kalan her şeyin üstünde ölçüldüğü kiracı — ve
+aşağıdaki sayıları gerçek kılan şey: sıfır kesintili upgrade, ağ izolasyonu,
+replikalar arası bağlayıcı rate limit, hepsi her push'ta gerçek bir cluster'da
+çalıştırılıyor.
+
+**Henüz burada olmayanlar:** arayüz, çok kiracılık, kurulum akışı, ya da
+Kubernetes bilmeden uygulama dağıtmanın herhangi bir yolu. Ürün o. Bu, onun
+üstüne inşa edileceği şey.
 
 Buradaki her sayı, bu deponun kurduğu cluster üzerinde **ölçülmüştür**. Yol
 boyunca bulunan hatalar, tek bir listede toplanmak yerine bozdukları mekanizmanın
