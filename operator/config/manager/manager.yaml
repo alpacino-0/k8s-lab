@@ -105,11 +105,16 @@ spec:
             port: 8081
           initialDelaySeconds: 5
           periodSeconds: 10
-        # TODO(user): Configure the resources accordingly based on the project requirements.
-        # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+        # No CPU limit, for the reason the Workload API states to everyone else:
+        # CPU is compressible, so a limit buys nothing that the request does not
+        # already guarantee and costs a latency cliff when the controller has a
+        # burst of work to do — which for a reconciler is exactly the moment it
+        # is furthest behind. Memory is not compressible, so it keeps its limit.
+        #
+        # The operator had shipped with `cpu: 500m` here, the scaffold's default,
+        # while its own CRD documentation argued against precisely that.
         resources:
           limits:
-            cpu: 500m
             memory: 128Mi
           requests:
             cpu: 10m
