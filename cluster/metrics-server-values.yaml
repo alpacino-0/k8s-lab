@@ -1,0 +1,19 @@
+# The HorizontalPodAutoscaler has no source of truth without this: it reads
+# metrics.k8s.io, and nothing registers that API until metrics-server runs.
+#
+# Deliberately not passing --kubelet-insecure-tls. It is what almost every kind
+# guide reaches for, and it would be the one place this repository turns
+# verification off. kind-config.yaml has the kubelets ask the cluster CA for a
+# serving certificate instead and bootstrap.sh approves the requests, so this
+# scrape is verified like any other TLS connection.
+#
+# The chart's default arguments already prefer InternalIP, which is the address
+# a kind node actually answers on, so there is nothing to override there.
+resources:
+  requests:
+    cpu: 25m
+    memory: 64Mi
+  # No CPU limit, for the same reason the operator sets none: throttling a
+  # container is worse than letting it finish.
+  limits:
+    memory: 192Mi

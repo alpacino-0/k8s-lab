@@ -60,6 +60,18 @@ variable "install_kyverno" {
   default     = true
 }
 
+variable "metrics_server_version" {
+  description = "metrics-server chart version. Without it the HorizontalPodAutoscaler has no metrics API to read and never scales."
+  type        = string
+  default     = "3.14.0"
+}
+
+variable "install_metrics_server" {
+  description = "Install metrics-server. Requires kubelet serving certificates the cluster CA signed — see kind-config.yaml."
+  type        = bool
+  default     = true
+}
+
 variable "install_argocd" {
   description = "Install Argo CD. The Application itself is applied separately — see README."
   type        = bool

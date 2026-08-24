@@ -81,7 +81,9 @@ flowchart TB
 
 ## Quick start
 
-Requires Docker, [kind](https://kind.sigs.k8s.io/), kubectl, Helm and Terraform.
+Requires Docker, [kind](https://kind.sigs.k8s.io/), kubectl, Helm, Terraform and jq.
+The operator targets below also need Go; the operator's own Makefile fetches
+controller-gen and kustomize itself.
 
 ```bash
 git clone https://github.com/damgahq/damga.git && cd damga
@@ -110,6 +112,9 @@ variables the kubelet injects.
 | `make smoke` | End-to-end checks against the running deployment |
 | `make policies` | Apply the admission policies |
 | `make policy-test` | Prove each policy rejects what it is supposed to |
+| `make operator-test` | The operator's unit and envtest suites |
+| `make operator-install` | Install the Workload CRD into the current cluster |
+| `make operator-deploy` | Build the operator, load it into kind and deploy it |
 | `make tls` | Install cert-manager and serve HTTPS from a local CA |
 | `make logging` | Install Loki and Alloy, and wire Loki into Grafana |
 | `make gitops` | Install Argo CD and let it reconcile the release from git |
@@ -117,6 +122,48 @@ variables the kubelet injects.
 | `make platform-plan` | Show what Terraform would change, without changing it |
 | `make monitoring` | Install Prometheus + Grafana |
 | `make down` | Delete the cluster |
+
+---
+
+## The Workload API
+
+The service above is deployed by the Helm chart — the long way, written out by
+hand. The product path is shorter. A `Workload` is the whole input:
+
+```yaml
+apiVersion: platform.damga.co/v1alpha1
+kind: Workload
+metadata:
+  name: notes
+  namespace: damga
+spec:
+  image: ghcr.io/damgahq/damga:1.0.0
+  port: 3000
+  replicas: 2
+```
+
+The operator renders that into a ServiceAccount, Deployment, Service,
+NetworkPolicy and PodDisruptionBudget, plus a HorizontalPodAutoscaler when
+`autoscale` is set and an Ingress when `domain` is. What it renders is not
+negotiable: UID 1000, a read-only root filesystem, every capability dropped, no
+service-account token, a default-deny NetworkPolicy that also blocks the cloud
+metadata range, and a rollout that never removes a replica before its
+replacement is ready.
+
+Those are not defaults. No field turns any of them off, because none is defined
+in the CRD.
+
+```bash
+make policies                              # the labelled namespace and the rules
+make operator-install                      # the CRD
+make operator-deploy                       # the controller
+kubectl apply -k operator/config/samples/  # a Workload
+kubectl -n damga wait --for=condition=Ready workload/workload-sample
+```
+
+The namespace matters. All three admission policies bind to
+`damga.co/policies: enforced`. A namespace without that label is not a namespace
+with weaker rules — it is one with no rules at all, and nothing says so.
 
 ---
 
@@ -463,13 +510,14 @@ chart/                Helm chart — the single deployment path
 operator/             the Workload CRD and the controller that renders it
   api/v1alpha1/       the types — there is no field that disables hardening
   internal/controller/  the reconciler and the resources it renders
-terraform/            the platform layer: ingress, cert-manager, Argo CD, Kyverno, policies
+terraform/            the platform layer: ingress, cert-manager, Argo CD, Kyverno, metrics-server, policies
 gitops/               the Argo CD Applications: the release, and the operator
 cluster/              cluster-scoped add-ons, kept out of the chart
   issuers.yaml        a local CA, so the TLS path is exercised not assumed
   loki-values.yaml    single-binary Loki, filesystem storage, 72h retention
   alloy-values.yaml   the log collector, labelled to match the metrics
   argocd-values.yaml  Argo CD without Dex, notifications or ApplicationSets
+  metrics-server-values.yaml  no --kubelet-insecure-tls; the certificates are real
 policies/             cluster policy, kept out of the chart on purpose
   namespace.yaml      Pod Security Admission labels
   admission-*.yaml    ValidatingAdmissionPolicy rules and their bindings
@@ -477,6 +525,7 @@ policies/             cluster policy, kept out of the chart on purpose
   kyverno-*.yaml      the image signature policy, applied by `make platform`
 scripts/
   bootstrap.sh        idempotent cluster + ingress + policies + deploy
+  approve-kubelet-certs.sh  so metrics-server has a certificate to verify
   policy-test.sh      15 checks that each rule rejects what it should
   smoke-test.sh       30 end-to-end checks including security posture and isolation
   teardown.sh         destroy the cluster
@@ -606,9 +655,10 @@ What is still missing:
   in the same cluster. They are verified — `gzip -t` and a size floor, on every
   install and nightly — but a backup that shares a failure domain with its
   source is not a backup. Real ones belong in object storage, off-cluster.
-- **metrics-server is not in the platform layer.** It was installed by hand, so
-  the autoscaling measured above survives this cluster but not a rebuild of it.
-  Everything else `make up` creates comes from Terraform.
+- **The kubelet certificates are approved by a script.** `bootstrap.sh` approves
+  every `kubernetes.io/kubelet-serving` request it finds, which is right for a
+  cluster it created seconds earlier and wrong anywhere else. A real cluster
+  needs a policy for who may claim which address.
 - **Alertmanager is off.** The `PrometheusRule` exists and its expressions were
   tested by making them fire; nothing is wired to deliver what they produce.
 - **One quota, hand-written.** The namespace has a ceiling and containers have

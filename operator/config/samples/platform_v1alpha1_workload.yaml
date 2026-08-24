@@ -1,3 +1,15 @@
+# The smallest Workload that reaches Ready with the admission policies active.
+#
+# The image is the published, signed one rather than a local build on purpose.
+# A locally built `damga-*` image is admitted by the registry allowlist in
+# policies/admission-policies.yaml on the strength of its name, and never
+# matches the Kyverno glob, so nothing verifies its signature. This reference
+# matches both, so both layers actually run.
+#
+# port is set because the API defaults to 8080 and this image listens on 3000.
+# No `domain`: the rendered Ingress asks for the letsencrypt-prod issuer, which
+# a local cluster does not have. No `autoscale`: the HPA it renders targets CPU,
+# and metrics-server is not part of the platform layer yet.
 apiVersion: platform.damga.co/v1alpha1
 kind: Workload
 metadata:
@@ -5,5 +17,8 @@ metadata:
     app.kubernetes.io/name: damga-platform
     app.kubernetes.io/managed-by: kustomize
   name: workload-sample
+  namespace: damga
 spec:
-  # TODO(user): Add fields here
+  image: ghcr.io/damgahq/damga:1.0.0
+  port: 3000
+  replicas: 2

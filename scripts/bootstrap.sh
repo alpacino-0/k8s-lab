@@ -11,7 +11,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 
-for tool in docker kind kubectl helm terraform; do
+for tool in docker kind kubectl helm terraform jq; do
   command -v "$tool" >/dev/null || { echo "missing required tool: $tool" >&2; exit 1; }
 done
 
@@ -21,6 +21,9 @@ if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
 else
   log "cluster '$CLUSTER' already exists"
 fi
+
+log "approving kubelet serving certificates"
+"$ROOT/scripts/approve-kubelet-certs.sh"
 
 log "building the image"
 docker build -q -t "damga-app:$IMAGE_TAG" "$ROOT/app" >/dev/null

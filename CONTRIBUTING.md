@@ -59,8 +59,8 @@ multi-cluster, and support with an SLA.
 ## Getting set up
 
 Requires Docker, [kind](https://kind.sigs.k8s.io/), kubectl, Helm, Terraform,
-Node.js 20+ and Go. `make up` applies the platform layer with Terraform, and the
-unit suite runs on Node.
+jq, Node.js 20+ and Go. `make up` applies the platform layer with Terraform and
+uses jq to approve the kubelet serving certificates; the unit suite runs on Node.
 
 ```bash
 make up          # cluster + ingress + build + deploy

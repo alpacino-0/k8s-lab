@@ -78,7 +78,9 @@ flowchart TB
 
 ## Hızlı başlangıç
 
-Gerekenler: Docker, [kind](https://kind.sigs.k8s.io/), kubectl, Helm, Terraform.
+Gerekenler: Docker, [kind](https://kind.sigs.k8s.io/), kubectl, Helm, Terraform, jq.
+Aşağıdaki operator hedefleri ayrıca Go istiyor; controller-gen ve kustomize'ı
+operator'ın kendi Makefile'ı indiriyor.
 
 ```bash
 git clone https://github.com/damgahq/damga.git && cd damga
@@ -106,6 +108,9 @@ değişkenleri.
 | `make smoke` | Çalışan deployment'a karşı uçtan uca kontroller |
 | `make policies` | Kabul politikalarını uygular |
 | `make policy-test` | Her politikanın doğru şeyi reddettiğini kanıtlar |
+| `make operator-test` | Operator'ın birim ve envtest paketleri |
+| `make operator-install` | Workload CRD'sini mevcut cluster'a kurar |
+| `make operator-deploy` | Operator'ı derler, kind'a yükler ve dağıtır |
 | `make tls` | cert-manager kurar, yerel CA ile HTTPS sunar |
 | `make logging` | Loki + Alloy kurar, Loki'yi Grafana'ya bağlar |
 | `make gitops` | Argo CD kurar, sürümü git'ten senkronlar |
@@ -113,6 +118,46 @@ değişkenleri.
 | `make platform-plan` | Terraform'un ne değiştireceğini gösterir, değiştirmez |
 | `make monitoring` | Prometheus + Grafana kurar |
 | `make down` | Cluster'ı siler |
+
+---
+
+## Workload API
+
+Yukarıdaki servisi Helm chart'ı dağıtıyor — uzun yol, elle yazılmış hâli. Ürünün
+yolu daha kısa. Girdinin tamamı bir `Workload`:
+
+```yaml
+apiVersion: platform.damga.co/v1alpha1
+kind: Workload
+metadata:
+  name: notes
+  namespace: damga
+spec:
+  image: ghcr.io/damgahq/damga:1.0.0
+  port: 3000
+  replicas: 2
+```
+
+Operator bunu bir ServiceAccount, Deployment, Service, NetworkPolicy ve
+PodDisruptionBudget'a çeviriyor; `autoscale` verilirse bir HorizontalPodAutoscaler,
+`domain` verilirse bir Ingress ekliyor. Ürettiği şey pazarlık konusu değil: UID
+1000, salt-okunur kök dosya sistemi, tüm yetenekler düşürülmüş, service-account
+token'ı yok, bulut metadata aralığını da kapatan varsayılan-reddet NetworkPolicy,
+ve bir replikayı yerine geleni hazır olmadan düşürmeyen güncelleme.
+
+Bunlar varsayılan değil. Hiçbirini kapatan alan yok, çünkü CRD'de tanımlı değil.
+
+```bash
+make policies                              # etiketli namespace ve kurallar
+make operator-install                      # CRD
+make operator-deploy                       # controller
+kubectl apply -k operator/config/samples/  # bir Workload
+kubectl -n damga wait --for=condition=Ready workload/workload-sample
+```
+
+Namespace önemli. Üç kabul politikası da `damga.co/policies: enforced`
+etiketine bağlanıyor. Bu etiketi taşımayan bir namespace, kuralları zayıf bir
+namespace değil — hiç kuralı olmayan bir namespace, ve bunu söyleyen hiçbir şey yok.
 
 ---
 
@@ -459,13 +504,14 @@ chart/                Helm chart — tek deploy yolu
 operator/             Workload CRD'si ve onu render eden controller
   api/v1alpha1/       tipler — sertleştirmeyi kapatan bir alan yok
   internal/controller/  reconciler ve ürettiği kaynaklar
-terraform/            platform katmanı: ingress, cert-manager, Argo CD, Kyverno, politikalar
+terraform/            platform katmanı: ingress, cert-manager, Argo CD, Kyverno, metrics-server, politikalar
 gitops/               Argo CD Application'ları: sürüm ve operator
 cluster/              cluster kapsamlı eklentiler, chart'ın dışında
   issuers.yaml        yerel CA — TLS yolu varsayılmıyor, çalıştırılıyor
   loki-values.yaml    tek-binary Loki, filesystem depolama, 72 saat saklama
   alloy-values.yaml   log toplayıcı, metriklerle aynı etiketlerle
   argocd-values.yaml  Dex, bildirim ve ApplicationSet olmadan Argo CD
+  metrics-server-values.yaml  --kubelet-insecure-tls yok; sertifikalar gerçek
 policies/             cluster politikası, bilerek chart'ın dışında
   namespace.yaml      Pod Security Admission etiketleri
   admission-*.yaml    ValidatingAdmissionPolicy kuralları ve bağlamaları
@@ -473,6 +519,7 @@ policies/             cluster politikası, bilerek chart'ın dışında
   kyverno-*.yaml      imza politikası, `make platform` tarafından uygulanır
 scripts/
   bootstrap.sh        idempotent cluster + ingress + politikalar + deploy
+  approve-kubelet-certs.sh  metrics-server'ın doğrulayacağı sertifika için
   policy-test.sh      her kuralın doğru şeyi reddettiğini kanıtlayan 15 kontrol
   smoke-test.sh       güvenlik duruşu ve izolasyon dahil 30 uçtan uca kontrol
   teardown.sh         cluster'ı siler
@@ -604,9 +651,10 @@ olanlar:
   yazılıyor. Yedekler doğrulanıyor — her kurulumda ve her gece `gzip -t` ve bir
   boyut tabanı — ama kaynağıyla aynı arıza alanını paylaşan bir yedek, yedek
   değildir. Gerçek olanlar cluster dışında, nesne depolamada durmalı.
-- **metrics-server platform katmanında değil.** Elle kuruldu; yani yukarıda
-  ölçülen otomatik ölçekleme bu cluster'da yaşıyor ama cluster yeniden
-  kurulduğunda yaşamaz. `make up`'ın yarattığı diğer her şey Terraform'dan geliyor.
+- **Kubelet sertifikalarını bir script onaylıyor.** `bootstrap.sh` bulduğu her
+  `kubernetes.io/kubelet-serving` isteğini onaylıyor; saniyeler önce kendi
+  kurduğu bir cluster için doğru, başka her yerde yanlış. Gerçek bir cluster'da
+  hangi node'un hangi adresi iddia edebileceğine dair bir politika gerekir.
 - **Alertmanager kapalı.** `PrometheusRule` var ve ifadeleri gerçekten ateşlenerek
   test edildi; ürettiklerini teslim edecek hiçbir şey bağlı değil.
 - **Tek kota, elle yazılmış.** Namespace'in de konteynerlerin de tavanı var, ama

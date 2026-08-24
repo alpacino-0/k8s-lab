@@ -2,8 +2,9 @@
 
 Terraform manages what a cluster needs before this project's chart can be
 installed into it: the ingress controller, cert-manager, Argo CD, Kyverno (for
-image signature verification only — `install_kyverno`, on by default), the
-admission policies and the namespace they apply to.
+image signature verification only — `install_kyverno`, on by default),
+metrics-server (without which the HorizontalPodAutoscaler has no metrics API to
+read), the admission policies, the namespace they apply to and its quota.
 
 ```bash
 terraform init

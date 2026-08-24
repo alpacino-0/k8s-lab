@@ -1,5 +1,19 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
+# Without this the kubelet serves metrics with a self-signed certificate, and
+# the only way to scrape it is to tell metrics-server not to check — which is
+# the one thing this repository argues against everywhere else. With it the
+# kubelet asks the cluster CA for a serving certificate instead, and the
+# scrape is verified like any other TLS connection.
+#
+# The certificates are not granted automatically: kubelet-serving CSRs are the
+# one signer kube-controller-manager will not auto-approve, because approving
+# them means trusting the node's claim about its own addresses. bootstrap.sh
+# approves them, which is the right call for a cluster it just created itself.
+kubeadmConfigPatches:
+  - |
+    kind: KubeletConfiguration
+    serverTLSBootstrap: true
 nodes:
   - role: control-plane
     extraPortMappings:

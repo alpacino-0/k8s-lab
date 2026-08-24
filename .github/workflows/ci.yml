@@ -213,6 +213,12 @@ jobs:
       # Applied first, so the release has to satisfy them rather than being
       # grandfathered in — and so the API server has picked the bindings up
       # long before anything is tested against them.
+      # kind's config has the kubelets ask the cluster CA for serving
+      # certificates; nothing grants them without this, and a kubelet still
+      # waiting for one is a difference between CI and `make up`.
+      - name: Approve kubelet serving certificates
+        run: ./scripts/approve-kubelet-certs.sh
+
       - name: Apply cluster policies
         run: |
           kubectl apply -f policies/namespace.yaml
@@ -723,6 +729,12 @@ jobs:
         with:
           cluster_name: signatures
           config: kind-config.yaml
+
+      # kind's config has the kubelets ask the cluster CA for serving
+      # certificates; nothing grants them without this, and a kubelet still
+      # waiting for one is a difference between CI and `make up`.
+      - name: Approve kubelet serving certificates
+        run: ./scripts/approve-kubelet-certs.sh
 
       - name: Apply cluster policies
         run: |

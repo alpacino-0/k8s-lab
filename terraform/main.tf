@@ -149,6 +149,25 @@ resource "kubernetes_manifest" "admission_bindings" {
   depends_on = [kubernetes_manifest.admission_policies]
 }
 
+# The HorizontalPodAutoscaler reads metrics.k8s.io, and nothing registers that
+# API until this runs. Measured before it existed: the app's HPA reported
+# ScalingActive=False and had logged the same FailedGetResourceMetric 837 times
+# over 5h49m, while the Deployment beside it looked healthy — an autoscaler that
+# has never made a decision does not announce itself anywhere a dashboard looks.
+resource "helm_release" "metrics_server" {
+  count = var.install_metrics_server ? 1 : 0
+
+  name       = "metrics-server"
+  repository = "https://kubernetes-sigs.github.io/metrics-server/"
+  chart      = "metrics-server"
+  version    = var.metrics_server_version
+  namespace  = "kube-system"
+  wait       = true
+  timeout    = 300
+
+  values = [file("${path.module}/../cluster/metrics-server-values.yaml")]
+}
+
 # The tenant fence. Applied from the same file `make policies` uses, so the two
 # entry points cannot drift. It has to come after the namespace exists, and it
 # is deliberately not a kubernetes_resource_quota_v1: keeping it as YAML means
