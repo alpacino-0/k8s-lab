@@ -49,7 +49,7 @@ kubectl wait --for=condition=Ready clusterissuer/selfsigned-ca --timeout=180s
 
 # The signature rule belongs to the same category and had been left out of it.
 # Terraform installs the Kyverno engine and cannot install this, so a cluster
-# built by the documented path ran two Kyverno pods enforcing nothing at all —
+# built by the documented path ran its Kyverno pods enforcing nothing at all —
 # the one capability the engine is here for, switched off by omission.
 #
 # Guarded rather than unconditional: install_kyverno can be turned off, and a

@@ -49,13 +49,13 @@ variable "ingress_node_ports" {
 }
 
 variable "kyverno_version" {
-  description = "Kyverno chart version. Kyverno is here for one thing only — verifying image signatures, which ValidatingAdmissionPolicy cannot do."
+  description = "Kyverno chart version. Kyverno is here for two things: verifying image signatures, which ValidatingAdmissionPolicy cannot do, and reporting policy results — including those of the ValidatingAdmissionPolicies it does not own, which keep no results of their own."
   type        = string
   default     = "3.5.2"
 }
 
 variable "install_kyverno" {
-  description = "Install Kyverno for image signature verification."
+  description = "Install Kyverno for image signature verification and policy reporting."
   type        = bool
   default     = true
 }

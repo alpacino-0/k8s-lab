@@ -120,7 +120,9 @@ NAMESPACE=damga ./scripts/policy-test.sh     # each rule must reject what it sho
 
 Optionally, image signature verification. It is the one rule the built-in
 admission engine cannot express, because verifying a signature means reaching a
-registry and a transparency log — so it costs two pods:
+registry and a transparency log. The same install also brings the reports
+controller, which is what records the results of the policies above — a
+ValidatingAdmissionPolicy keeps none of its own. Three pods, 174 Mi measured:
 
 ```bash
 helm repo add kyverno https://kyverno.github.io/kyverno/
@@ -129,9 +131,13 @@ helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace \
   --set admissionController.replicas=1 \
   --set backgroundController.replicas=1 \
   --set cleanupController.enabled=false \
-  --set reportsController.enabled=false \
   --set admissionController.container.resources.requests.memory=128Mi \
-  --set admissionController.container.resources.limits.memory=384Mi
+  --set admissionController.container.resources.limits.memory=384Mi \
+  --set reportsController.enabled=true \
+  --set reportsController.replicas=1 \
+  --set reportsController.resources.requests.cpu=100m \
+  --set reportsController.resources.requests.memory=64Mi \
+  --set reportsController.resources.limits.memory=256Mi
 kubectl apply -f policies/kyverno-image-signatures.yaml
 ```
 

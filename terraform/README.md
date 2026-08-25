@@ -2,7 +2,8 @@
 
 Terraform manages what a cluster needs before this project's chart can be
 installed into it: the ingress controller, cert-manager, Argo CD, Kyverno (for
-image signature verification only — `install_kyverno`, on by default),
+image signature verification and policy reporting — `install_kyverno`, on by
+default),
 metrics-server (without which the HorizontalPodAutoscaler has no metrics API to
 read), sealed-secrets (so a GitOps repository can carry its own secrets), the
 admission policies, the namespace they apply to and its quota.

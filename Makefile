@@ -7,7 +7,7 @@ IMAGE       ?= damga-app
 IMAGE_TAG   ?= 1.0.0
 
 .DEFAULT_GOAL := help
-.PHONY: help test lint build up down deploy smoke policies policy-test alert-test operator-test operator-install operator-deploy seal platform platform-plan tls logs logging gitops monitoring port-forward clean
+.PHONY: help test lint build up down deploy smoke policies policy-test alert-test report-test operator-test operator-install operator-deploy seal platform platform-plan tls logs logging gitops monitoring port-forward clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -135,6 +135,9 @@ gitops: ## Install Argo CD and let it reconcile the release from git
 
 alert-test: ## Prove a firing rule reaches Alertmanager and that inhibition works
 	NAMESPACE=$(NAMESPACE) ./scripts/alert-test.sh
+
+report-test: ## Prove policy results reach a report, failures included
+	NAMESPACE=$(NAMESPACE) ./scripts/report-test.sh
 
 seal: ## Seal a Secret manifest from stdin into a SealedSecret (NS=namespace)
 	@./scripts/seal-secret.sh $(NS)

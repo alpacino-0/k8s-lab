@@ -90,15 +90,32 @@ resource "helm_release" "argocd" {
 
 # ---------------------------------------------------------------- kyverno
 
-# Kyverno is installed for exactly one capability: verifying that an image was
-# signed by this repository's pipeline. Everything else it could do here is
-# already done by ValidatingAdmissionPolicy, which runs in the API server and
-# costs no pods — the earlier version of these policies was Kyverno's and was
-# moved for that reason.
+# Kyverno is installed for two capabilities, and the second one was discovered
+# rather than planned.
 #
-# Signature verification is the one thing the built-in engine cannot do: it has
-# no way to reach a registry, fetch a signature and check it against an
-# identity.
+# The first is verifying that an image was signed by this repository's
+# pipeline. That is the one thing the built-in engine cannot do: it has no way
+# to reach a registry, fetch a signature and check it against an identity.
+# Everything else Kyverno could enforce here is already done by
+# ValidatingAdmissionPolicy, which runs in the API server and costs no pods —
+# the earlier version of these policies was Kyverno's and was moved for that
+# reason.
+#
+# The second is reporting, and it is the price of that move. A
+# ValidatingAdmissionPolicy keeps no results: its .status carries only
+# observedGeneration and type checks, and the bindings' Audit action writes an
+# annotation into the API server's audit log, which this cluster does not
+# configure and kind does not provide. So after the move there was no way to
+# ask which workloads satisfy damga-workload-hygiene — only to find out at the
+# moment one was rejected. Kyverno's reports controller reads native policies
+# it does not own (matching by name, with no ownership check) and writes their
+# results as PolicyReports. It is the only in-cluster answer to that question.
+#
+# Note what this pod is not subject to: the kyverno namespace does not carry
+# damga.co/policies=enforced, so none of the three bindings select it. Were it
+# enrolled it would be rejected three times over — its image is not from this
+# project's registry, it mounts a service account token, and it declares no
+# probes. The same is already true of the two controllers running beside it.
 resource "helm_release" "kyverno" {
   count = var.install_kyverno ? 1 : 0
 
@@ -115,9 +132,23 @@ resource "helm_release" "kyverno" {
     { name = "admissionController.replicas", value = "1" },
     { name = "backgroundController.replicas", value = "1" },
     { name = "cleanupController.enabled", value = "false" },
-    { name = "reportsController.enabled", value = "false" },
+    { name = "reportsController.enabled", value = "true" },
+    { name = "reportsController.replicas", value = "1" },
     { name = "admissionController.container.resources.requests.memory", value = "128Mi" },
     { name = "admissionController.container.resources.limits.memory", value = "384Mi" },
+    # Not a typo against the two lines above: admissionController nests its
+    # resources under .container, reportsController does not. Helm accepts an
+    # unknown path without complaint, so getting this wrong ships the default
+    # and says nothing.
+    #
+    # Requests restate the chart's own defaults, so the cost of the third pod
+    # is legible here rather than only in the chart. The memory limit is the
+    # one value that departs from it: 128Mi is what this controller is most
+    # often reported to be OOMKilled at, and it holds report state for every
+    # resource it scans.
+    { name = "reportsController.resources.requests.cpu", value = "100m" },
+    { name = "reportsController.resources.requests.memory", value = "64Mi" },
+    { name = "reportsController.resources.limits.memory", value = "256Mi" },
   ]
 }
 

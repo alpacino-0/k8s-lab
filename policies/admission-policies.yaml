@@ -11,11 +11,22 @@
 # what actually enforces; binding to the controller is what makes `kubectl
 # apply` fail immediately instead of leaving a Deployment that quietly never
 # produces a pod.
+#
+# The policies.kyverno.io/* annotations look out of place on a policy Kyverno
+# does not own, and they are load-bearing anyway: Kyverno's reports controller
+# reads them off native policies too, and without them every row it writes
+# about these rules carries a null category and a null severity. Measured —
+# adding them filled both fields on the next scan. A report that cannot say how
+# serious a finding is cannot be the source of an evidence page.
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
   name: damga-resource-bounds
+  annotations:
+    policies.kyverno.io/title: Every container declares what it needs and what it may take
+    policies.kyverno.io/category: Resource governance
+    policies.kyverno.io/severity: medium
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -72,6 +83,10 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
   name: damga-image-provenance
+  annotations:
+    policies.kyverno.io/title: Images come from this project's registry, by digest
+    policies.kyverno.io/category: Supply chain
+    policies.kyverno.io/severity: high
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -116,6 +131,10 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
   name: damga-workload-hygiene
+  annotations:
+    policies.kyverno.io/title: Read-only root, no ambient token, probes on anything long-running
+    policies.kyverno.io/category: Workload hardening
+    policies.kyverno.io/severity: medium
 spec:
   failurePolicy: Fail
   matchConstraints:

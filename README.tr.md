@@ -109,6 +109,7 @@ değişkenleri.
 | `make policies` | Kabul politikalarını uygular |
 | `make policy-test` | Her politikanın doğru şeyi reddettiğini kanıtlar |
 | `make alert-test` | Servisi gerçekten bozup alarmın Alertmanager'a ulaştığını kanıtlar |
+| `make report-test` | Politika sonuçlarının rapora ulaştığını, ihlaller dahil, kanıtlar |
 | `make operator-test` | Operator'ın birim ve envtest paketleri |
 | `make operator-install` | Workload CRD'sini mevcut cluster'a kurar |
 | `make operator-deploy` | Operator'ı derler, kind'a yükler ve dağıtır |
@@ -216,14 +217,37 @@ içinde çalışan yerleşik motorla ifade edilebiliyordu:
 
 | | Kyverno | ValidatingAdmissionPolicy |
 |---|---|---|
-| Çalışan pod | 2 | 0 |
-| Ölçülen bellek | 122 Mi | yok |
+| Çalışan pod | 3 | 0 |
+| Ölçülen bellek | 174 Mi | yok |
 | API durumu | `ClusterPolicy` kullanımdan kalkıyor | 1.30'dan beri GA |
 
 Politika motoru; mutasyon, namespace'ler arası üretim veya imaj imzası
-doğrulaması gerektiğinde hak eder. Kyverno tam olarak bunlardan biri için geri
-döndü — aşağıdaki [Tedarik zinciri](#tedarik-zinciri) ve
+doğrulaması gerektiğinde hak eder. Kyverno bunlardan biri için geri döndü —
+aşağıdaki [Tedarik zinciri](#tedarik-zinciri) ve
 [policies/README.md](policies/README.md).
+
+Bir de yukarıdaki tablonun fiyatlamadığı bir sebep için geri döndü. Bir
+`ValidatingAdmissionPolicy` karar verir ve unutur: `.status`'ünde yargıladığı
+hiçbir kaynağa dair kayıt yoktur, binding'indeki `Audit` eylemi ise API
+sunucusunun denetim günlüğüne yazar — bu cluster onu yapılandırmıyor. Yani
+kuralları API sunucusuna taşımak yukarıdaki tablodaki pod'ları geri
+kazandırırken *hangi iş yükleri bu kuralları sağlıyor* sorusunun cevabını
+tamamen kaybettirdi; geriye yalnızca sağlamayan birinin reddedildiği an kaldı. Kyverno'nun rapor denetleyicisi
+sahibi olmadığı yerel politikaları da okuyup sonuçlarını `PolicyReport` olarak
+yazıyor; üçüncü pod bu, ve cluster içindeki tek cevap:
+
+```console
+$ kubectl get policyreports -A -o json | jq -r '.items[].results[]
+    | select(.source=="ValidatingAdmissionPolicy") | [.policy,.result,.severity] | @tsv'
+damga-image-provenance   pass  high
+damga-resource-bounds    pass  medium
+damga-workload-hygiene   pass  medium
+```
+
+`make report-test` bu yolu kanıtlıyor — ve geçen bir cluster'ın gösteremediği
+kısmı da: kaynak sınırı olmayan bir deployment'ı binding'lerin henüz seçmediği
+bir namespace'e koyup sonra namespace'i etiketliyor, çünkü `Deny` diyen bir
+kural ihlalin raporlanacak kadar var olmasına zaten izin vermiyor.
 
 ### Tedarik zinciri
 
@@ -241,7 +265,7 @@ değil, "bu depodaki bu iş akışı bu digest'i üretti" oluyor.
 Cluster başka hiçbir şeyi kabul etmiyor. Kyverno'nun `verifyImages` kuralı,
 yerleşik motorun ifade edemediği tek kural — çünkü imza doğrulamak bir registry'ye
 ve bir şeffaflık günlüğüne erişmek demek, ki bir admission eklentisi bunu yapmaz.
-İki pod'a mal oluyor ve Kyverno'nun kurulu olmasının tek sebebi bu:
+Kyverno'nun kurulma sebebi buydu — artık tek sebebi değil:
 
 ```yaml
 attestors:
@@ -525,6 +549,7 @@ scripts/
   approve-kubelet-certs.sh  metrics-server'ın doğrulayacağı sertifika için
   seal-secret.sh      Secret girer, SealedSecret çıkar; kubeseal konteynerde
   alert-test.sh       gerçek bir kesinti yaratıp alarmın gelmesini bekler
+  report-test.sh      ihlali kapsama sokup raporlandığını kanıtlar
   policy-test.sh      her kuralın doğru şeyi reddettiğini kanıtlayan 15 kontrol
   smoke-test.sh       güvenlik duruşu ve izolasyon dahil 30 uçtan uca kontrol
   teardown.sh         cluster'ı siler
@@ -670,6 +695,13 @@ olanlar:
   kanıtlıyor. Ama receiver `null`. Bir alarmın nereye gideceği cluster'ı
   işletenin özelliğidir, ve gerçek her seçenek klonlayan kimsede olmayan bir
   kimlik bilgisi ister.
+- **Politika raporları canlı bir görünüm, kayıt değil.** Her `PolicyReport`
+  anlattığı kaynağa `ownerReference` ile bağlı; o pod değiştiği anda birlikte
+  siliniyor, bir controller'ın raporu ise geçmişi tutulmadan yerinde üzerine
+  yazılıyor. Bu yapılandırmada saklama, arşiv ya da TTL yok. *Şu anda ne doğru*
+  sorusunu cevaplıyor, *bir önceki deploy'da ne doğruydu* sorusunu
+  cevaplayamıyor — denetimin asıl sorduğu ise ikincisi. Deploy anında yazılan,
+  kalıcı bir kayıt başka bir şeyin işi ve henüz yok.
 - **Tek kota, elle yazılmış.** Namespace'in de konteynerlerin de tavanı var, ama
   ikisi de bu namespace için elle boyutlandırıldı. Kiracı başına türeten bir şey
   yok, çünkü tek kiracı var.

@@ -749,11 +749,24 @@ jobs:
           # enforcement for the Kyverno a cluster actually runs. Unpinned, CI
           # verified whatever released today: measured drift on 2026-08-23 was
           # chart 3.9.0 / v1.19.0 here against 3.5.2 / v1.15.2 in terraform.
+          #
+          # The version is read from terraform; the flags below are copied by
+          # hand and so drift silently. They already had: the admissionController
+          # memory pins have been in terraform since it was written and never
+          # reached here, which means CI has been proving enforcement under a
+          # ceiling the real cluster does not use. Anything changed in
+          # terraform's set block belongs here in the same commit.
           helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace \
             --version "$(grep -A3 'variable "kyverno_version"' terraform/variables.tf \
                          | sed -n 's/.*default *= *"\(.*\)"/\1/p')" \
             --set admissionController.replicas=1 --set backgroundController.replicas=1 \
-            --set cleanupController.enabled=false --set reportsController.enabled=false \
+            --set cleanupController.enabled=false \
+            --set admissionController.container.resources.requests.memory=128Mi \
+            --set admissionController.container.resources.limits.memory=384Mi \
+            --set reportsController.enabled=true --set reportsController.replicas=1 \
+            --set reportsController.resources.requests.cpu=100m \
+            --set reportsController.resources.requests.memory=64Mi \
+            --set reportsController.resources.limits.memory=256Mi \
             --wait --timeout 10m
 
           # helm --wait returns when the pods report Ready, which is earlier than

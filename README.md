@@ -113,6 +113,7 @@ variables the kubelet injects.
 | `make policies` | Apply the admission policies |
 | `make policy-test` | Prove each policy rejects what it is supposed to |
 | `make alert-test` | Break the service and prove the alert reaches Alertmanager |
+| `make report-test` | Prove policy results reach a report, failures included |
 | `make operator-test` | The operator's unit and envtest suites |
 | `make operator-install` | Install the Workload CRD into the current cluster |
 | `make operator-deploy` | Build the operator, load it into kind and deploy it |
@@ -222,13 +223,36 @@ engine, which runs in the API server:
 
 | | Kyverno | ValidatingAdmissionPolicy |
 |---|---|---|
-| Pods to run | 2 | 0 |
-| Memory, measured | 122 Mi | none |
+| Pods to run | 3 | 0 |
+| Memory, measured | 174 Mi | none |
 | API status | `ClusterPolicy` deprecated | GA since 1.30 |
 
 A policy engine earns its keep for mutation, cross-namespace generation, or
-image signature verification. Kyverno is back for exactly one of those — see
+image signature verification. Kyverno is back for one of those — see
 [Supply chain](#supply-chain) below and [policies/README.md](policies/README.md).
+
+It is also back for something the table above does not price. A
+`ValidatingAdmissionPolicy` decides and forgets: its `.status` records nothing
+about any resource it judged, and the `Audit` action on its binding writes into
+the API server's audit log, which this cluster does not configure. Moving the
+rules into the API server therefore reclaimed the pods in that table and gave
+up every answer to *which workloads satisfy them* — leaving only the rejection
+at the moment one did not. Kyverno's reports controller reads native policies it does
+not own and writes their results as `PolicyReport`s, which is the third pod and
+the only in-cluster answer:
+
+```console
+$ kubectl get policyreports -A -o json | jq -r '.items[].results[]
+    | select(.source=="ValidatingAdmissionPolicy") | [.policy,.result,.severity] | @tsv'
+damga-image-provenance   pass  high
+damga-resource-bounds    pass  medium
+damga-workload-hygiene   pass  medium
+```
+
+`make report-test` proves that path, and proves the part a passing cluster
+cannot show: it puts a deployment with no resource bounds into a namespace the
+bindings do not select yet, then labels the namespace, because a rule that says
+`Deny` never lets a violation exist long enough to be reported.
 
 ### Supply chain
 
@@ -244,8 +268,8 @@ repository, produced this digest".
 
 The cluster refuses anything else. Kyverno's `verifyImages` is the one rule the
 built-in engine cannot express, because checking a signature means reaching a
-registry and a transparency log — work an admission plugin does not do. It costs
-two pods, and it is the only reason Kyverno is installed at all:
+registry and a transparency log — work an admission plugin does not do. It is
+the reason Kyverno was installed, though no longer the only one:
 
 ```yaml
 attestors:
@@ -531,6 +555,7 @@ scripts/
   approve-kubelet-certs.sh  so metrics-server has a certificate to verify
   seal-secret.sh      a Secret in, a SealedSecret out, kubeseal in a container
   alert-test.sh       causes a real outage and waits for the alert to arrive
+  report-test.sh      forces a violation into scope to prove failures are reported
   policy-test.sh      15 checks that each rule rejects what it should
   smoke-test.sh       30 end-to-end checks including security posture and isolation
   teardown.sh         destroy the cluster
@@ -673,6 +698,14 @@ What is still missing:
   and that a critical silences the warnings describing the same failure. The
   receiver is `null`. Where an alert should go is a property of whoever runs the
   cluster, and every real option needs a credential nobody cloning this has.
+- **Policy reports are a live view, not a record.** Every `PolicyReport` is
+  owner-referenced to the resource it describes, so it is collected the moment
+  that pod is replaced, and a controller's report is overwritten in place with
+  no history. There is no retention, no archive and no TTL anywhere in this
+  configuration. It answers *what is true now*, and cannot answer *what was
+  true at the deploy before last* — which is the question an audit actually
+  asks. A durable per-deploy record has to be written by something else, at
+  deploy time, and does not exist yet.
 - **One quota, hand-written.** The namespace has a ceiling and containers have
   one, but both are sized by hand for this namespace. Nothing derives them per
   tenant, because there is only one tenant.

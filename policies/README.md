@@ -35,13 +35,34 @@ The comparison, measured on this cluster:
 
 | | Kyverno | ValidatingAdmissionPolicy |
 |---|---|---|
-| Pods to run | 2 | 0 |
-| Memory | 122 Mi | none — it runs in the API server |
+| Pods to run | 3 | 0 |
+| Memory | 174 Mi | none — it runs in the API server |
 | API stability | `ClusterPolicy` deprecated | `admissionregistration.k8s.io/v1`, GA |
 
-Kyverno is installed on this cluster again anyway, and still costs those two
-pods — but it now carries exactly one rule. Every rule listed at the top of
-this file stayed in the API server.
+Kyverno is installed on this cluster again anyway, and now costs three pods —
+but it carries exactly one rule. Every rule listed at the top of this file
+stayed in the API server.
+
+The third pod is the reports controller, and it is here because of what the
+move cost. A `ValidatingAdmissionPolicy` decides and forgets: its `.status`
+holds `observedGeneration` and nothing about any resource it judged, and the
+`Audit` action on the bindings writes an annotation into the API server's audit
+log, which this cluster does not configure. So for as long as the rules lived
+only in the API server, there was no way to ask which workloads satisfy them —
+only to find out at the moment one was rejected. Kyverno's reports controller
+reads native policies it does not own and writes their results as
+`PolicyReport`s, which is the only in-cluster answer to that question:
+
+```
+kubectl get policyreports -A
+kubectl get policyreports -A -o json | jq -r '.items[].results[]
+  | select(.source=="ValidatingAdmissionPolicy") | [.policy,.result,.severity] | @tsv'
+```
+
+The `policies.kyverno.io/category` and `/severity` annotations on each policy
+exist for that reader: Kyverno copies them into every row it writes, and
+without them a finding cannot be ranked. Measured — stripping them turned all
+24 rows for a policy null on the next scan.
 
 A policy engine earns its keep when you need what the built-in one cannot do:
 mutating defaults into submitted manifests, generating resources across
