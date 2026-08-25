@@ -20,7 +20,7 @@ covers what PSA has no opinion about, in CEL evaluated inside the API server:
 | No `:latest`, no bare repository name | A mutable tag means a rollback can restore something other than what was rolled back from |
 | Known registries only | An unrestricted list means any pod can run anyone's code |
 | Read-only root filesystem | PSA `restricted` does not require it, and every workload here manages without a writable root — PostgreSQL included |
-| `automountServiceAccountToken: false` | A token in a pod that never calls the API is a credential waiting to be stolen |
+| `automountServiceAccountToken: false` | A token in a pod that never calls the API is a credential waiting to be stolen — unless the namespace and the pod both say otherwise, below |
 | Readiness and liveness probes | Except for run-once jobs, which have nothing to probe |
 | No memory limit above 2Gi | One container asking for more than a small node can give is how a namespace stops scheduling at all. A `LimitRange` is the usual way to say this and cannot be used here — see below |
 
@@ -78,7 +78,17 @@ own message. That is fine for a tenant — both messages are clear — but it me
 the proof of that rule has to run somewhere without a quota, and `policy-test.sh`
 creates a namespace for exactly that.
 
-The fourth file here, `kyverno-image-signatures.yaml`, is not in that first
+The token rule has the one exception in this directory, and it takes two keys
+to open. The namespace has to carry `damga.co/api-access: permitted` and the pod
+— or the `spec.template` of whatever creates it — has to carry
+`damga.co/api-access: required`. Either alone is refused: a pod cannot exempt
+itself, and labelling a namespace is cluster-admin work. The exemption lifts
+that one validation and nothing else, and everything holding it is one query
+away: `kubectl get pods -A -l damga.co/api-access`. This project's own operator
+is the only thing using it, because a controller that reconciles custom
+resources genuinely does call the API.
+
+The fifth file here, `kyverno-image-signatures.yaml`, is not in that first
 command — `make platform` applies it. The `ClusterPolicy` CRD does not exist
 until Terraform has installed Kyverno, so `make policies` cannot apply the rule
 on a cluster that has no engine yet, the same reason the cert-manager issuers

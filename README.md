@@ -121,7 +121,7 @@ variables the kubelet injects.
 | `make gitops` | Install Argo CD and let it reconcile the release from git |
 | `make platform` | Apply the platform layer with Terraform |
 | `make platform-plan` | Show what Terraform would change, without changing it |
-| `make monitoring` | Install Prometheus + Grafana |
+| `make monitoring` | Install Prometheus, Grafana and Alertmanager |
 | `make down` | Delete the cluster |
 
 ---
@@ -487,7 +487,7 @@ every push, three more on `main`:
 |---|---|
 | `test` | ESLint and 29 tests for the API |
 | `manifests` | `helm lint`, renders all values profiles, kubeconform schema validation, `terraform fmt -check` and `validate`, hadolint on every Dockerfile |
-| `image` | Builds each image, asserts each is non-root, boots each read-only, Trivy scan (fails on CRITICAL/HIGH) |
+| `image` | Builds each image, asserts each is non-root, boots the API image read-only, Trivy scan (fails on CRITICAL/HIGH) |
 | `operator` | The Go suite, plus a check that the committed generated code matches what the types produce |
 | `e2e` | Creates a real kind cluster, applies the policies **before** the chart so the release has to satisfy them, runs the 13 policy checks that need no Kyverno and the 30-check smoke test, proves an upgrade drops zero requests, then deploys the operator and takes a `Workload` to Ready through admission |
 | `build` · `publish` | Builds each architecture natively, pushes to GHCR with SBOM and provenance attestation, signs with keyless cosign (main only) |
@@ -499,7 +499,7 @@ every push, three more on `main`:
 
 ```
 app/                  Node.js service
-  src/                config · logger · metrics · db · app · index
+  src/                config · logger · metrics · db · redis · ratelimit · visitor · app · index
   test/               unit and integration tests (node:test, no framework)
   Dockerfile          multi-stage, pinned base, non-root
 chart/                Helm chart — the single deployment path

@@ -42,6 +42,8 @@ terraform import helm_release.ingress_nginx ingress-nginx/ingress-nginx
 terraform import helm_release.cert_manager  cert-manager/cert-manager
 terraform import 'helm_release.argocd[0]'   argocd/argocd
 terraform import 'helm_release.kyverno[0]'  kyverno/kyverno
+terraform import 'helm_release.metrics_server[0]'  kube-system/metrics-server
+terraform import 'helm_release.sealed_secrets[0]'  sealed-secrets/sealed-secrets
 terraform import kubernetes_namespace_v1.app damga
 terraform plan     # should report no changes
 ```

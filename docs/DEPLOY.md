@@ -101,6 +101,7 @@ labels are the whole point of the file:
 ```bash
 kubectl apply -f policies/namespace.yaml
 kubectl apply -f policies/admission-policies.yaml -f policies/admission-bindings.yaml
+kubectl apply -f policies/tenant-quota.yaml
 ```
 
 Four of those labels put the namespace under Pod Security Admission at

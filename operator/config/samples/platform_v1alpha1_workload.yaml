@@ -8,8 +8,9 @@
 #
 # port is set because the API defaults to 8080 and this image listens on 3000.
 # No `domain`: the rendered Ingress asks for the letsencrypt-prod issuer, which
-# a local cluster does not have. No `autoscale`: the HPA it renders targets CPU,
-# and metrics-server is not part of the platform layer yet.
+# a local cluster does not have. No `autoscale`: metrics-server is in the
+# platform layer now, so the HPA would work — the sample leaves it out to show
+# the smallest Workload that runs, not the most complete one.
 apiVersion: platform.damga.co/v1alpha1
 kind: Workload
 metadata:

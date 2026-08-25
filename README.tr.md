@@ -117,7 +117,7 @@ değişkenleri.
 | `make gitops` | Argo CD kurar, sürümü git'ten senkronlar |
 | `make platform` | Platform katmanını Terraform ile uygular |
 | `make platform-plan` | Terraform'un ne değiştireceğini gösterir, değiştirmez |
-| `make monitoring` | Prometheus + Grafana kurar |
+| `make monitoring` | Prometheus, Grafana ve Alertmanager kurar |
 | `make down` | Cluster'ı siler |
 
 ---
@@ -481,7 +481,7 @@ push'ta, üçü yalnız `main`'de:
 |---|---|
 | `test` | API için ESLint + 29 test |
 | `manifests` | `helm lint`, values profilleri, kubeconform şema denetimi, `terraform fmt -check` ve `validate`, her Dockerfile için hadolint |
-| `image` | İmajları derler, hiçbirinin root olmadığını doğrular, salt-okunur başlatır, Trivy taraması |
+| `image` | İmajları derler, hiçbirinin root olmadığını doğrular, API imajını salt-okunur başlatır, Trivy taraması |
 | `operator` | Go test paketi, ve commit'lenmiş üretilmiş kodun tiplerden çıkanla aynı olduğunun denetimi |
 | `e2e` | Gerçek kind cluster kurar, politikaları **chart'tan önce** uygular (yani sürüm onlara uymak zorunda), Kyverno gerektirmeyen 13 politika kontrolünü ve 30 duman kontrolünü çalıştırır, bir upgrade'in **sıfır istek düşürdüğünü** kanıtlar, sonra operatörü kurup bir `Workload`'ı admission'dan geçirerek Ready'ye götürür |
 | `build` · `publish` | Her mimariyi kendi üstünde derler, SBOM ve provenance ile GHCR'a push eder, keyless cosign ile imzalar (yalnız main) |
@@ -493,7 +493,7 @@ push'ta, üçü yalnız `main`'de:
 
 ```
 app/                  Node.js servisi
-  src/                config · logger · metrics · db · app · index
+  src/                config · logger · metrics · db · redis · ratelimit · visitor · app · index
   test/               birim ve entegrasyon testleri (node:test, framework yok)
   Dockerfile          multi-stage, sabit sürüm, root değil
 chart/                Helm chart — tek deploy yolu
