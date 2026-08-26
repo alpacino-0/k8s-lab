@@ -24,7 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
-	platformv1alpha1 "github.com/damgahq/damga/operator/api/v1alpha1"
+	platformv1alpha1 "github.com/damgahq/damga/api/v1alpha1"
 )
 
 const testDomain = "blog.example.com"

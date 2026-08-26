@@ -1,4 +1,4 @@
-module github.com/damgahq/damga/operator
+module github.com/damgahq/damga
 
 go 1.26.0
 

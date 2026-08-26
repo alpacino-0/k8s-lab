@@ -153,7 +153,7 @@ Bunlar varsayılan değil. Hiçbirini kapatan alan yok, çünkü CRD'de tanıml�
 make policies                              # etiketli namespace ve kurallar
 make operator-install                      # CRD
 make operator-deploy                       # controller
-kubectl apply -k operator/config/samples/  # bir Workload
+kubectl apply -k config/samples/           # bir Workload
 kubectl -n damga wait --for=condition=Ready workload/workload-sample
 ```
 
@@ -535,9 +535,14 @@ chart/                Helm chart — tek deploy yolu
   values-dev.yaml     minimum ayak izi, demo uçları açık
   values-prod.yaml    otomatik ölçekleme, yedekleme, izleme, ağ politikaları
   values-public.yaml  GHCR imajı, TLS, harici secret — herkese açık adres için
-operator/             Workload CRD'si ve onu render eden controller
-  api/v1alpha1/       tipler — sertleştirmeyi kapatan bir alan yok
-  internal/controller/  reconciler ve ürettiği kaynaklar
+go.mod                tek modül, github.com/damgahq/damga — bkz. OPERATOR.md
+api/v1alpha1/         Workload tipleri — sertleştirmeyi kapatan bir alan yok
+cmd/operator/         controller'ın main'i, ince tutuluyor
+internal/controller/  reconciler ve ürettiği kaynaklar
+config/               operator'ün kustomize manifestleri, CRD dahil
+Dockerfile.operator   cmd/operator'ü derler; bağlam deponun kökü
+Makefile.operator     kubebuilder hedefleri; ayrı duruyor çünkü `test`,
+                      `build`, `lint` ve `deploy` yukarıda başka şey demek
 terraform/            platform katmanı: ingress, cert-manager, Argo CD, Kyverno, metrics-server, sealed-secrets, politikalar
 gitops/               Argo CD Application'ları: sürüm ve operator
 cluster/              cluster kapsamlı eklentiler, chart'ın dışında

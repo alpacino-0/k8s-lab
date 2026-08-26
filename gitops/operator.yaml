@@ -31,7 +31,7 @@ spec:
   source:
     repoURL: https://github.com/damgahq/damga.git
     targetRevision: main
-    path: operator/config/default
+    path: config/default
     kustomize:
       # The manifest in git carries kubebuilder's `controller:latest`
       # placeholder, which damga-image-provenance rejects twice over — for

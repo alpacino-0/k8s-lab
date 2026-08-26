@@ -7,7 +7,7 @@ domain: damga.co
 layout:
 - go.kubebuilder.io/v4
 projectName: damga-platform
-repo: github.com/damgahq/damga/operator
+repo: github.com/damgahq/damga
 resources:
 - api:
     crdVersion: v1
@@ -16,6 +16,6 @@ resources:
   domain: damga.co
   group: platform
   kind: Workload
-  path: github.com/damgahq/damga/operator/api/v1alpha1
+  path: github.com/damgahq/damga/api/v1alpha1
   version: v1alpha1
 version: "3"

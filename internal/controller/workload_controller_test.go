@@ -34,7 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	platformv1alpha1 "github.com/damgahq/damga/operator/api/v1alpha1"
+	platformv1alpha1 "github.com/damgahq/damga/api/v1alpha1"
 )
 
 var _ = Describe("Workload Controller", func() {

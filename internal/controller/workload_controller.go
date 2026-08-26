@@ -34,7 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	platformv1alpha1 "github.com/damgahq/damga/operator/api/v1alpha1"
+	platformv1alpha1 "github.com/damgahq/damga/api/v1alpha1"
 )
 
 // WorkloadReconciler renders one Workload into the objects a production

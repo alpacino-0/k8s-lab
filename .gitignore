@@ -13,6 +13,15 @@ coverage/
 *.tgz
 *.tar
 kubeconform
+# Go: tool binaries downloaded by Makefile.operator, coverage output, and the
+# workspace file — go.work is deliberately absent, see PRODUCT-PLAN's module
+# decision: it has no effect on a consumer, which is exactly damga-ee's position.
+bin/
+*.out
+*.test
+go.work
+go.work.sum
+Dockerfile.cross
 
 # editors / OS
 .DS_Store

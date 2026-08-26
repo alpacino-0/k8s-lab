@@ -36,8 +36,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	platformv1alpha1 "github.com/damgahq/damga/operator/api/v1alpha1"
-	"github.com/damgahq/damga/operator/internal/controller"
+	platformv1alpha1 "github.com/damgahq/damga/api/v1alpha1"
+	"github.com/damgahq/damga/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
 

@@ -1,3 +1,9 @@
+<!-- Kubebuilder scaffolded this beside the operator's own go.mod. Both moved:
+     the module root is the repository root now, so this file names paths that
+     are relative to it. Why the move happened is in the product plan — the
+     short version is that a nested module cannot be consumed by a second
+     repository without a `replace` it is not allowed to inherit. -->
+
 # damga-platform
 
 The operator behind Damga: a `Workload` custom resource, and the controller that

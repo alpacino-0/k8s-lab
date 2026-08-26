@@ -159,7 +159,7 @@ in the CRD.
 make policies                              # the labelled namespace and the rules
 make operator-install                      # the CRD
 make operator-deploy                       # the controller
-kubectl apply -k operator/config/samples/  # a Workload
+kubectl apply -k config/samples/           # a Workload
 kubectl -n damga wait --for=condition=Ready workload/workload-sample
 ```
 
@@ -540,9 +540,14 @@ chart/                Helm chart — the single deployment path
   values-dev.yaml     minimal footprint, demo endpoints on
   values-prod.yaml    autoscaling, backups, monitoring, network policies
   values-public.yaml  GHCR image, TLS, external secret — for a public address
-operator/             the Workload CRD and the controller that renders it
-  api/v1alpha1/       the types — there is no field that disables hardening
-  internal/controller/  the reconciler and the resources it renders
+go.mod                one module, github.com/damgahq/damga — see OPERATOR.md
+api/v1alpha1/         the Workload types — there is no field that disables hardening
+cmd/operator/         the controller's main, kept thin
+internal/controller/  the reconciler and the resources it renders
+config/               the operator's kustomize manifests, including the CRD
+Dockerfile.operator   builds cmd/operator; context is the repository root
+Makefile.operator     the kubebuilder targets, kept apart because `test`,
+                      `build`, `lint` and `deploy` mean something else above
 terraform/            the platform layer: ingress, cert-manager, Argo CD, Kyverno, metrics-server, sealed-secrets, policies
 gitops/               the Argo CD Applications: the release, and the operator
 cluster/              cluster-scoped add-ons, kept out of the chart

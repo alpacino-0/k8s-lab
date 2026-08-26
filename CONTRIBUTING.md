@@ -75,8 +75,8 @@ make report-test # prove policy results reach a report, failures included
 The operator has its own suite:
 
 ```bash
-make -C operator test   # unit + envtest, regenerates CRDs and deepcopy first
-make -C operator lint
+make -f Makefile.operator test   # unit + envtest, regenerates CRDs and deepcopy first
+make -f Makefile.operator lint
 ```
 
 ## What CI will check
@@ -93,7 +93,7 @@ A pull request has to pass the first five gates. The last row runs only on
 | Deploy to a real cluster | a kind cluster, the policies, the chart, a zero-downtime upgrade, the smoke test, and a Workload reaching Ready through admission |
 | Publish / Enforce signatures | images built natively per architecture, signed with keyless cosign, then proved against Kyverno in a fresh cluster |
 
-If you change the operator's API types, run `make -C operator manifests generate`
+If you change the operator's API types, run `make -f Makefile.operator manifests generate`
 and commit the result. CI fails when the generated files are stale.
 
 ## Conventions

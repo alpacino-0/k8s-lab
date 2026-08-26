@@ -30,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
-	platformv1alpha1 "github.com/damgahq/damga/operator/api/v1alpha1"
+	platformv1alpha1 "github.com/damgahq/damga/api/v1alpha1"
 )
 
 // Everything in this block is the platform's decision rather than the user's.

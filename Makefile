@@ -67,16 +67,16 @@ port-forward: ## Open Grafana on http://localhost:3000 (admin/admin)
 	kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80
 
 operator-test: ## Run the operator's unit and envtest suites
-	$(MAKE) -C operator test
+	$(MAKE) -f Makefile.operator test
 
 operator-install: ## Install the Workload CRD into the current cluster
-	$(MAKE) -C operator install
+	$(MAKE) -f Makefile.operator install
 
 operator-deploy: ## Build the operator image, load it into kind and deploy it
-	docker build -t damga-operator:1.0.0 ./operator
+	docker build -f Dockerfile.operator -t damga-operator:1.0.0 .
 	kind load docker-image damga-operator:1.0.0 --name damga
-	$(MAKE) -C operator install
-	$(MAKE) -C operator deploy-local
+	$(MAKE) -f Makefile.operator install
+	$(MAKE) -f Makefile.operator deploy-local
 	kubectl -n damga-platform-system rollout status \
 	  deployment/damga-platform-controller-manager --timeout=180s
 

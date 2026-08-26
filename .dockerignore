@@ -6,6 +6,11 @@
 !**/*.go
 **/*_test.go
 
+# ...but not the one vendored inside the reference tenant's node_modules. The
+# build context is the repository root now that the module root is, and
+# `!**/*.go` reaches everywhere.
+app/**
+
 # Re-include Go module files
 !go.mod
 !go.sum
