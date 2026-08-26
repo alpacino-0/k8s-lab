@@ -210,7 +210,9 @@ func (s *Store) Append(ctx context.Context, rec evidence.Record) (evidence.Recor
 	}
 
 	rec.Seq = maxSeq + 1
-	now := s.now().UTC()
+	// Canonical, not raw: what is hashed has to be what is stored and what
+	// comes back, or the chain depends on the host clock's resolution.
+	now := evidence.Canonical(s.now())
 	rec.CreatedAt, rec.UpdatedAt = now, now
 	rec.ID = evidence.ID(fmt.Sprintf("%s-%s-%s-%d", rec.Ref.TenantID, rec.Ref.App, rec.Ref.Env, rec.Seq))
 	rec.PrevHash, err = hex.DecodeString(prevHash)
@@ -273,7 +275,11 @@ func (s *Store) Transition(ctx context.Context, id evidence.ID, t evidence.Trans
 		return rec, fmt.Errorf("%w: record is %s, expected one of %v", evidence.ErrConflict, rec.State, t.From)
 	}
 
-	ev := evidence.Event{From: rec.State, To: t.To, At: t.At, Reason: t.Reason, Observation: t.Observation}
+	ev := evidence.Event{
+		From: rec.State, To: t.To, At: evidence.Canonical(t.At),
+		Reason: t.Reason, Observation: t.Observation,
+	}
+	ev.Observation.At = evidence.Canonical(ev.Observation.At)
 	ev.PrevHash = rec.Hash
 	if n := len(rec.Transitions); n > 0 {
 		ev.PrevHash = rec.Transitions[n-1].Hash
@@ -300,7 +306,7 @@ func (s *Store) Transition(ctx context.Context, id evidence.ID, t evidence.Trans
 
 	rec.Transitions = append(rec.Transitions, ev)
 	rec.State = t.To
-	rec.UpdatedAt = s.now().UTC()
+	rec.UpdatedAt = evidence.Canonical(s.now())
 	rec.Policies = append(rec.Policies, t.Policies...)
 	if t.Admission != nil {
 		rec.Admission = *t.Admission

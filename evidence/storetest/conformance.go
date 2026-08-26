@@ -73,6 +73,7 @@ func Run(t *testing.T, newStore Factory) {
 		{"TransitionIsCompareAndSet", testTransitionIsCompareAndSet},
 		{"RacingTransitionsProduceOneWinner", testRacingTransitionsProduceOneWinner},
 		{"VerifyHoldsAfterTransition", testVerifyHoldsAfterTransition},
+		{"HashSurvivesARoundTrip", testHashSurvivesARoundTrip},
 		{"CurrentPrefersRunning", testCurrentPrefersRunning},
 		{"FindBySourceResolvesCommit", testFindBySourceResolvesCommit},
 		{"HistoryPagesWithoutOffset", testHistoryPagesWithoutOffset},
@@ -367,6 +368,68 @@ func testVerifyHoldsAfterTransition(t *testing.T, newStore Factory) {
 	}
 	if len(proof.RootHash) == 0 {
 		t.Error("Proof has no RootHash")
+	}
+}
+
+// The bug this case exists for was found by CI and hidden by a laptop. The
+// chain hashed whatever time.Now() returned while the store persisted
+// microseconds — so on Darwin, whose clock is already microseconds, the
+// truncation was a no-op and every test passed; on Linux the nanoseconds were
+// dropped on the way to disk and the record read back with a different hash
+// than the one written. An archive written by one node and verified on another
+// is the entire promise, so a hash that depends on the host clock is worthless.
+//
+// The assertion that catches it everywhere is not "the chain verifies" — that
+// is what passed on the laptop. It is that a store never hands back a
+// timestamp finer than the one it can store.
+func testHashSurvivesARoundTrip(t *testing.T, newStore Factory) {
+	s := newStore(t, 0)
+	ctx := context.Background()
+	r := ref("api", prod)
+
+	appended := mustAppend(t, s, rec("commit:aaa", r, "aaa"))
+	if got := appended.CreatedAt; !got.Equal(evidence.Canonical(got)) {
+		t.Errorf("Append returned CreatedAt %s, finer than evidence.Precision (%s); "+
+			"it cannot be persisted and read back unchanged",
+			got.Format(time.RFC3339Nano), evidence.Precision)
+	}
+
+	// A deliberately sub-precision instant, which is what a real caller hands
+	// in: time.Now() on Linux has nanoseconds.
+	odd := time.Now().UTC().Truncate(time.Second).Add(1234567 * time.Nanosecond)
+	moved, err := s.Transition(ctx, appended.ID, evidence.Transition{
+		From: []evidence.State{evidence.StatePending}, To: evidence.StateApplied,
+		At:          odd,
+		Observation: evidence.Observation{Source: evidence.ObservedFromWorkload, At: odd},
+	})
+	if err != nil {
+		t.Fatalf("Transition: %v", err)
+	}
+	if len(moved.Transitions) != 1 {
+		t.Fatalf("Transitions = %d, want 1", len(moved.Transitions))
+	}
+	if got := moved.Transitions[0].At; !got.Equal(evidence.Canonical(got)) {
+		t.Errorf("Transition kept At at %s, finer than evidence.Precision", got.Format(time.RFC3339Nano))
+	}
+
+	// The round trip itself: what comes back out has to hash to what went in.
+	stored, err := s.Get(ctx, appended.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !bytes.Equal(stored.Hash, appended.Hash) {
+		t.Error("stored Hash differs from the one Append returned; " +
+			"the record does not survive its own store")
+	}
+	if !stored.CreatedAt.Equal(appended.CreatedAt) {
+		t.Errorf("CreatedAt = %s after a round trip, was %s",
+			stored.CreatedAt.Format(time.RFC3339Nano), appended.CreatedAt.Format(time.RFC3339Nano))
+	}
+	if got := evidence.ChainRecord(stored.PrevHash, stored); !bytes.Equal(got, stored.Hash) {
+		t.Error("recomputing the chain over the record as it was read back does not reproduce its hash")
+	}
+	if ev := stored.Transitions[0]; !bytes.Equal(evidence.ChainEvent(stored.Hash, stored.ID, ev), ev.Hash) {
+		t.Error("recomputing the chain over the event as it was read back does not reproduce its hash")
 	}
 }
 

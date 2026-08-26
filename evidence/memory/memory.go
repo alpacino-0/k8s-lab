@@ -72,7 +72,8 @@ func (s *Store) Append(_ context.Context, rec evidence.Record) (evidence.Record,
 	s.seq[rec.Ref]++
 	rec.Seq = s.seq[rec.Ref]
 	rec.ID = evidence.ID(fmt.Sprintf("%d-%s", s.now().UnixNano(), rec.IdempotencyKey))
-	rec.CreatedAt, rec.UpdatedAt = s.now(), s.now()
+	now := evidence.Canonical(s.now())
+	rec.CreatedAt, rec.UpdatedAt = now, now
 	rec.PrevHash = s.last[rec.Ref]
 	rec.Hash = evidence.ChainRecord(rec.PrevHash, rec)
 	s.last[rec.Ref] = rec.Hash
@@ -92,7 +93,11 @@ func (s *Store) Transition(_ context.Context, id evidence.ID, t evidence.Transit
 	if len(t.From) > 0 && !slices.Contains(t.From, rec.State) {
 		return *rec, fmt.Errorf("%w: record is %s, expected one of %v", evidence.ErrConflict, rec.State, t.From)
 	}
-	ev := evidence.Event{From: rec.State, To: t.To, At: t.At, Reason: t.Reason, Observation: t.Observation}
+	ev := evidence.Event{
+		From: rec.State, To: t.To, At: evidence.Canonical(t.At),
+		Reason: t.Reason, Observation: t.Observation,
+	}
+	ev.Observation.At = evidence.Canonical(ev.Observation.At)
 	// A record's events chain off the record itself, then off each other. Not
 	// off the Ref head: appends and transitions interleave, and a verifier
 	// walking records in Seq order cannot reproduce that interleaving. This
@@ -104,7 +109,7 @@ func (s *Store) Transition(_ context.Context, id evidence.ID, t evidence.Transit
 	ev.Hash = evidence.ChainEvent(ev.PrevHash, rec.ID, ev)
 	rec.Transitions = append(rec.Transitions, ev)
 	rec.State = t.To
-	rec.UpdatedAt = s.now()
+	rec.UpdatedAt = evidence.Canonical(s.now())
 	rec.Policies = append(rec.Policies, t.Policies...)
 	if t.Admission != nil {
 		rec.Admission = *t.Admission

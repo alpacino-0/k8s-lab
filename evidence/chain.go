@@ -34,6 +34,26 @@ import (
 // one — which would make the retention promise unfalsifiable exactly when it
 // starts being paid for.
 
+// Precision is the resolution every timestamp is reduced to before it is
+// hashed, and therefore the resolution a store has to persist at.
+//
+// It exists because the first version did not have it, and the result was a
+// hash that depended on the host clock. time.Now() returns microseconds on
+// Darwin and nanoseconds on Linux; a store that wrote microseconds and hashed
+// whatever it was handed produced a chain that verified on a laptop and was
+// invalid on the first record on CI. Not a portability nicety: an archive
+// written by one node and verified on another is the whole promise.
+//
+// Microseconds because that is what a fixed-width RFC3339 column holds and
+// what PostgreSQL's timestamp type stores. Changing this value invalidates
+// every hash ever written, so it does not change.
+const Precision = time.Microsecond
+
+// Canonical reduces a timestamp to the resolution the chain hashes at. Stores
+// call it on everything they persist, so that what is read back hashes to what
+// was written.
+func Canonical(t time.Time) time.Time { return t.UTC().Truncate(Precision) }
+
 // chainedRecord is the immutable half of a Record. Anything not named here may
 // change after the record is written and therefore cannot be chained.
 type chainedRecord struct {
@@ -59,7 +79,7 @@ func ChainRecord(prev []byte, r Record) []byte {
 		IdempotencyKey: r.IdempotencyKey, ID: r.ID, Seq: r.Seq, Ref: r.Ref, Tier: r.Tier,
 		Actor: r.Actor, Source: r.Source, Image: r.Image, Signature: r.Signature,
 		Policies: r.Policies, Admission: r.Admission, Note: r.Note,
-		InitialState: r.InitialState, CreatedAt: r.CreatedAt.UTC(),
+		InitialState: r.InitialState, CreatedAt: Canonical(r.CreatedAt),
 	})
 }
 
@@ -68,6 +88,10 @@ func ChainRecord(prev []byte, r Record) []byte {
 // is how a chain verifies at write time and fails at read time.
 func ChainEvent(prev []byte, recordID ID, e Event) []byte {
 	e.PrevHash, e.Hash = nil, nil
+	// Same reduction as ChainRecord, for the same reason: these timestamps are
+	// persisted at Precision and have to hash to what comes back.
+	e.At = Canonical(e.At)
+	e.Observation.At = Canonical(e.Observation.At)
 	return link(prev, struct {
 		RecordID ID    `json:"recordId"`
 		Event    Event `json:"event"`
