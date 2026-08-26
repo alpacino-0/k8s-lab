@@ -20,6 +20,10 @@ metadata:
     # enough — so no workload can hand itself a credential by editing its
     # own manifest.
     damga.co/api-access: permitted
+    # `make operator-deploy` builds damga-operator locally and loads it into
+    # the node, the same as the reference tenant. The GitOps path installs the
+    # signed ghcr.io image instead and does not rely on this.
+    damga.co/unsigned-images: permitted
   name: system
 ---
 apiVersion: apps/v1

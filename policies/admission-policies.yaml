@@ -107,6 +107,25 @@ spec:
     - name: containers
       expression: >-
         has(object.spec.template) ? object.spec.template.spec.containers : object.spec.containers
+    # A locally built image is unsigned by construction, so admitting one means
+    # admitting an image no signature rule can ever evaluate. That was allowed
+    # everywhere by a bare `damga-` prefix, and the result was measured: the
+    # `damga` namespace carries damga.co/policies=enforced, ran damga-app:1.0.0,
+    # and its PolicyReport read three passes and no failures — while the same
+    # application one namespace over read four, the fourth being "image
+    # verified". Nothing distinguished "verified" from "never checked".
+    #
+    # The exemption is real and stays; what changes is that a namespace has to
+    # ask for it. Same two-key shape the token exemption below uses and for the
+    # same reason: labelling a namespace is a cluster-admin act, so no workload
+    # can hand itself an unsigned image by editing its own manifest. A tenant
+    # namespace created in phase 1 will not carry the label, which is the point.
+    - name: unsignedPermitted
+      expression: >-
+        namespaceObject != null
+          && has(namespaceObject.metadata.labels)
+          && 'damga.co/unsigned-images' in namespaceObject.metadata.labels
+          && namespaceObject.metadata.labels['damga.co/unsigned-images'] == 'permitted'
   validations:
     - expression: >-
         variables.containers.all(c, c.image.contains(':') && !c.image.endsWith(':latest'))
@@ -118,13 +137,15 @@ spec:
     - expression: >-
         variables.containers.all(c,
           c.image.startsWith('ghcr.io/damgahq/')
-          || c.image.startsWith('damga-')
           || c.image.startsWith('postgres:')
-          || c.image.startsWith('redis:'))
+          || c.image.startsWith('redis:')
+          || (variables.unsignedPermitted && c.image.startsWith('damga-')))
       message: >-
-        Images must come from ghcr.io/damgahq, the official postgres or
-        redis repositories, or be one of this project's locally built
-        damga-* images.
+        Images must come from ghcr.io/damgahq, or the official postgres or
+        redis repositories. Locally built damga-* images are admitted only in
+        a namespace labelled damga.co/unsigned-images=permitted — they carry
+        no signature, so nothing downstream can tell a verified image from an
+        unchecked one unless the namespace says which it expects.
       reason: Invalid
 ---
 apiVersion: admissionregistration.k8s.io/v1

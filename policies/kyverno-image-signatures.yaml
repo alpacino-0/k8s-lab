@@ -37,12 +37,18 @@ spec:
         any:
           - resources:
               kinds: [Pod]
-              # The operator's namespace belongs here for the same reason the
-              # others do, and more so: it is the only workload that can create
-              # Deployments in namespaces it does not live in. Its image is
-              # published and signed by the same pipeline and was, until this
-              # line, the one image nothing ever checked.
-              namespaces: ["damga", "damga-gitops", "damga-platform-system"]
+              # Selected by label, not by name. The list used to be three
+              # namespaces spelled out, which was correct for exactly as long
+              # as the cluster had three: phase 1 creates a namespace per
+              # tenant, and every one of them would have been outside this rule
+              # while carrying the label that claims the policies apply. The
+              # three ValidatingAdmissionPolicy bindings already select this
+              # way; one selector for all four rules is the invariant worth
+              # having, because a namespace can no longer be inside some of
+              # them and outside the rest.
+              namespaceSelector:
+                matchLabels:
+                  damga.co/policies: enforced
       verifyImages:
         - imageReferences:
             - "ghcr.io/damgahq/damga*"
@@ -57,8 +63,24 @@ spec:
                 # Keyless: there is no public key to distribute. The claim is
                 # that a workflow in this repository produced this digest, and
                 # Fulcio and Rekor are what make that checkable.
+                # The subject is the workflow file at a ref, not a glob over
+                # the repository. `.../damga/*` accepted any workflow on any
+                # branch — which is survivable while the repository is this
+                # one, and is not survivable in phase 2, where the decision is
+                # that the *customer's* repository builds and signs. There any
+                # contributor who can trigger a workflow on any branch would
+                # have held an accepted identity.
+                #
+                # Measured against the signature actually in the registry:
+                #   Subject https://github.com/damgahq/damga/.github/workflows/ci.yml@refs/heads/main
+                #   trigger push
+                # and the publish job is already guarded by
+                # `github.ref == 'refs/heads/main' && github.event_name == 'push'`,
+                # so the policy now says what the pipeline already did.
                 - keyless:
-                    subject: "https://github.com/damgahq/damga/*"
+                    subject: "https://github.com/damgahq/damga/.github/workflows/ci.yml@refs/heads/main"
                     issuer: "https://token.actions.githubusercontent.com"
+                    additionalExtensions:
+                      githubWorkflowTrigger: push
                     rekor:
                       url: https://rekor.sigstore.dev

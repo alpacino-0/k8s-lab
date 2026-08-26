@@ -22,7 +22,11 @@ PERMIT_NS="${PERMIT_NS:-policy-probe-permitted}"
 # the quota the API server answers "exceeded quota: requested: requests.cpu=2"
 # for a pod that requested nothing. The rule would look proven and would not be.
 BOUNDS_NS="${BOUNDS_NS:-policy-probe-bounds}"
-trap 'rm -rf "$WORK"; kubectl delete namespace "$PERMIT_NS" "$BOUNDS_NS" --ignore-not-found --wait=false >/dev/null 2>&1' EXIT
+# Enforced, and deliberately NOT carrying damga.co/unsigned-images. The other
+# two probe namespaces grant that consent because every case there runs the
+# locally built image; this one exists to prove the consent is load-bearing.
+STRICT_NS="${STRICT_NS:-policy-probe-strict}"
+trap 'rm -rf "$WORK"; kubectl delete namespace "$PERMIT_NS" "$BOUNDS_NS" "$STRICT_NS" --ignore-not-found --wait=false >/dev/null 2>&1' EXIT
 
 pass() { printf '  \033[0;32mPASS\033[0m  %s\n' "$1"; }
 fail() { printf '  \033[0;31mFAIL\033[0m  %s\n' "$1"; FAILED=1; }
@@ -157,8 +161,12 @@ EOF
 echo "admission policy checks in namespace '$NAMESPACE'"
 
 kubectl create namespace "$BOUNDS_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+# unsigned-images too: every probe below runs $IMAGE, which by default is the
+# locally built damga-app and carries no signature. Without the label the
+# provenance rule answers first and every case reports the wrong rejection.
 kubectl label namespace "$BOUNDS_NS" --overwrite >/dev/null \
-  damga.co/policies=enforced
+  damga.co/policies=enforced \
+  damga.co/unsigned-images=permitted
 
 # The two resourceless cases, where no quota can answer first.
 TARGET_NS="$BOUNDS_NS"
@@ -174,6 +182,16 @@ unset TARGET_NS
 write_pod;                             must_admit  "a compliant pod is admitted"
 write_pod "alpine:latest";             must_reject "a :latest image is rejected" "explicit version"
 write_pod "quay.io/someone/thing:1.0"; must_reject "an unknown registry is rejected" "must come from"
+
+# The locally built image is admitted above and rejected here, and the only
+# difference is a label on the namespace. Measured before this rule existed:
+# the `damga` namespace claimed damga.co/policies=enforced, ran an unsigned
+# damga-app, and its PolicyReport read three passes — indistinguishable from
+# the signed deployment next to it, which read four.
+kubectl create namespace "$STRICT_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl label namespace "$STRICT_NS" --overwrite >/dev/null damga.co/policies=enforced
+write_pod "$IMAGE"
+TARGET_NS="$STRICT_NS" must_reject "an unsigned local image needs the namespace's consent" "unsigned-images=permitted"
 write_pod "$IMAGE" false;              must_reject "a writable root filesystem is rejected" "read-only root filesystem"
 write_pod "$IMAGE" true ceiling;       must_reject "a container above the memory ceiling is rejected" "memory limit above 2Gi"
 
@@ -228,6 +246,7 @@ kubectl create namespace "$PERMIT_NS" --dry-run=client -o yaml | kubectl apply -
 kubectl label namespace "$PERMIT_NS" --overwrite >/dev/null \
   damga.co/policies=enforced \
   damga.co/api-access=permitted \
+  damga.co/unsigned-images=permitted \
   pod-security.kubernetes.io/enforce=restricted
 
 token_pod policy-probe-token ""

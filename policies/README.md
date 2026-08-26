@@ -19,6 +19,7 @@ covers what PSA has no opinion about, in CEL evaluated inside the API server:
 | CPU + memory requests, memory limit | Without requests the scheduler is guessing and the HPA cannot work; without a memory limit one container can take down its node |
 | No `:latest`, no bare repository name | A mutable tag means a rollback can restore something other than what was rolled back from |
 | Known registries only | An unrestricted list means any pod can run anyone's code |
+| Unsigned local images need the namespace's consent | A `damga-*` image built on the machine carries no signature and no rule downstream can evaluate one. Admitting it everywhere made *never checked* and *verified* render identically — measured, three policy results against four for the same application one namespace over. A namespace now says `damga.co/unsigned-images: permitted` or the image is rejected |
 | Read-only root filesystem | PSA `restricted` does not require it, and every workload here manages without a writable root — PostgreSQL included |
 | `automountServiceAccountToken: false` | A token in a pod that never calls the API is a credential waiting to be stolen — unless the namespace and the pod both say otherwise, below |
 | Readiness and liveness probes | Except for run-once jobs, which have nothing to probe |

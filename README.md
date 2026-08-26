@@ -164,8 +164,16 @@ kubectl -n damga wait --for=condition=Ready workload/workload-sample
 ```
 
 The namespace matters. All three admission policies bind to
-`damga.co/policies: enforced`. A namespace without that label is not a namespace
-with weaker rules — it is one with no rules at all, and nothing says so.
+`damga.co/policies: enforced`, and so does the image signature rule. A namespace
+without that label is not a namespace with weaker rules — it is one with no
+rules at all, and nothing says so.
+
+Two labels grant exceptions, and neither can be granted by a workload to itself:
+`damga.co/api-access: permitted` lets a pod that also asks keep its service
+account token, and `damga.co/unsigned-images: permitted` admits the locally
+built `damga-*` images that `make up` produces. The second exists because an
+unsigned image is one no signature rule can evaluate, and admitting it silently
+made *never checked* look exactly like *verified*.
 
 ---
 

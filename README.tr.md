@@ -157,9 +157,18 @@ kubectl apply -k operator/config/samples/  # bir Workload
 kubectl -n damga wait --for=condition=Ready workload/workload-sample
 ```
 
-Namespace önemli. Üç kabul politikası da `damga.co/policies: enforced`
-etiketine bağlanıyor. Bu etiketi taşımayan bir namespace, kuralları zayıf bir
-namespace değil — hiç kuralı olmayan bir namespace, ve bunu söyleyen hiçbir şey yok.
+Namespace önemli. Üç kabul politikası da — ve imza kuralı da —
+`damga.co/policies: enforced` etiketine bağlanıyor. Bu etiketi taşımayan bir
+namespace, kuralları zayıf bir namespace değil — hiç kuralı olmayan bir
+namespace, ve bunu söyleyen hiçbir şey yok.
+
+İki etiket istisna tanıyor ve hiçbirini bir iş yükü kendine veremiyor:
+`damga.co/api-access: permitted` ayrıca talep eden bir pod'un token'ını
+bırakıyor, `damga.co/unsigned-images: permitted` ise `make up`'ın ürettiği
+yerel `damga-*` imajlarını kabul ediyor. İkincisi şunun için var: imzasız bir
+imaj hiçbir imza kuralının değerlendiremediği bir imaj demek, ve sessizce
+kabul edilmesi *hiç kontrol edilmedi* ile *doğrulandı*'yı birbirinin aynı
+gösteriyordu.
 
 ---
 
