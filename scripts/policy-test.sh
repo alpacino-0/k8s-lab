@@ -190,7 +190,14 @@ write_pod "quay.io/someone/thing:1.0"; must_reject "an unknown registry is rejec
 # the signed deployment next to it, which read four.
 kubectl create namespace "$STRICT_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl label namespace "$STRICT_NS" --overwrite >/dev/null damga.co/policies=enforced
-write_pod "$IMAGE"
+# A fixed name, not $IMAGE. The case under test is the damga- prefix branch, and
+# $IMAGE is not always one: the e2e job passes the locally built damga-app, but
+# the supply-chain job passes the signed ghcr.io digest, which this rule admits
+# on its own merits. Written against $IMAGE the case passed locally and in e2e
+# and failed in supply-chain, asserting a rejection for an image that ought to
+# be admitted. The image never has to exist — every check here is a server-side
+# dry run, and admission answers before any pull.
+write_pod "damga-probe:1.0.0"
 TARGET_NS="$STRICT_NS" must_reject "an unsigned local image needs the namespace's consent" "unsigned-images=permitted"
 write_pod "$IMAGE" false;              must_reject "a writable root filesystem is rejected" "read-only root filesystem"
 write_pod "$IMAGE" true ceiling;       must_reject "a container above the memory ceiling is rejected" "memory limit above 2Gi"
