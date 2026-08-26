@@ -37,12 +37,11 @@ import (
 
 // Run starts the control plane and blocks until ctx is cancelled.
 //
-// It does not yet start the deploy observer. That is deliberate rather than
-// unfinished: under principle 1 the platform is not present when a deploy
-// happens — Argo CD is — so the observer is a level-triggered reconciler over
-// live cluster state, it needs a manager and a kubeconfig, and it arrives with
-// them. Until then a record opened at commit time stays pending, which is what
-// an evidence store is supposed to say when it does not know.
+// With Config.ObserveDeploys off it needs no cluster at all and serves the panel
+// and the API from a plain HTTP server. With it on, a controller-runtime manager
+// owns the process: the HTTP server is handed to it as a *manager.Server so that
+// it keeps answering on every replica while the observer and the sweep run on
+// the leader only.
 func Run(ctx context.Context, o Options) error {
 	o = o.withDefaults()
 	log := slog.Default()
@@ -72,6 +71,10 @@ func Run(ctx context.Context, o Options) error {
 		// Without this a client that opens a connection and sends nothing holds
 		// a goroutine until the process dies.
 		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	if o.Config.ObserveDeploys {
+		return o.runWithManager(ctx, srv, store, log)
 	}
 
 	ln, err := net.Listen("tcp", o.Config.ListenAddr)

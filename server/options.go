@@ -41,6 +41,8 @@ import (
 	"net/http"
 	"time"
 
+	"k8s.io/client-go/rest"
+
 	"github.com/damgahq/damga/authz"
 	"github.com/damgahq/damga/evidence"
 )
@@ -67,7 +69,42 @@ type Config struct {
 	RetentionWindow time.Duration
 
 	// ShutdownTimeout bounds the wait for in-flight requests.
+	//
+	// It must stay strictly below the manager's own grace period, and that is
+	// measured rather than tidy: controller-runtime's Start returns nil on a
+	// cancelled context and then its deferred stop procedure overwrites that
+	// with "failed waiting for all runnables to end within grace period". One
+	// in-flight request against a server whose own timeout is longer is enough
+	// to turn every clean shutdown into an error.
 	ShutdownTimeout time.Duration
+
+	// ObserveDeploys watches the cluster and closes the records the git write
+	// path opened.
+	//
+	// Off means the platform records commits and never learns what happened to
+	// them. That is a legitimate way to run a control plane that does not live
+	// in the target cluster, and an honest one: the records stay pending until
+	// the sweep gives up on them, rather than claiming a success nobody saw.
+	ObserveDeploys bool
+
+	// LeaderElect runs the observer and the sweep on one replica. The panel and
+	// the API answer on every replica regardless.
+	//
+	// Off by default, and that is not the same as "one replica is the leader":
+	// with leader election off, controller-runtime starts the leader-election
+	// group on *every* replica. Turning it off with several replicas running is
+	// how two observers end up racing.
+	LeaderElect bool
+
+	// LeaderElectionNamespace is where the Lease lives. Empty means the
+	// namespace the pod is in, which only resolves in-cluster.
+	LeaderElectionNamespace string
+
+	// PendingTimeout is how long a record may sit unobserved before the sweep
+	// writes unknown. It must exceed the cluster's progress deadline — ten
+	// minutes on every Deployment this platform renders — or a rollout is given
+	// up on while it is still legitimately rolling.
+	PendingTimeout time.Duration
 }
 
 // BindFlags registers Config on a FlagSet, so the free main and an enterprise
@@ -81,6 +118,14 @@ func (c *Config) BindFlags(f *flag.FlagSet) {
 		"how long non-current evidence records are kept; 0 keeps them for ever")
 	f.DurationVar(&c.ShutdownTimeout, "shutdown-timeout", 15*time.Second,
 		"how long to wait for in-flight requests on shutdown")
+	f.BoolVar(&c.ObserveDeploys, "observe-deploys", false,
+		"watch the cluster and close the evidence records the git write path opened")
+	f.BoolVar(&c.LeaderElect, "leader-elect", false,
+		"run the observer and the sweep on one replica only")
+	f.StringVar(&c.LeaderElectionNamespace, "leader-election-namespace", "",
+		"namespace holding the leader-election Lease; required out of cluster")
+	f.DurationVar(&c.PendingTimeout, "pending-timeout", 30*time.Minute,
+		"how long an unobserved record may stay pending before it is marked unknown")
 }
 
 // Options is the substitution surface. Two of its fields are seams and the rest
@@ -123,6 +168,12 @@ type Options struct {
 	// Middleware wraps the whole handler. This is where a session filter or an
 	// SSO redirect goes.
 	Middleware func(http.Handler) http.Handler
+
+	// RestConfig is the cluster the observer watches. nil falls back to the
+	// ambient kubeconfig, and Run only looks for one when ObserveDeploys is on
+	// — a control plane that is not observing must start with no cluster at
+	// all, which is also what makes it testable.
+	RestConfig *rest.Config
 
 	// Ready is called once the listener is bound, with the address it actually
 	// bound to. It exists because ListenAddr may name port 0 — which is how a
