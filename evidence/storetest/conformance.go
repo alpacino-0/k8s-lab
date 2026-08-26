@@ -72,6 +72,7 @@ func Run(t *testing.T, newStore Factory) {
 		{"SeqIsPerRefAndGapless", testSeqIsPerRefAndGapless},
 		{"TransitionIsCompareAndSet", testTransitionIsCompareAndSet},
 		{"RacingTransitionsProduceOneWinner", testRacingTransitionsProduceOneWinner},
+		{"StaleWriteIsFencedByVersion", testStaleWriteIsFencedByVersion},
 		{"VerifyHoldsAfterTransition", testVerifyHoldsAfterTransition},
 		{"HashSurvivesARoundTrip", testHashSurvivesARoundTrip},
 		{"CurrentPrefersRunning", testCurrentPrefersRunning},
@@ -325,6 +326,76 @@ func testRacingTransitionsProduceOneWinner(t *testing.T, newStore Factory) {
 	}
 	if len(final.Transitions) != 1 {
 		t.Errorf("record has %d transitions after the race, want 1", len(final.Transitions))
+	}
+}
+
+// The failure a state-only compare-and-set cannot see, reproduced.
+//
+// From compares a state, and a state is a value that recurs. An observer reads
+// the record, derives a decision, and writes — but between the read and the
+// write the record leaves the state it saw and comes back to it. The write is
+// then accepted on the strength of an observation that is already wrong.
+//
+// This is not hypothetical and not rare: Kubernetes leader election is
+// explicitly unfenced, and controller-runtime does not drain an in-flight
+// Reconcile when it loses the lease, so an old leader's write lands after the
+// handover as a matter of course. The record ends up claiming a state it was
+// never observed in, the event log runs backwards, and Verify still says the
+// chain is valid — because the chain proves the row was not edited, not that
+// it was written in the right order.
+//
+// ExpectEvents fences it, because a version does not recur.
+func testStaleWriteIsFencedByVersion(t *testing.T, newStore Factory) {
+	s := newStore(t, 0)
+	ctx := context.Background()
+	r := ref("api", prod)
+
+	rec := mustAppend(t, s, rec("commit:aaa", r, "aaa"))
+
+	// What a slow observer read: the record at version 0, in pending.
+	staleVersion := len(rec.Transitions)
+
+	// Meanwhile the record moves away from pending and back to it. Two writes,
+	// so the state it lands on is the very state the stale observer expects.
+	mustTransition(t, s, rec.ID, []evidence.State{evidence.StatePending}, evidence.StateApplied)
+	mustTransition(t, s, rec.ID, []evidence.State{evidence.StateApplied}, evidence.StatePending)
+
+	// Unfenced, this is accepted: the state matches, and nothing else is
+	// compared. Asserted rather than assumed, because if the store ever stops
+	// accepting it the fence below has stopped being the thing under test.
+	if _, err := s.Transition(ctx, rec.ID, evidence.Transition{
+		From: []evidence.State{evidence.StatePending}, To: evidence.StateRunning,
+		At: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("an unfenced stale write was rejected by %v — "+
+			"the case can no longer demonstrate what the fence is for", err)
+	}
+
+	// Fenced, the same write must lose. The record is at version 3 by now; the
+	// observer derived its decision from version 0.
+	_, err := s.Transition(ctx, rec.ID, evidence.Transition{
+		From: []evidence.State{evidence.StateRunning}, To: evidence.StateFailed,
+		At:           time.Now().UTC(),
+		ExpectEvents: &staleVersion,
+	})
+	if !errors.Is(err, evidence.ErrConflict) {
+		t.Fatalf("a write fenced at version %d was accepted against a record that has moved on: %v",
+			staleVersion, err)
+	}
+
+	// And the fence must not refuse a caller that is up to date, or every
+	// observer would be permanently locked out after the first transition.
+	current, err := s.Get(ctx, rec.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	fresh := len(current.Transitions)
+	if _, err := s.Transition(ctx, rec.ID, evidence.Transition{
+		From: []evidence.State{current.State}, To: evidence.StateFailed,
+		At:           time.Now().UTC(),
+		ExpectEvents: &fresh,
+	}); err != nil {
+		t.Errorf("a write fenced at the current version %d was refused: %v", fresh, err)
 	}
 }
 

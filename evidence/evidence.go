@@ -88,7 +88,13 @@ const (
 	// admission.
 	StateFailed State = "failed"
 	// StateSuperseded: a later record for the same Ref reached StateRunning
-	// first. Set by the store, never by a caller.
+	// first.
+	//
+	// Declared and not yet written by anything. Recorded here rather than
+	// removed because Current() already resolves the right record by Seq, so
+	// nothing looks broken until someone queries by state — which an export or
+	// an auditor will. The component that will write it is the deploy
+	// observer, which does not exist yet.
 	StateSuperseded State = "superseded"
 	// StateUnknown: the observer never saw this commit reach the cluster and
 	// the evidence for it is gone — Argo CD keeps ten history entries and
@@ -195,8 +201,9 @@ const (
 )
 
 // Observation is the provenance of a transition: what was read, where, and
-// when. ApplicationUID plus HistoryID is the pair the free store puts a unique
-// index on, which is what stops a restarted observer writing a second row.
+// when. It is descriptive: nothing in the store is keyed on it, and nothing
+// enforces uniqueness over it. What stops a restarted or superseded observer
+// writing a second row is Transition.ExpectEvents, below.
 type Observation struct {
 	Source         ObservationSource
 	ApplicationUID string
@@ -285,6 +292,28 @@ type Transition struct {
 	At          time.Time
 	Reason      string
 	Observation Observation
+
+	// ExpectEvents fences the write on the version of the record the caller
+	// derived its decision from: the number of transitions it saw. nil means
+	// unfenced.
+	//
+	// From alone is not enough, and the reason is structural rather than a
+	// bug. From compares a state, and a state is a value that recurs; every
+	// guarantee worth having here is about a sequence. Reproduced against both
+	// stores: an observer's write, computed before a leader handover, lands
+	// after it — Kubernetes leader election is explicitly unfenced, and
+	// controller-runtime does not drain an in-flight Reconcile when it loses
+	// the lease. If the record has meanwhile moved away from and back to a
+	// state in From, the compare-and-set accepts it. The record then claims a
+	// state on the strength of a stale observation, the event log runs
+	// backwards in time, and Verify still reports the chain valid — because
+	// the chain proves the row was not edited, not that it was written in the
+	// right order. An audit record that is provably intact and provably wrong
+	// is worse than one that is obviously broken.
+	//
+	// A version does not recur. The value costs nothing to produce: it is
+	// len(Record.Transitions), which the caller has already read.
+	ExpectEvents *int
 
 	// Policies and Admission are merged into the record when the transition
 	// is the one that learned them. Nil leaves what is there alone; a record's

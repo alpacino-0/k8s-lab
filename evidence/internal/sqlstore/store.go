@@ -226,6 +226,14 @@ func (s *Store) Transition(ctx context.Context, id evidence.ID, t evidence.Trans
 	if len(t.From) > 0 && !slices.Contains(t.From, rec.State) {
 		return rec, fmt.Errorf("%w: record is %s, expected one of %v", evidence.ErrConflict, rec.State, t.From)
 	}
+	// The version fence, checked inside the transaction that already holds the
+	// row lock. The PRIMARY KEY (record_id, seq) on record_event would reject a
+	// second writer at the same version anyway; comparing here turns that from
+	// a constraint violation into the ErrConflict the caller knows how to read.
+	if t.ExpectEvents != nil && *t.ExpectEvents != len(rec.Transitions) {
+		return rec, fmt.Errorf("%w: record is at version %d, caller derived from %d",
+			evidence.ErrConflict, len(rec.Transitions), *t.ExpectEvents)
+	}
 
 	ev := evidence.Event{
 		From: rec.State, To: t.To, At: evidence.Canonical(t.At),

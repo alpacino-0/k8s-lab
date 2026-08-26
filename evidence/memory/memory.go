@@ -93,6 +93,13 @@ func (s *Store) Transition(_ context.Context, id evidence.ID, t evidence.Transit
 	if len(t.From) > 0 && !slices.Contains(t.From, rec.State) {
 		return *rec, fmt.Errorf("%w: record is %s, expected one of %v", evidence.ErrConflict, rec.State, t.From)
 	}
+	// The version fence. Checked with the state and under the same lock, so a
+	// write derived from an older view of the record loses even when the state
+	// it expected happens to be the state it finds.
+	if t.ExpectEvents != nil && *t.ExpectEvents != len(rec.Transitions) {
+		return *rec, fmt.Errorf("%w: record is at version %d, caller derived from %d",
+			evidence.ErrConflict, len(rec.Transitions), *t.ExpectEvents)
+	}
 	ev := evidence.Event{
 		From: rec.State, To: t.To, At: evidence.Canonical(t.At),
 		Reason: t.Reason, Observation: t.Observation,
