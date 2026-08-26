@@ -15,12 +15,11 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-package sqlite
+package sqlstore
 
 import (
 	"context"
 	"database/sql"
-	"embed"
 	"fmt"
 	"io/fs"
 	"path"
@@ -28,9 +27,6 @@ import (
 	"strconv"
 	"strings"
 )
-
-//go:embed migrations/*.sql
-var migrations embed.FS
 
 // The obvious dependency here is goose, and it was measured rather than
 // assumed: it pulls 82 modules against this repository's 188, because it
@@ -50,8 +46,8 @@ type migration struct {
 	body    string
 }
 
-func load() ([]migration, error) {
-	entries, err := fs.ReadDir(migrations, "migrations")
+func loadMigrations(src fs.FS) ([]migration, error) {
+	entries, err := fs.ReadDir(src, "migrations")
 	if err != nil {
 		return nil, err
 	}
@@ -62,13 +58,13 @@ func load() ([]migration, error) {
 		}
 		num, _, ok := strings.Cut(e.Name(), "_")
 		if !ok {
-			return nil, fmt.Errorf("sqlite: migration %q is not named <version>_<name>.sql", e.Name())
+			return nil, fmt.Errorf("sqlstore: migration %q is not named <version>_<name>.sql", e.Name())
 		}
 		v, err := strconv.Atoi(num)
 		if err != nil {
-			return nil, fmt.Errorf("sqlite: migration %q has a non-numeric version: %w", e.Name(), err)
+			return nil, fmt.Errorf("sqlstore: migration %q has a non-numeric version: %w", e.Name(), err)
 		}
-		body, err := fs.ReadFile(migrations, path.Join("migrations", e.Name()))
+		body, err := fs.ReadFile(src, path.Join("migrations", e.Name()))
 		if err != nil {
 			return nil, err
 		}
@@ -78,7 +74,7 @@ func load() ([]migration, error) {
 	for i := range out {
 		if want := i + 1; out[i].version != want {
 			return nil, fmt.Errorf(
-				"sqlite: migrations are not a gapless sequence from 1: found version %d where %d was expected (%s)",
+				"sqlstore: migrations are not a gapless sequence from 1: found version %d where %d was expected (%s)",
 				out[i].version, want, out[i].name)
 		}
 	}
@@ -89,14 +85,14 @@ func load() ([]migration, error) {
 // transaction. A partially applied migration would leave a schema no version
 // number describes, which is the one state that cannot be recovered from
 // automatically.
-func migrate(ctx context.Context, db *sql.DB) error {
+func migrate(ctx context.Context, db *sql.DB, d Dialect) error {
 	if _, err := db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migration (
 		  version    INTEGER PRIMARY KEY,
 		  name       TEXT NOT NULL,
 		  applied_at TEXT NOT NULL
-		) STRICT`); err != nil {
-		return fmt.Errorf("sqlite: creating the migration table: %w", err)
+		)`); err != nil {
+		return fmt.Errorf("sqlstore: creating the migration table: %w", err)
 	}
 
 	var current int
@@ -104,10 +100,10 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	// normal case rather than an error.
 	if err := db.QueryRowContext(ctx,
 		`SELECT COALESCE(MAX(version), 0) FROM schema_migration`).Scan(&current); err != nil {
-		return fmt.Errorf("sqlite: reading the schema version: %w", err)
+		return fmt.Errorf("sqlstore: reading the schema version: %w", err)
 	}
 
-	all, err := load()
+	all, err := loadMigrations(d.Migrations())
 	if err != nil {
 		return err
 	}
@@ -117,20 +113,20 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		}
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
-			return fmt.Errorf("sqlite: beginning migration %s: %w", m.name, err)
+			return fmt.Errorf("sqlstore: beginning migration %s: %w", m.name, err)
 		}
 		if _, err := tx.ExecContext(ctx, m.body); err != nil {
 			_ = tx.Rollback()
-			return fmt.Errorf("sqlite: applying migration %s: %w", m.name, err)
+			return fmt.Errorf("sqlstore: applying migration %s: %w", m.name, err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO schema_migration (version, name, applied_at) VALUES (?, ?, ?)`,
+			d.Rebind(`INSERT INTO schema_migration (version, name, applied_at) VALUES (?, ?, ?)`),
 			m.version, m.name, nowText()); err != nil {
 			_ = tx.Rollback()
-			return fmt.Errorf("sqlite: recording migration %s: %w", m.name, err)
+			return fmt.Errorf("sqlstore: recording migration %s: %w", m.name, err)
 		}
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("sqlite: committing migration %s: %w", m.name, err)
+			return fmt.Errorf("sqlstore: committing migration %s: %w", m.name, err)
 		}
 	}
 	return nil

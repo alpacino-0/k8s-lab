@@ -168,6 +168,21 @@ jobs:
     name: Build and test the operator
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      # Pinned to the tag the reference tenant's chart already runs, so the
+      # engine tested here is the engine this project ships against.
+      postgres:
+        image: postgres:17.2-alpine3.21
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: evidence
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -179,7 +194,15 @@ jobs:
       # committed output differs from what the types produce, the tree is
       # inconsistent and every manifest downstream is stale — so it is a failure
       # here rather than a surprise at apply time.
+      # The evidence store has two engines and they disagree about statements
+      # this repository has to get right in both: BEGIN IMMEDIATE serialises
+      # writers on SQLite and does nothing on PostgreSQL, FOR UPDATE parses on
+      # one and not the other. The conformance suite skips PostgreSQL when this
+      # is unset, which keeps `go test ./...` useful on a laptop — so this
+      # service is what stops the skip from becoming permanent.
       - name: Test, and prove the generated code is committed
+        env:
+          DAMGA_TEST_POSTGRES_DSN: postgres://postgres:test@localhost:5432/evidence?sslmode=disable
         run: |
           make -f Makefile.operator test
           if ! git diff --exit-code -- api config; then
