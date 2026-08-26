@@ -113,6 +113,15 @@ const (
 	TierEnterprise Tier = "enterprise"
 )
 
+// Valid reports whether the tier is one a store may write.
+//
+// Checked rather than defaulted. Tier is copied into the record instead of
+// joined, so that a retention claim made two years later is checkable against
+// what was true then; writing "free" over a caller that forgot would turn that
+// record into a guess, and it would be a guess inside the hash chain, where it
+// cannot be corrected afterwards.
+func (t Tier) Valid() bool { return t == TierFree || t == TierEnterprise }
+
 // Actor is who caused this. ID references the control-plane user row so that
 // an erasure request is one row, not a scan of the archive. DisplayName and
 // Email are copied deliberately: an audit record has to stay readable after

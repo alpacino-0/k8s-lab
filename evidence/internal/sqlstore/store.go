@@ -107,6 +107,11 @@ func (s *Store) Append(ctx context.Context, rec evidence.Record) (evidence.Recor
 	if rec.IdempotencyKey == "" {
 		return evidence.Record{}, errors.New("evidence: IdempotencyKey is required")
 	}
+	// Ahead of the CHECK constraint that would catch it anyway, so the error
+	// names the field rather than the constraint.
+	if !rec.Tier.Valid() {
+		return evidence.Record{}, fmt.Errorf("evidence: invalid tier %q", rec.Tier)
+	}
 	if rec.State == "" {
 		rec.State = evidence.StatePending
 	}

@@ -68,6 +68,7 @@ func Run(t *testing.T, newStore Factory) {
 	}{
 		{"AppendAssignsIdentity", testAppendAssignsIdentity},
 		{"AppendRequiresIdempotencyKey", testAppendRequiresIdempotencyKey},
+		{"AppendRequiresAValidTier", testAppendRequiresAValidTier},
 		{"DuplicateReturnsExistingRecord", testDuplicateReturnsExistingRecord},
 		{"SeqIsPerRefAndGapless", testSeqIsPerRefAndGapless},
 		{"TransitionIsCompareAndSet", testTransitionIsCompareAndSet},
@@ -192,6 +193,51 @@ func testAppendRequiresIdempotencyKey(t *testing.T, newStore Factory) {
 	r := rec("", ref("api", prod), "aaa")
 	if _, err := s.Append(context.Background(), r); err == nil {
 		t.Fatal("Append accepted an empty IdempotencyKey")
+	}
+}
+
+// Found in production code rather than in a test, which is the reason it is
+// here now: the deploy write path passed a Record through without setting Tier,
+// the in-process store accepted it and wrote an empty string into the hash
+// chain, and both SQL stores rejected it with a CHECK violation. So the write
+// path worked in every test and failed against a real database.
+//
+// The suite missed it because every fixture in this file sets a tier. Three
+// implementations disagreeing about what is a valid record is the exact failure
+// a conformance suite exists to prevent, so the agreement is asserted rather
+// than assumed — and the answer is refusal, not a default. Tier is copied into
+// the record deliberately, so that a retention claim made two years later is
+// checkable against what was true then; quietly writing "free" over a caller's
+// omission would make that claim a guess.
+func testAppendRequiresAValidTier(t *testing.T, newStore Factory) {
+	s := newStore(t, 0)
+	base := rec("commit:aaa", ref("api", prod), "aaa")
+
+	for _, tc := range []struct {
+		name string
+		tier evidence.Tier
+	}{
+		{"unset", ""},
+		{"nonsense", evidence.Tier("platinum")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := base
+			r.IdempotencyKey = "commit:" + tc.name
+			r.Tier = tc.tier
+			if _, err := s.Append(context.Background(), r); err == nil {
+				t.Errorf("Append accepted Tier %q", tc.tier)
+			}
+		})
+	}
+
+	// And the valid ones are still accepted, or the check has gone too far.
+	for _, tier := range []evidence.Tier{evidence.TierFree, evidence.TierEnterprise} {
+		r := base
+		r.IdempotencyKey = "commit:" + string(tier)
+		r.Tier = tier
+		if _, err := s.Append(context.Background(), r); err != nil {
+			t.Errorf("Append rejected the valid tier %q: %v", tier, err)
+		}
 	}
 }
 

@@ -340,6 +340,12 @@ func (r Request) validate() error {
 		return errors.New("gitwrite: no author; a deploy has to be attributable to a person")
 	case r.Ref.TenantID == "" || r.Ref.App == "" || r.Ref.Env == "":
 		return errors.New("gitwrite: the record needs a tenant, an app and an environment")
+	case !r.Tier.Valid():
+		// The same refusal as a missing author, for the same reason: the tier
+		// is copied into the record and into the hash chain, so a default here
+		// would be an unverifiable claim about what the customer was paying for
+		// at the moment of the deploy.
+		return fmt.Errorf("gitwrite: invalid tier %q", r.Tier)
 	case r.Render == nil:
 		return errors.New("gitwrite: nothing to render")
 	case strings.HasPrefix(r.Target.Dir, "/"):

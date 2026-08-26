@@ -62,6 +62,9 @@ func (s *Store) Append(_ context.Context, rec evidence.Record) (evidence.Record,
 	if rec.IdempotencyKey == "" {
 		return evidence.Record{}, fmt.Errorf("evidence: IdempotencyKey is required")
 	}
+	if !rec.Tier.Valid() {
+		return evidence.Record{}, fmt.Errorf("evidence: invalid tier %q", rec.Tier)
+	}
 	if id, ok := s.byKey[rec.IdempotencyKey]; ok {
 		return *s.byID[id], fmt.Errorf("%w: %s", evidence.ErrDuplicate, rec.IdempotencyKey)
 	}
