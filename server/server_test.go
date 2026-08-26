@@ -32,9 +32,12 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/damgahq/damga/auth"
 	"github.com/damgahq/damga/authz"
 	"github.com/damgahq/damga/evidence"
 	"github.com/damgahq/damga/evidence/memory"
+	"github.com/damgahq/damga/identity"
+	identitymem "github.com/damgahq/damga/identity/memory"
 	"github.com/damgahq/damga/server"
 )
 
@@ -133,15 +136,84 @@ func get(t *testing.T, url string, header map[string][]string) (int, string) {
 	return resp.StatusCode, string(body)
 }
 
-func subjectHeader(tenant string, groups ...string) map[string][]string {
-	h := map[string][]string{
-		"X-Damga-Insecure-Subject": {"u-1"},
-		"X-Damga-Insecure-Tenant":  {tenant},
+const (
+	testApp      = "api"
+	testEnv      = "prod"
+	testTenant   = "tenant-a"
+	testEmail    = "orhan@example.test"
+	testPassword = "correct horse battery staple"
+)
+
+// identityWith seeds a store with one tenant and one account that has the given
+// role in it. An empty role means the account exists but belongs to no tenant,
+// which is the case that must NOT resolve to a viewer.
+func identityWith(t *testing.T, role identity.Role) identity.Store {
+	t.Helper()
+	const tenant = testTenant
+	ctx := context.Background()
+	store := identitymem.New()
+
+	if _, err := store.CreateTenant(ctx, identity.Tenant{
+		ID: tenant, Slug: tenant, DisplayName: tenant, Tier: identity.TierFree,
+	}); err != nil {
+		t.Fatalf("CreateTenant: %v", err)
 	}
-	if len(groups) > 0 {
-		h["X-Damga-Insecure-Group"] = groups
+	// Cheap parameters: the suite logs in a dozen times and what is under test
+	// is the wiring, not the cost.
+	hash, err := auth.NewHasher(auth.Params{
+		Memory: 64, Time: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32,
+	}, 2).Hash(testPassword)
+	if err != nil {
+		t.Fatalf("Hash: %v", err)
 	}
-	return h
+	if _, err := store.CreateAccount(ctx, identity.Account{
+		ID: "u-1", Kind: "user", Email: testEmail,
+		AuditEmail: "u-1@users.damga.local", DisplayName: "Orhan Yavuz",
+	}, identity.Credential{Hash: hash}); err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	if role != "" {
+		if err := store.AddMember(ctx, identity.Membership{
+			AccountID: "u-1", TenantID: tenant, Role: role,
+		}); err != nil {
+			t.Fatalf("AddMember: %v", err)
+		}
+	}
+	return store
+}
+
+// login posts credentials and returns the session cookie.
+func login(t *testing.T, base string) *http.Cookie {
+	t.Helper()
+	const password = testPassword
+	body := strings.NewReader(`{"email":"` + testEmail + `","password":"` + password + `"}`)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, base+"/api/v1/login", body)
+	if err != nil {
+		t.Fatalf("building the login request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/v1/login: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login = %d, want 200", resp.StatusCode)
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == auth.CookieName {
+			return c
+		}
+	}
+	t.Fatal("login returned no session cookie")
+	return nil
+}
+
+func cookieHeader(c *http.Cookie) map[string][]string {
+	if c == nil {
+		return nil
+	}
+	return map[string][]string{"Cookie": {c.Name + "=" + c.Value}}
 }
 
 func seed(t *testing.T, store evidence.Store, ref evidence.Ref) {
@@ -187,14 +259,18 @@ func TestZeroOptionsIsACompleteInstallation(t *testing.T) {
 // read the evidence page, and a subject from another tenant may not.
 func TestFreeAuthorizerDecidesByDefault(t *testing.T) {
 	store := memory.New(0)
-	ref := evidence.Ref{TenantID: "tenant-a", App: "api", Env: "prod"}
+	ref := evidence.Ref{TenantID: testTenant, App: testApp, Env: testEnv}
 	seed(t, store, ref)
 
-	base := start(t, server.Options{Evidence: store})
+	base := start(t, server.Options{
+		Evidence: store,
+		Identity: identityWith(t, identity.RoleViewer),
+	})
 	url := fmt.Sprintf("%s/api/v1/tenants/%s/apps/%s/envs/%s/evidence",
 		base, ref.TenantID, ref.App, ref.Env)
 
-	status, body := get(t, url, subjectHeader("tenant-a", "viewer"))
+	session := login(t, base)
+	status, body := get(t, url, cookieHeader(session))
 	if status != http.StatusOK {
 		t.Fatalf("a viewer reading its own tenant = %d %q, want 200", status, body)
 	}
@@ -206,14 +282,112 @@ func TestFreeAuthorizerDecidesByDefault(t *testing.T) {
 		t.Errorf("returned commit %q, want the seeded one", got.Source.CommitSHA)
 	}
 
-	status, _ = get(t, url, subjectHeader("tenant-b", "owner"))
-	if status != http.StatusForbidden {
-		t.Errorf("an owner of another tenant = %d, want 403", status)
+	// The same signed-in person, against a tenant they are not a member of.
+	other := fmt.Sprintf("%s/api/v1/tenants/%s/apps/%s/envs/%s/evidence",
+		base, "tenant-b", ref.App, ref.Env)
+	if status, _ := get(t, other, cookieHeader(session)); status != http.StatusForbidden {
+		t.Errorf("a member of one tenant reading another = %d, want 403", status)
 	}
 
-	status, _ = get(t, url, nil)
-	if status != http.StatusUnauthorized {
-		t.Errorf("no subject on the request = %d, want 401", status)
+	if status, _ := get(t, url, nil); status != http.StatusUnauthorized {
+		t.Errorf("no session on the request = %d, want 401", status)
+	}
+}
+
+// The security property, exercised end to end rather than asserted in the store
+// alone: a real, valid session for an account that belongs to no tenant must not
+// resolve to a viewer — and a viewer may read this page.
+func TestASessionWithoutAMembershipIsNotAViewer(t *testing.T) {
+	store := memory.New(0)
+	ref := evidence.Ref{TenantID: testTenant, App: testApp, Env: testEnv}
+	seed(t, store, ref)
+
+	base := start(t, server.Options{
+		Evidence: store,
+		Identity: identityWith(t, ""), // account exists, no membership
+	})
+	url := fmt.Sprintf("%s/api/v1/tenants/%s/apps/%s/envs/%s/evidence",
+		base, ref.TenantID, ref.App, ref.Env)
+
+	session := login(t, base)
+	if status, body := get(t, url, cookieHeader(session)); status != http.StatusForbidden {
+		t.Errorf("an account with no membership read the evidence page: %d %q", status, body)
+	}
+}
+
+// Every failed login says the same thing. Saying "no such account" for one
+// address and "wrong password" for another is an enumeration oracle with a user
+// interface.
+func TestEveryFailedLoginSaysTheSameThing(t *testing.T) {
+	base := start(t, server.Options{
+		Evidence: memory.New(0),
+		Identity: identityWith(t, identity.RoleOwner),
+	})
+
+	answers := make([]string, 0, 3)
+	for _, body := range []string{
+		`{"email":"` + testEmail + `","password":"wrong"}`,
+		`{"email":"nobody@example.test","password":"wrong"}`,
+		`{"email":"","password":""}`,
+	} {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+			base+"/api/v1/login", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("building request: %v", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		got, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			t.Fatalf("reading body: %v", err)
+		}
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s = %d, want 401", body, resp.StatusCode)
+		}
+		answers = append(answers, string(got))
+	}
+	for i := 1; i < len(answers); i++ {
+		if answers[i] != answers[0] {
+			t.Errorf("two failures answered differently:\n%s\n%s", answers[0], answers[i])
+		}
+	}
+}
+
+// Logout revokes the session server-side, not just in the browser. A cookie the
+// server still honours after logout is not a logout.
+func TestLogoutRevokesTheSession(t *testing.T) {
+	store := memory.New(0)
+	ref := evidence.Ref{TenantID: testTenant, App: testApp, Env: testEnv}
+	seed(t, store, ref)
+
+	base := start(t, server.Options{
+		Evidence: store,
+		Identity: identityWith(t, identity.RoleOwner),
+	})
+	url := fmt.Sprintf("%s/api/v1/tenants/%s/apps/%s/envs/%s/evidence",
+		base, ref.TenantID, ref.App, ref.Env)
+
+	session := login(t, base)
+	if status, _ := get(t, url, cookieHeader(session)); status != http.StatusOK {
+		t.Fatalf("setup: the session does not work")
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, base+"/api/v1/logout", nil)
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.AddCookie(session)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/v1/logout: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	if status, _ := get(t, url, cookieHeader(session)); status != http.StatusUnauthorized {
+		t.Errorf("the session still works after logout: %d", status)
 	}
 }
 
@@ -223,21 +397,24 @@ func TestFreeAuthorizerDecidesByDefault(t *testing.T) {
 // that ignored the seam and answered from the free implementation would look
 // identical from outside.
 func TestEnterpriseCanSubstituteBothSeams(t *testing.T) {
-	auth := &refusingAuthorizer{}
+	refuser := &refusingAuthorizer{}
 	store := &countingStore{Store: memory.New(0)}
-	ref := evidence.Ref{TenantID: "tenant-a", App: "api", Env: "prod"}
+	ref := evidence.Ref{TenantID: testTenant, App: testApp, Env: testEnv}
 	seed(t, store.Store, ref)
 
-	base := start(t, server.Options{Authorizer: auth, Evidence: store})
+	base := start(t, server.Options{
+		Authorizer: refuser, Evidence: store,
+		Identity: identityWith(t, identity.RoleOwner),
+	})
 	url := fmt.Sprintf("%s/api/v1/tenants/%s/apps/%s/envs/%s/evidence",
 		base, ref.TenantID, ref.App, ref.Env)
 
-	status, body := get(t, url, subjectHeader("tenant-a", "owner"))
+	status, body := get(t, url, cookieHeader(login(t, base)))
 	if status != http.StatusForbidden {
 		t.Fatalf("= %d %q, want 403: the substituted authorizer refused", status, body)
 	}
-	if auth.calls != 1 {
-		t.Errorf("the substituted authorizer was called %d times, want 1", auth.calls)
+	if refuser.calls != 1 {
+		t.Errorf("the substituted authorizer was called %d times, want 1", refuser.calls)
 	}
 	// A refusal must not read the store. Reading first and then deciding is how
 	// an authorization bug becomes a data leak in the logs.
@@ -249,14 +426,17 @@ func TestEnterpriseCanSubstituteBothSeams(t *testing.T) {
 	}
 
 	// And when it allows, the substituted store is the one read.
-	auth2 := allowAll{}
+	allower := allowAll{}
 	store2 := &countingStore{Store: memory.New(0)}
 	seed(t, store2.Store, ref)
-	base2 := start(t, server.Options{Authorizer: auth2, Evidence: store2})
+	base2 := start(t, server.Options{
+		Authorizer: allower, Evidence: store2,
+		Identity: identityWith(t, identity.RoleViewer),
+	})
 	url2 := fmt.Sprintf("%s/api/v1/tenants/%s/apps/%s/envs/%s/evidence",
 		base2, ref.TenantID, ref.App, ref.Env)
 
-	if status, body := get(t, url2, subjectHeader("tenant-a", "viewer")); status != http.StatusOK {
+	if status, body := get(t, url2, cookieHeader(login(t, base2))); status != http.StatusOK {
 		t.Fatalf("= %d %q, want 200", status, body)
 	}
 	if store2.reads != 1 {
@@ -336,10 +516,13 @@ func TestNilMiddlewareIsRefusedAtStartup(t *testing.T) {
 // An app that has never been deployed is a normal state, not a server error.
 // The page has to be able to render it, so it must be distinguishable.
 func TestNothingDeployedIsNotAnError(t *testing.T) {
-	base := start(t, server.Options{Authorizer: allowAll{}, Evidence: memory.New(0)})
+	base := start(t, server.Options{
+		Authorizer: allowAll{}, Evidence: memory.New(0),
+		Identity: identityWith(t, identity.RoleViewer),
+	})
 	status, _ := get(t,
-		base+"/api/v1/tenants/tenant-a/apps/never/envs/prod/evidence",
-		subjectHeader("tenant-a", "viewer"))
+		base+"/api/v1/tenants/"+testTenant+"/apps/never/envs/"+testEnv+"/evidence",
+		cookieHeader(login(t, base)))
 	if status != http.StatusNotFound {
 		t.Errorf("= %d, want 404 for an app with no deploys", status)
 	}

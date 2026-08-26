@@ -205,6 +205,20 @@ type Store interface {
 	// sessions alive is not a password change.
 	SetCredential(ctx context.Context, cred Credential) error
 
+	// RehashCredential replaces the hash and leaves sessions alone.
+	//
+	// Separate from SetCredential because they are different events wearing the
+	// same shape. A password change invalidates what everyone knew; a rehash is
+	// the same password stored under stronger parameters, and the moment to do
+	// it is a successful login — where revoking sessions would log the user out
+	// of the session that login just created. Conflating them means either
+	// never raising the parameters or bouncing people at the door.
+	//
+	// ErrNotFound when the account has no credential: there is nothing to
+	// upgrade, and creating one here would give a federated account a password
+	// nobody set.
+	RehashCredential(ctx context.Context, cred Credential) error
+
 	// AddMember grants a role in a tenant. ErrDuplicate if one already exists.
 	AddMember(ctx context.Context, m Membership) error
 	// Membership is the authorization lookup: what this account may do here.

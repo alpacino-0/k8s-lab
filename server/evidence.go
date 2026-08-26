@@ -22,23 +22,20 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/damgahq/damga/auth"
 	"github.com/damgahq/damga/authz"
 	"github.com/damgahq/damga/evidence"
+	"github.com/damgahq/damga/identity"
 )
 
 // currentEvidence answers what is deployed right now for one app in one
 // environment. It is one endpoint rather than a whole API because it is the one
-// that exercises both seams at once: the answer is refused or allowed by
-// Options.Authorizer and read from Options.Evidence, so a second repository
-// substituting either of them is exercised by this handler and not only by the
-// compiler.
-//
-// The subject is read from headers. That is not the identity mechanism — there
-// is none yet — and the headers are named so that no one mistakes it for one.
-// It is what lets the seam be wired and tested before the session layer exists,
-// and it is refused outright unless the caller opted in, so it cannot be left
-// on by accident in something real.
-func currentEvidence(a authz.Authorizer, store evidence.Store) http.Handler {
+// that exercises every seam at once: who is asking comes from a session and a
+// membership row, whether they may is Options.Authorizer, and what is returned
+// is Options.Evidence.
+func currentEvidence(
+	a authz.Authorizer, store evidence.Store, idStore identity.Store, sess *auth.Sessions,
+) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ref := evidence.Ref{
 			TenantID: r.PathValue("tenant"),
@@ -46,9 +43,22 @@ func currentEvidence(a authz.Authorizer, store evidence.Store) http.Handler {
 			Env:      r.PathValue("env"),
 		}
 
-		sub, ok := subjectFromRequest(r)
-		if !ok {
-			problem(w, http.StatusUnauthorized, "no subject on the request")
+		live, err := sess.Resolve(r.Context(), r)
+		if err != nil {
+			problem(w, http.StatusUnauthorized, "not signed in")
+			return
+		}
+
+		// The subject is built from the session and the membership row, and
+		// from nothing the caller sent. A subject assembled from a request
+		// parameter would be a viewer in whatever tenant it named — and a
+		// viewer may read this page.
+		sub, err := subjectFrom(r.Context(), idStore, live, ref.TenantID)
+		if err != nil {
+			// Deliberately the same answer as a refusal. "You are signed in but
+			// not a member here" confirms the tenant exists, which is the one
+			// thing a stranger probing tenant names wants to learn.
+			problem(w, http.StatusForbidden, "no access to this tenant")
 			return
 		}
 
@@ -87,22 +97,6 @@ func currentEvidence(a authz.Authorizer, store evidence.Store) http.Handler {
 			return
 		}
 	})
-}
-
-// subjectFromRequest is a placeholder with a loud name. Identity is an open
-// decision — "log in with GitHub" is OIDC by any ordinary reading, and SSO is
-// the paid trigger — so nothing here should look like it settled that.
-func subjectFromRequest(r *http.Request) (authz.Subject, bool) {
-	id := r.Header.Get("X-Damga-Insecure-Subject")
-	tenant := r.Header.Get("X-Damga-Insecure-Tenant")
-	if id == "" || tenant == "" {
-		return authz.Subject{}, false
-	}
-	var groups []string
-	if g := r.Header.Values("X-Damga-Insecure-Group"); len(g) > 0 {
-		groups = g
-	}
-	return authz.Subject{ID: id, Tenant: tenant, Groups: groups}, true
 }
 
 func problem(w http.ResponseWriter, status int, detail string) {

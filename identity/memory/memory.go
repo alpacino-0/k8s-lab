@@ -204,6 +204,24 @@ func (s *Store) SetCredential(_ context.Context, cred identity.Credential) error
 	return nil
 }
 
+func (s *Store) RehashCredential(_ context.Context, cred identity.Credential) error {
+	if cred.AccountID == "" || cred.Hash == "" {
+		return fmt.Errorf("%w: a credential needs an account and a hash", identity.ErrInvalid)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.creds[cred.AccountID]; !ok {
+		return identity.ErrNotFound
+	}
+	if cred.UpdatedAt.IsZero() {
+		cred.UpdatedAt = time.Now()
+	}
+	cred.UpdatedAt = cred.UpdatedAt.UTC().Truncate(time.Microsecond)
+	// Sessions are deliberately untouched. See identity.Store.
+	s.creds[cred.AccountID] = cred
+	return nil
+}
+
 // ---------------------------------------------------------------- membership
 
 func (s *Store) AddMember(_ context.Context, m identity.Membership) error {

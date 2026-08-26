@@ -45,6 +45,7 @@ import (
 
 	"github.com/damgahq/damga/authz"
 	"github.com/damgahq/damga/evidence"
+	"github.com/damgahq/damga/identity"
 )
 
 // Config is everything that arrives from flags, environment or a file. It holds
@@ -100,6 +101,19 @@ type Config struct {
 	// namespace the pod is in, which only resolves in-cluster.
 	LeaderElectionNamespace string
 
+	// SessionTTL is how long a login lasts. Absolute rather than sliding: a
+	// sliding window means a stolen cookie never expires while it is being
+	// used. Zero is twelve hours.
+	SessionTTL time.Duration
+
+	// SecureCookies sets the session cookie's Secure attribute.
+	//
+	// Configuration rather than a constant because the documented first run is
+	// plain http on localhost, and a Secure cookie is simply not stored there —
+	// the login would fail silently, with nothing in the logs. The chart
+	// already carries exactly this switch for the reference tenant.
+	SecureCookies bool
+
 	// PendingTimeout is how long a record may sit unobserved before the sweep
 	// writes unknown. It must exceed the cluster's progress deadline — ten
 	// minutes on every Deployment this platform renders — or a rollout is given
@@ -118,6 +132,10 @@ func (c *Config) BindFlags(f *flag.FlagSet) {
 		"how long non-current evidence records are kept; 0 keeps them for ever")
 	f.DurationVar(&c.ShutdownTimeout, "shutdown-timeout", 15*time.Second,
 		"how long to wait for in-flight requests on shutdown")
+	f.DurationVar(&c.SessionTTL, "session-ttl", 12*time.Hour,
+		"how long a login lasts")
+	f.BoolVar(&c.SecureCookies, "secure-cookies", false,
+		"set Secure on the session cookie; required behind TLS, breaks plain http")
 	f.BoolVar(&c.ObserveDeploys, "observe-deploys", false,
 		"watch the cluster and close the evidence records the git write path opened")
 	f.BoolVar(&c.LeaderElect, "leader-elect", false,
@@ -147,6 +165,17 @@ type Options struct {
 	// Named Evidence rather than the plan's AuditStore because the record, the
 	// page and the decision all say evidence. It is the same slot.
 	Evidence evidence.Store
+
+	// Identity holds accounts, memberships and sessions. nil opens the free
+	// store against Config.EvidenceDSN — the same database, a separate
+	// migration sequence.
+	//
+	// Not a seam, and the asymmetry with Evidence is deliberate: an enterprise
+	// build replaces the audit archive because that is a different product,
+	// but single sign-on changes how an account row is created and never where
+	// accounts live. Making this replaceable would oblige damga-ee to
+	// reimplement teams and memberships for nothing.
+	Identity identity.Store
 
 	// Panel is the front-end bundle, served at "/". nil mounts nothing, which
 	// is what the free build does today because there is no bundle yet.

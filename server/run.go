@@ -27,12 +27,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/damgahq/damga/auth"
 	"github.com/damgahq/damga/authz"
 	"github.com/damgahq/damga/authz/rbac"
 	"github.com/damgahq/damga/evidence"
 	"github.com/damgahq/damga/evidence/memory"
 	"github.com/damgahq/damga/evidence/postgres"
 	"github.com/damgahq/damga/evidence/sqlite"
+	"github.com/damgahq/damga/identity"
+	identitymem "github.com/damgahq/damga/identity/memory"
+	identitypg "github.com/damgahq/damga/identity/postgres"
+	identitysqlite "github.com/damgahq/damga/identity/sqlite"
 )
 
 // Run starts the control plane and blocks until ctx is cancelled.
@@ -45,6 +50,20 @@ import (
 func Run(ctx context.Context, o Options) error {
 	o = o.withDefaults()
 	log := slog.Default()
+
+	idStore := o.Identity
+	if idStore == nil {
+		var err error
+		idStore, err = openIdentity(ctx, o.Config, log)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := idStore.Close(); err != nil {
+				log.Error("closing the identity store", "error", err)
+			}
+		}()
+	}
 
 	store := o.Evidence
 	if store == nil {
@@ -60,7 +79,7 @@ func Run(ctx context.Context, o Options) error {
 		}()
 	}
 
-	handler, err := o.handler(store)
+	handler, err := o.handler(store, idStore)
 	if err != nil {
 		return err
 	}
@@ -114,15 +133,28 @@ func Run(ctx context.Context, o Options) error {
 
 // handler builds the routes, then hands the mux to the Routes hook and wraps
 // the result in Middleware.
-func (o Options) handler(store evidence.Store) (http.Handler, error) {
+func (o Options) handler(store evidence.Store, idStore identity.Store) (http.Handler, error) {
+	sess := &auth.Sessions{
+		Store:  idStore,
+		TTL:    o.Config.SessionTTL,
+		Secure: o.Config.SecureCookies,
+	}
+	// Concurrency is left to the default, which is derived from the CPUs the
+	// process can see. The point of the bound is that there is one; see
+	// auth.NewHasher for why the parameter alone does not make the peak
+	// survivable.
+	hasher := auth.NewHasher(auth.DefaultParams, 0)
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	mux.Handle("POST /api/v1/login", o.login(idStore, sess, hasher))
+	mux.Handle("POST /api/v1/logout", o.logout(sess))
 	mux.Handle("GET /api/v1/tenants/{tenant}/apps/{app}/envs/{env}/evidence",
-		currentEvidence(o.Authorizer, store))
+		currentEvidence(o.Authorizer, store, idStore, sess))
 
 	// Mounted only when there is one. There is no built-in bundle yet, and
 	// serving a 404 at "/" from an embedded empty FS would be a worse answer
@@ -139,13 +171,40 @@ func (o Options) handler(store evidence.Store) (http.Handler, error) {
 		o.Routes(mux)
 	}
 
-	var h http.Handler = mux
+	// The CSRF control, and it is this rather than the cookie's SameSite.
+	// SameSite is site-scoped: a sibling subdomain is same-site, which is
+	// ordinary for an internal platform and imposes no restriction at all.
+	// CrossOriginProtection is origin-scoped — it rejects
+	// Sec-Fetch-Site: same-site — and it deliberately allows requests with
+	// neither Sec-Fetch-Site nor Origin, so the CLI and curl are unaffected.
+	//
+	// It always allows GET, so any future streaming endpoint (a log tail is a
+	// GET) needs an Origin check of its own rather than inheriting this one.
+	h := http.NewCrossOriginProtection().Handler(mux)
 	if o.Middleware != nil {
 		if h = o.Middleware(h); h == nil {
 			return nil, errors.New("server: Middleware returned a nil handler")
 		}
 	}
 	return h, nil
+}
+
+// openIdentity opens the identity store from the same DSN as the evidence one.
+// One database, two migration sequences: see internal/sqlmigrate for why they
+// cannot share a version table.
+func openIdentity(ctx context.Context, c Config, log *slog.Logger) (identity.Store, error) {
+	switch dsn := c.EvidenceDSN; {
+	case dsn == "":
+		log.Warn("no DSN: accounts and sessions are kept in memory and lost on restart",
+			"flag", "-evidence-dsn")
+		return identitymem.New(), nil
+	case strings.HasPrefix(dsn, "postgres://"),
+		strings.HasPrefix(dsn, "postgresql://"),
+		strings.HasPrefix(dsn, "pgx://"):
+		return identitypg.Open(ctx, dsn)
+	default:
+		return identitysqlite.Open(ctx, dsn)
+	}
 }
 
 // openStore picks an engine from the DSN. This function is the only place in

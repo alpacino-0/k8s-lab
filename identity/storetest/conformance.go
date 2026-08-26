@@ -58,6 +58,7 @@ func Run(t *testing.T, newStore Factory) {
 		{"AccountRequiresAnAuditEmail", testAccountRequiresAnAuditEmail},
 		{"AnAccountWithoutAPasswordIsNormal", testAnAccountWithoutAPasswordIsNormal},
 		{"ChangingAPasswordRevokesSessions", testChangingAPasswordRevokesSessions},
+		{"RehashingKeepsSessions", testRehashingKeepsSessions},
 		{"MembershipIsTheOnlySourceOfARole", testMembershipIsTheOnlySourceOfARole},
 		{"MembershipRejectsAnInvalidRole", testMembershipRejectsAnInvalidRole},
 		{"MembershipRefusesDanglingReferences", testMembershipRefusesDanglingReferences},
@@ -272,6 +273,50 @@ func testChangingAPasswordRevokesSessions(t *testing.T, newStore Factory) {
 	}
 	if got.Hash != "argon2id$new" {
 		t.Errorf("hash = %q, want the new one", got.Hash)
+	}
+}
+
+// The other half of the pair, and the reason they are two methods rather than a
+// flag on one. A rehash is the same password stored under stronger parameters,
+// and the only moment to do it is a successful login — where revoking sessions
+// would log the user out of the session that login just created. Conflating
+// them means either never raising the parameters or bouncing people at the door.
+func testRehashingKeepsSessions(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+	seedTenantAndAccount(t, s)
+
+	if err := s.CreateSession(ctx, session(time.Now().Add(time.Hour))); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := s.RehashCredential(ctx, identity.Credential{
+		AccountID: acctID, Hash: "argon2id$stronger",
+	}); err != nil {
+		t.Fatalf("RehashCredential: %v", err)
+	}
+
+	if _, err := s.Session(ctx, digest("token-one"), time.Now()); err != nil {
+		t.Errorf("the session was revoked by a rehash: %v", err)
+	}
+	got, err := s.Credential(ctx, acctID)
+	if err != nil {
+		t.Fatalf("Credential: %v", err)
+	}
+	if got.Hash != "argon2id$stronger" {
+		t.Errorf("hash = %q, want the rehashed one", got.Hash)
+	}
+
+	// And it upgrades nothing that is not there. A federated account has no
+	// credential, and inventing one would give it a password nobody set.
+	other := account()
+	other.ID, other.Email = "a_federated", "fed@example.test"
+	if _, err := s.CreateAccount(ctx, other, identity.Credential{}); err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	if err := s.RehashCredential(ctx, identity.Credential{
+		AccountID: "a_federated", Hash: "argon2id$x",
+	}); !errors.Is(err, identity.ErrNotFound) {
+		t.Errorf("RehashCredential on an account with no password = %v, want ErrNotFound", err)
 	}
 }
 

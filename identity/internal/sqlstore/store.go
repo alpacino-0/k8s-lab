@@ -322,6 +322,31 @@ func (s *Store) SetCredential(ctx context.Context, cred identity.Credential) err
 	return tx.Commit()
 }
 
+func (s *Store) RehashCredential(ctx context.Context, cred identity.Credential) error {
+	if cred.AccountID == "" || cred.Hash == "" {
+		return fmt.Errorf("%w: a credential needs an account and a hash", identity.ErrInvalid)
+	}
+	if cred.UpdatedAt.IsZero() {
+		cred.UpdatedAt = s.now()
+	}
+	// One UPDATE, and no session touched. See identity.Store for why this is a
+	// different operation from SetCredential rather than a flag on it.
+	res, err := s.db.ExecContext(ctx, s.d.Rebind(
+		`UPDATE credential SET hash = ?, updated_at = ? WHERE account_id = ?`),
+		cred.Hash, asText(cred.UpdatedAt), cred.AccountID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return identity.ErrNotFound
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------- membership
 
 func (s *Store) AddMember(ctx context.Context, m identity.Membership) error {
