@@ -1,0 +1,503 @@
+/*
+Copyright 2026 Orhan Yavuz.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+// Package storetest is the suite every identity.Store has to pass.
+//
+// Written before the second implementation, deliberately. The evidence store
+// did it in that order and its SQLite backend passed unchanged on the first
+// run; the alternative is discovering, one engine at a time, that three
+// implementations disagree about what a valid account is.
+//
+// It also carries a lesson that cost this project a real defect: a suite whose
+// fixtures are all well-formed tests three happy paths rather than their
+// agreement. So the cases below spend most of their effort on what must be
+// REFUSED, and several of them exist because refusing is a security property
+// and not tidiness.
+package storetest
+
+import (
+	"context"
+	"crypto/sha256"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/damgahq/damga/identity"
+)
+
+// Factory makes a fresh, empty store. Called once per case: the cases assume
+// they own it.
+type Factory func(t *testing.T) identity.Store
+
+// Run executes the whole suite against one implementation.
+func Run(t *testing.T, newStore Factory) {
+	t.Helper()
+	cases := []struct {
+		name string
+		fn   func(*testing.T, Factory)
+	}{
+		{"TenantRoundTrips", testTenantRoundTrips},
+		{"TenantRejectsAnInvalidTier", testTenantRejectsAnInvalidTier},
+		{"SlugIsUnique", testSlugIsUnique},
+		{"AccountRoundTrips", testAccountRoundTrips},
+		{"EmailIsUniqueAndCaseInsensitive", testEmailIsUniqueAndCaseInsensitive},
+		{"AccountRequiresAnAuditEmail", testAccountRequiresAnAuditEmail},
+		{"AnAccountWithoutAPasswordIsNormal", testAnAccountWithoutAPasswordIsNormal},
+		{"ChangingAPasswordRevokesSessions", testChangingAPasswordRevokesSessions},
+		{"MembershipIsTheOnlySourceOfARole", testMembershipIsTheOnlySourceOfARole},
+		{"MembershipRejectsAnInvalidRole", testMembershipRejectsAnInvalidRole},
+		{"MembershipRefusesDanglingReferences", testMembershipRefusesDanglingReferences},
+		{"RemovingAMemberKeepsTheAccount", testRemovingAMemberKeepsTheAccount},
+		{"SessionRoundTrips", testSessionRoundTrips},
+		{"AnExpiredSessionIsNotASession", testAnExpiredSessionIsNotASession},
+		{"SessionsCanBeTerminatedByAccount", testSessionsCanBeTerminatedByAccount},
+		{"PruneRemovesOnlyWhatExpired", testPruneRemovesOnlyWhatExpired},
+		{"NotFoundIsDistinguishable", testNotFoundIsDistinguishable},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) { c.fn(t, newStore) })
+	}
+}
+
+// ---------------------------------------------------------------- helpers
+
+const (
+	tenantID = "t_alpha"
+	acctID   = "a_orhan"
+	email    = "orhan@example.test"
+)
+
+func tenant() identity.Tenant {
+	return identity.Tenant{
+		ID: tenantID, Slug: "alpha", DisplayName: "Alpha",
+		Tier: identity.TierFree,
+	}
+}
+
+func account() identity.Account {
+	return identity.Account{
+		ID: acctID, Kind: "user", Email: email,
+		AuditEmail: "a_orhan@users.damga.local", DisplayName: "Orhan Yavuz",
+	}
+}
+
+func digest(s string) []byte {
+	sum := sha256.Sum256([]byte(s))
+	return sum[:]
+}
+
+func seedTenantAndAccount(t *testing.T, s identity.Store) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := s.CreateTenant(ctx, tenant()); err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	if _, err := s.CreateAccount(ctx, account(), identity.Credential{Hash: "argon2id$fake"}); err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+}
+
+func session(expires time.Time) identity.Session {
+	return identity.Session{
+		Digest: digest("token-one"), AccountID: acctID,
+		IssuedFor: "damga.example.test",
+		CreatedAt: time.Now(), ExpiresAt: expires,
+	}
+}
+
+// ---------------------------------------------------------------- cases
+
+func testTenantRoundTrips(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	got, err := s.CreateTenant(ctx, tenant())
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	if got.CreatedAt.IsZero() {
+		t.Error("CreatedAt is zero")
+	}
+
+	byID, err := s.Tenant(ctx, tenantID)
+	if err != nil {
+		t.Fatalf("Tenant: %v", err)
+	}
+	bySlug, err := s.TenantBySlug(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("TenantBySlug: %v", err)
+	}
+	if byID.ID != bySlug.ID || byID.Tier != identity.TierFree {
+		t.Errorf("the two lookups disagree: %+v vs %+v", byID, bySlug)
+	}
+}
+
+// The tier is copied onto every evidence record, where it lands inside a hash
+// chain and can never be corrected. A store that accepts a nonsense value there
+// makes every retention claim built on it a guess.
+func testTenantRejectsAnInvalidTier(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	for _, tier := range []identity.Tier{"", "platinum"} {
+		x := tenant()
+		x.Tier = tier
+		if _, err := s.CreateTenant(context.Background(), x); !errors.Is(err, identity.ErrInvalid) {
+			t.Errorf("CreateTenant with tier %q returned %v, want ErrInvalid", tier, err)
+		}
+	}
+}
+
+func testSlugIsUnique(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+	if _, err := s.CreateTenant(ctx, tenant()); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	other := tenant()
+	other.ID = "t_beta"
+	if _, err := s.CreateTenant(ctx, other); !errors.Is(err, identity.ErrDuplicate) {
+		t.Errorf("a second tenant took the same slug: %v", err)
+	}
+}
+
+func testAccountRoundTrips(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+	seedTenantAndAccount(t, s)
+
+	byID, err := s.Account(ctx, acctID)
+	if err != nil {
+		t.Fatalf("Account: %v", err)
+	}
+	if byID.AuditEmail == byID.Email {
+		t.Error("the audit email equals the login email; erasing one would erase the other")
+	}
+	byEmail, err := s.AccountByEmail(ctx, email)
+	if err != nil {
+		t.Fatalf("AccountByEmail: %v", err)
+	}
+	if byEmail.ID != acctID {
+		t.Errorf("AccountByEmail returned %q", byEmail.ID)
+	}
+}
+
+// A person who signed up as Orhan@ and types orhan@ has not made a mistake. A
+// store that treats those as two accounts has, and the failure is a duplicate
+// account rather than an error message.
+func testEmailIsUniqueAndCaseInsensitive(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+	seedTenantAndAccount(t, s)
+
+	other := account()
+	other.ID = "a_other"
+	other.Email = "ORHAN@Example.Test"
+	if _, err := s.CreateAccount(ctx, other, identity.Credential{}); !errors.Is(err, identity.ErrDuplicate) {
+		t.Errorf("a second account took the same address in another case: %v", err)
+	}
+
+	got, err := s.AccountByEmail(ctx, "ORHAN@Example.Test")
+	if err != nil {
+		t.Fatalf("AccountByEmail with different case: %v", err)
+	}
+	if got.ID != acctID {
+		t.Errorf("case-folded lookup returned %q", got.ID)
+	}
+}
+
+// The audit email is what goes into git commits and into the hash chain, where
+// it can never be redacted. Defaulting it to the login address would quietly
+// publish personal data that no erasure request can reach, so the store refuses
+// to choose.
+func testAccountRequiresAnAuditEmail(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	a := account()
+	a.AuditEmail = ""
+	if _, err := s.CreateAccount(context.Background(), a, identity.Credential{}); !errors.Is(err, identity.ErrInvalid) {
+		t.Errorf("an account with no audit email was accepted: %v", err)
+	}
+}
+
+// A federated account has no password, and that is the honest representation of
+// "this person's password lives at their identity provider" — not an error, and
+// not an empty hash that something might compare against.
+func testAnAccountWithoutAPasswordIsNormal(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+	if _, err := s.CreateTenant(ctx, tenant()); err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	if _, err := s.CreateAccount(ctx, account(), identity.Credential{}); err != nil {
+		t.Fatalf("CreateAccount with no credential: %v", err)
+	}
+	if _, err := s.Credential(ctx, acctID); !errors.Is(err, identity.ErrNotFound) {
+		t.Errorf("Credential for a federated account = %v, want ErrNotFound", err)
+	}
+}
+
+// A password change that leaves the old sessions alive is not a password
+// change; it is a second password. This is the one case in the suite that is
+// about an attacker rather than about correctness.
+func testChangingAPasswordRevokesSessions(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+	seedTenantAndAccount(t, s)
+
+	if err := s.CreateSession(ctx, session(time.Now().Add(time.Hour))); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := s.SetCredential(ctx, identity.Credential{AccountID: acctID, Hash: "argon2id$new"}); err != nil {
+		t.Fatalf("SetCredential: %v", err)
+	}
+
+	if _, err := s.Session(ctx, digest("token-one"), time.Now()); !errors.Is(err, identity.ErrNotFound) {
+		t.Errorf("a session survived the password change: %v", err)
+	}
+	got, err := s.Credential(ctx, acctID)
+	if err != nil {
+		t.Fatalf("Credential: %v", err)
+	}
+	if got.Hash != "argon2id$new" {
+		t.Errorf("hash = %q, want the new one", got.Hash)
+	}
+}
+
+// The security property this type exists for. A subject's tenant and role come
+// from a membership row and from nowhere else — the free authorizer treats an
+// unrecognised group as viewer and a viewer may read the evidence page, so a
+// subject assembled from anything the caller sent would let a stranger read
+// another tenant's deploy history. No membership means no subject.
+func testMembershipIsTheOnlySourceOfARole(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+	seedTenantAndAccount(t, s)
+
+	if _, err := s.Membership(ctx, acctID, tenantID); !errors.Is(err, identity.ErrNotFound) {
+		t.Fatalf("an account with no membership already has one: %v", err)
+	}
+
+	if err := s.AddMember(ctx, identity.Membership{
+		AccountID: acctID, TenantID: tenantID, Role: identity.RoleMember,
+	}); err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+	got, err := s.Membership(ctx, acctID, tenantID)
+	if err != nil {
+		t.Fatalf("Membership: %v", err)
+	}
+	if got.Role != identity.RoleMember {
+		t.Errorf("role = %q, want member", got.Role)
+	}
+
+	// And it is not a membership in some other tenant.
+	if _, err := s.Membership(ctx, acctID, "t_nosuch"); !errors.Is(err, identity.ErrNotFound) {
+		t.Errorf("a membership leaked into another tenant: %v", err)
+	}
+
+	all, err := s.Memberships(ctx, acctID)
+	if err != nil {
+		t.Fatalf("Memberships: %v", err)
+	}
+	if len(all) != 1 {
+		t.Errorf("Memberships returned %d, want 1", len(all))
+	}
+}
+
+func testMembershipRejectsAnInvalidRole(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+	seedTenantAndAccount(t, s)
+	for _, role := range []identity.Role{"", "admin", "superuser"} {
+		err := s.AddMember(ctx, identity.Membership{
+			AccountID: acctID, TenantID: tenantID, Role: role,
+		})
+		if !errors.Is(err, identity.ErrInvalid) {
+			t.Errorf("AddMember with role %q returned %v, want ErrInvalid", role, err)
+		}
+	}
+}
+
+// A membership pointing at an account or a tenant that does not exist is a role
+// granted to nobody, or in nowhere. Both engines will have a foreign key; the
+// in-process one has to agree.
+func testMembershipRefusesDanglingReferences(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+	seedTenantAndAccount(t, s)
+
+	if err := s.AddMember(ctx, identity.Membership{
+		AccountID: "a_ghost", TenantID: tenantID, Role: identity.RoleMember,
+	}); !errors.Is(err, identity.ErrNotFound) {
+		t.Errorf("a membership was granted to an account that does not exist: %v", err)
+	}
+	if err := s.AddMember(ctx, identity.Membership{
+		AccountID: acctID, TenantID: "t_ghost", Role: identity.RoleMember,
+	}); !errors.Is(err, identity.ErrNotFound) {
+		t.Errorf("a membership was granted in a tenant that does not exist: %v", err)
+	}
+}
+
+// Revoking a role is not deleting a person. The account survives, because
+// evidence records point at its id across a boundary with no foreign key and
+// reusing or removing it would silently reattribute history.
+func testRemovingAMemberKeepsTheAccount(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+	seedTenantAndAccount(t, s)
+	if err := s.AddMember(ctx, identity.Membership{
+		AccountID: acctID, TenantID: tenantID, Role: identity.RoleOwner,
+	}); err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+
+	if err := s.RemoveMember(ctx, acctID, tenantID); err != nil {
+		t.Fatalf("RemoveMember: %v", err)
+	}
+	if _, err := s.Membership(ctx, acctID, tenantID); !errors.Is(err, identity.ErrNotFound) {
+		t.Errorf("the membership survived removal: %v", err)
+	}
+	if _, err := s.Account(ctx, acctID); err != nil {
+		t.Errorf("the account was removed with the membership: %v", err)
+	}
+}
+
+func testSessionRoundTrips(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+	seedTenantAndAccount(t, s)
+
+	want := session(time.Now().Add(time.Hour))
+	if err := s.CreateSession(ctx, want); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	got, err := s.Session(ctx, want.Digest, time.Now())
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if got.AccountID != acctID {
+		t.Errorf("account = %q", got.AccountID)
+	}
+	if got.IssuedFor != want.IssuedFor {
+		t.Errorf("IssuedFor = %q, want %q — it is checked on every use, so it has to survive",
+			got.IssuedFor, want.IssuedFor)
+	}
+
+	if err := s.DeleteSession(ctx, want.Digest); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	if _, err := s.Session(ctx, want.Digest, time.Now()); !errors.Is(err, identity.ErrNotFound) {
+		t.Errorf("the session survived logout: %v", err)
+	}
+}
+
+// Refused by the store rather than left for the caller to check, because a
+// caller that forgets is an authentication bypass rather than a stale read.
+func testAnExpiredSessionIsNotASession(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+	seedTenantAndAccount(t, s)
+
+	past := time.Now().Add(-time.Minute)
+	if err := s.CreateSession(ctx, session(past)); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := s.Session(ctx, digest("token-one"), time.Now()); !errors.Is(err, identity.ErrNotFound) {
+		t.Errorf("an expired session was returned: %v", err)
+	}
+}
+
+// What deprovisioning needs. The paid tier sells SCIM, and SCIM's whole promise
+// is that removing somebody from the directory removes their access now —
+// not when a token happens to expire.
+func testSessionsCanBeTerminatedByAccount(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+	seedTenantAndAccount(t, s)
+
+	for _, tok := range []string{"one", "two", "three"} {
+		sess := session(time.Now().Add(time.Hour))
+		sess.Digest = digest(tok)
+		if err := s.CreateSession(ctx, sess); err != nil {
+			t.Fatalf("CreateSession(%s): %v", tok, err)
+		}
+	}
+
+	n, err := s.DeleteAccountSessions(ctx, acctID)
+	if err != nil {
+		t.Fatalf("DeleteAccountSessions: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("terminated %d sessions, want 3", n)
+	}
+	for _, tok := range []string{"one", "two", "three"} {
+		if _, err := s.Session(ctx, digest(tok), time.Now()); !errors.Is(err, identity.ErrNotFound) {
+			t.Errorf("session %s survived: %v", tok, err)
+		}
+	}
+}
+
+func testPruneRemovesOnlyWhatExpired(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+	seedTenantAndAccount(t, s)
+
+	live := session(time.Now().Add(time.Hour))
+	live.Digest = digest("live")
+	dead := session(time.Now().Add(-time.Hour))
+	dead.Digest = digest("dead")
+	for _, sess := range []identity.Session{live, dead} {
+		if err := s.CreateSession(ctx, sess); err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+	}
+
+	n, err := s.PruneExpired(ctx, time.Now())
+	if err != nil {
+		t.Fatalf("PruneExpired: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("pruned %d, want 1", n)
+	}
+	if _, err := s.Session(ctx, live.Digest, time.Now()); err != nil {
+		t.Errorf("the live session was pruned: %v", err)
+	}
+}
+
+// Callers branch on these. A store that returns a bare error for a missing
+// account turns "no such user" into a 500 on the login page — and, worse,
+// makes the login handler unable to take the same path for an unknown address
+// as for a wrong password.
+func testNotFoundIsDistinguishable(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	checks := map[string]error{}
+	_, checks["Tenant"] = s.Tenant(ctx, "nope")
+	_, checks["TenantBySlug"] = s.TenantBySlug(ctx, "nope")
+	_, checks["Account"] = s.Account(ctx, "nope")
+	_, checks["AccountByEmail"] = s.AccountByEmail(ctx, "nope@example.test")
+	_, checks["Credential"] = s.Credential(ctx, "nope")
+	_, checks["Membership"] = s.Membership(ctx, "nope", "nope")
+	_, checks["Session"] = s.Session(ctx, digest("nope"), time.Now())
+	checks["DeleteSession"] = s.DeleteSession(ctx, digest("nope"))
+	checks["RemoveMember"] = s.RemoveMember(ctx, "nope", "nope")
+
+	for name, err := range checks {
+		if !errors.Is(err, identity.ErrNotFound) {
+			t.Errorf("%s on a missing row = %v, want ErrNotFound", name, err)
+		}
+	}
+}
