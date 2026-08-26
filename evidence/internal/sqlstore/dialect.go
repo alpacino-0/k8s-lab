@@ -29,7 +29,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // something is being done in SQL that belongs in Go.
 package sqlstore
 
-import "io/fs"
+import (
+	"io/fs"
+
+	"github.com/damgahq/damga/internal/sqlmigrate"
+)
 
 // Dialect is everything the two engines do not agree about.
 type Dialect interface {
@@ -59,3 +63,9 @@ type Dialect interface {
 	// pretending otherwise would mean a template.
 	Migrations() fs.FS
 }
+
+// The three methods above a migration runner needs are exactly
+// internal/sqlmigrate.Dialect, so a Dialect satisfies it without adapting
+// anything. Asserted here rather than left to the call site, because the
+// runner is what a second schema will reuse.
+var _ sqlmigrate.Dialect = Dialect(nil)

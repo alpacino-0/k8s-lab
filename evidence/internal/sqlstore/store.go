@@ -32,13 +32,12 @@ import (
 	"time"
 
 	"github.com/damgahq/damga/evidence"
+	"github.com/damgahq/damga/internal/sqlmigrate"
 )
 
 // timeLayout is fixed-width RFC3339 in UTC. Fixed width matters: it makes
 // lexicographic order chronological, on both engines, with no CAST.
 const timeLayout = "2006-01-02T15:04:05.000000Z"
-
-func nowText() string { return time.Now().UTC().Format(timeLayout) }
 
 func asText(t time.Time) string { return t.UTC().Format(timeLayout) }
 
@@ -95,7 +94,9 @@ func New(ctx context.Context, w, r *sql.DB, d Dialect, window time.Duration) (*S
 	if err := w.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("%s: database is not usable: %w", d.Name(), err)
 	}
-	if err := migrate(ctx, w, d); err != nil {
+	// "schema_migration" is this sequence's table and no other's. See
+	// internal/sqlmigrate for why a shared one silently skips.
+	if err := sqlmigrate.Run(ctx, w, d, "schema_migration"); err != nil {
 		return nil, err
 	}
 	return &Store{w: w, r: r, d: d, window: window, now: time.Now}, nil
