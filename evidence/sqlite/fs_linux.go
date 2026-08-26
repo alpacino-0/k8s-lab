@@ -28,6 +28,10 @@ import (
 // exactly where SQLite's own documentation says not to put a database — POSIX
 // advisory locking over them is unreliable, and the failure is silent
 // corruption rather than an error.
+// Untyped, so they adopt whatever width Statfs_t.Type has on the target. It is
+// int64 on the platforms this project publishes for; converting it explicitly
+// is what CI rejected, and typing the constants would move the same problem
+// onto an architecture where the field is narrower.
 const (
 	nfsSuper  = 0x6969
 	smbSuper  = 0x517B
@@ -42,7 +46,7 @@ func refuseNetworkFilesystem(path string) error {
 		// costs an install; a missed one costs a database months later.
 		return nil //nolint:nilerr // see comment
 	}
-	switch int64(st.Type) {
+	switch st.Type {
 	case nfsSuper, smbSuper, cifsMagic, smb2Magic:
 		return fmt.Errorf(
 			"sqlite: %s is on a network filesystem, where SQLite's locking is unreliable and "+
