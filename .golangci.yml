@@ -57,6 +57,12 @@ linters:
       - third_party$
       - builtin$
       - examples$
+      # The module root is the repository root, so golangci-lint walks into the
+      # reference tenant's node_modules, which carries a vendored Go package of
+      # its own. GO_PKGS keeps go build/vet/test out of there; this keeps the
+      # linter out. Neither is cosmetic: it reported four issues in a
+      # third-party file nobody here can fix.
+      - ^app/
 formatters:
   enable:
     - gofmt
@@ -67,3 +73,9 @@ formatters:
       - third_party$
       - builtin$
       - examples$
+      # The module root is the repository root, so golangci-lint walks into the
+      # reference tenant's node_modules, which carries a vendored Go package of
+      # its own. GO_PKGS keeps go build/vet/test out of there; this keeps the
+      # linter out. Neither is cosmetic: it reported four issues in a
+      # third-party file nobody here can fix.
+      - ^app/

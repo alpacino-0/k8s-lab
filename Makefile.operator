@@ -7,7 +7,7 @@ IMG ?= controller:latest
 # `go build ./...` compiled, controller-gen scanned and .dockerignore would
 # have copied into the operator image's build context. Nothing downstream
 # would have failed, which is the reason to name the tree instead.
-GO_PKGS ?= ./api/... ./cmd/... ./internal/... ./test/...
+GO_PKGS ?= ./api/... ./cmd/... ./evidence/... ./internal/... ./test/...
 # manifests must see both: the CRD comes from api/, and all nine
 # +kubebuilder:rbac markers are on the controller. Scoping it to api/ alone
 # regenerates a role granting nothing, and the operator then fails at runtime
