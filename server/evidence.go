@@ -28,14 +28,14 @@ import (
 
 // currentEvidence answers what is deployed right now for one app in one
 // environment. It is the endpoint the live evidence page opens with.
-func currentEvidence(g guard, store evidence.Store) http.Handler {
+func currentEvidence(g guard, st stores) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ref, ok := g.admit(w, r, authz.ActionEvidenceView)
+		_, ref, ok := g.admit(w, r, authz.ActionEvidenceView)
 		if !ok {
 			return
 		}
 
-		rec, err := store.Current(r.Context(), ref)
+		rec, err := st.evidence.Current(r.Context(), ref)
 		switch {
 		case errors.Is(err, evidence.ErrNotFound):
 			// Not an error. An app that has never been deployed is a normal

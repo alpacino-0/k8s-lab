@@ -68,7 +68,7 @@ func Run(t *testing.T, newStore Factory) {
 func place(tenant, app, env, repo, path string) placement.Placement {
 	return placement.Placement{
 		TenantID: tenant, App: app, Env: env,
-		RepoURL: repo, Branch: "main", Path: path,
+		RepoURL: repo, Branch: "main", Path: path, Namespace: app + "-" + env,
 	}
 }
 
@@ -102,6 +102,11 @@ func testPlacementRoundTrips(t *testing.T, newStore Factory) {
 		t.Errorf("Branch = %q, want %q", got.Branch, want.Branch)
 	case got.Path != want.Path:
 		t.Errorf("Path = %q, want %q", got.Path, want.Path)
+	case got.Namespace != want.Namespace:
+		// Where the rendered manifest says it runs. A placement that loses it
+		// renders a manifest with no namespace, which Argo CD applies into
+		// whichever one its Application happens to name.
+		t.Errorf("Namespace = %q, want %q", got.Namespace, want.Namespace)
 	case !got.CreatedAt.Equal(put.CreatedAt):
 		t.Errorf("CreatedAt did not survive: %s vs %s", got.CreatedAt, put.CreatedAt)
 	}
@@ -325,10 +330,15 @@ func testAnUnusablePlacementIsRefused(t *testing.T, newStore Factory) {
 		{"no app", place(tenantA, "", prod, repoA, "apps/api")},
 		{"no environment", place(tenantA, "api", "", repoA, "apps/api")},
 		{"no repository", place(tenantA, "api", prod, "", "apps/api")},
+		{"no namespace", placement.Placement{
+			TenantID: tenantA, App: "api", Env: prod, RepoURL: repoA,
+			Branch: "main", Path: "apps/api",
+		}},
 		// Not defaulted to main: a wrong guess commits to a branch nothing is
 		// watching, which looks exactly like a deploy that worked.
 		{"no branch", placement.Placement{
-			TenantID: tenantA, App: "api", Env: prod, RepoURL: repoA, Path: "apps/api",
+			TenantID: tenantA, App: "api", Env: prod, RepoURL: repoA,
+			Path: "apps/api", Namespace: "api-prod",
 		}},
 		{"the repository root", place(tenantA, "api", prod, repoA, "")},
 		{"the repository root, spelled .", place(tenantA, "api", prod, repoA, ".")},

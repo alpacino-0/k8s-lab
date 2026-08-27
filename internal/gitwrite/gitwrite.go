@@ -38,6 +38,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -99,7 +101,8 @@ type Request struct {
 	Message string
 
 	// Render produces the files to write, given the id of the record this
-	// deploy will be remembered as.
+	// deploy will be remembered as and whatever is already committed under
+	// Target.Dir.
 	//
 	// A callback rather than a map, because the id has to be inside the
 	// manifests: the observer finds a record by reading damga.co/rollout off
@@ -107,8 +110,22 @@ type Request struct {
 	// manifests were rendered. Minting it after the commit would leave the
 	// cluster carrying objects no record claims.
 	//
+	// current is the directory as it stands, keyed the same way the return
+	// value is: names relative to Target.Dir, one level, no subdirectories. It
+	// is what makes a deploy that changes one field possible without the
+	// caller holding a copy of the spec — the committed manifest is the state,
+	// and this is how a caller reads it before replacing it.
+	//
+	// Reading it back is lossless only because damga owns these repositories
+	// and the tenant has no push identity for them. The day something else
+	// commits here, a render that round-trips through a Go struct starts
+	// deleting whatever that something else wrote.
+	//
+	// Called after the clone, so a render that fails has cost one clone. That
+	// is the price of being able to read.
+	//
 	// Paths are relative to Target.Dir.
-	Render func(rolloutID string) (map[string][]byte, error)
+	Render func(rolloutID string, current map[string][]byte) (map[string][]byte, error)
 }
 
 // Result is what happened.
@@ -227,14 +244,6 @@ func (w *Writer) Deploy(ctx context.Context, req Request) (Result, error) {
 
 // commit does the git half: clone, write, commit as the user, push.
 func (w *Writer) commit(ctx context.Context, req Request, rolloutID string, at time.Time) (string, error) {
-	files, err := req.Render(rolloutID)
-	if err != nil {
-		return "", fmt.Errorf("rendering the manifests: %w", err)
-	}
-	if len(files) == 0 {
-		return "", errors.New("gitwrite: nothing to write")
-	}
-
 	// In memory, and shallow. A tenant's state repository holds manifests, so
 	// it is small by construction; a worktree on disk would be one more thing
 	// to clean up after a crash, and the workloads this platform renders run
@@ -255,6 +264,19 @@ func (w *Writer) commit(ctx context.Context, req Request, rolloutID string, at t
 	if err != nil {
 		return "", err
 	}
+
+	current, err := readDir(tree, req.Target.Dir)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", req.Target.Dir, err)
+	}
+	files, err := req.Render(rolloutID, current)
+	if err != nil {
+		return "", fmt.Errorf("rendering the manifests: %w", err)
+	}
+	if len(files) == 0 {
+		return "", errors.New("gitwrite: nothing to write")
+	}
+
 	for name, body := range files {
 		full := path.Join(req.Target.Dir, name)
 		if err := writeFile(tree, full, body); err != nil {
@@ -316,6 +338,45 @@ func (w *Writer) commit(ctx context.Context, req Request, rolloutID string, at t
 
 // ErrNoChange means the rendered manifests match what is already committed.
 var ErrNoChange = errors.New("gitwrite: the manifests are already what is committed")
+
+// readDir returns the files directly inside dir, keyed by name relative to it.
+//
+// One level, not a walk. These directories hold one app environment's
+// manifests, which damga writes flat; recursing would invite a caller to
+// return a nested map that Add would then have to reason about, and the extra
+// generality has no user.
+//
+// A directory that does not exist yet is an empty map and not an error: the
+// first deploy of an app is the normal case, not a missing one.
+func readDir(tree *git.Worktree, dir string) (map[string][]byte, error) {
+	entries, err := tree.Filesystem.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string][]byte{}, nil
+		}
+		return nil, err
+	}
+	out := make(map[string][]byte, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		f, err := tree.Filesystem.Open(path.Join(dir, e.Name()))
+		if err != nil {
+			return nil, err
+		}
+		body, err := io.ReadAll(f)
+		cErr := f.Close()
+		if err != nil {
+			return nil, err
+		}
+		if cErr != nil {
+			return nil, cErr
+		}
+		out[e.Name()] = body
+	}
+	return out, nil
+}
 
 func writeFile(tree *git.Worktree, name string, body []byte) error {
 	f, err := tree.Filesystem.Create(name)

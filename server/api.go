@@ -44,17 +44,16 @@ type guard struct {
 	sessions   *auth.Sessions
 }
 
-// admit answers whether this request may do this, to this. It writes the
-// refusal itself and reports false, so a handler that forgets to stop has
-// already sent the right status and cannot also send a body.
+// admit answers who is asking, whether this request may do this, and to what.
+// It writes the refusal itself and reports false, so a handler that forgets to
+// stop has already sent the right status and cannot also send a body.
 //
-// It does not return the subject. Every endpoint so far is a read, and none of
-// them needs to know who is reading; the first one that writes will need the
-// actor for the evidence record, and can have it back then. A return value
-// nobody uses is one nobody notices going wrong.
+// The subject came back when the first endpoint that writes arrived: a deploy
+// is recorded against the person who asked for it, and that person has to be
+// the one the session named rather than one a request body claims.
 func (g guard) admit(
 	w http.ResponseWriter, r *http.Request, action authz.Action,
-) (evidence.Ref, bool) {
+) (authz.Subject, evidence.Ref, bool) {
 	ref := evidence.Ref{
 		TenantID: r.PathValue("tenant"),
 		App:      r.PathValue("app"),
@@ -64,7 +63,7 @@ func (g guard) admit(
 	live, err := g.sessions.Resolve(r.Context(), r)
 	if err != nil {
 		problem(w, http.StatusUnauthorized, "not signed in")
-		return ref, false
+		return authz.Subject{}, ref, false
 	}
 
 	sub, err := subjectFrom(r.Context(), g.identity, live, ref.TenantID)
@@ -73,7 +72,7 @@ func (g guard) admit(
 		// not a member here" confirms the tenant exists, which is the one
 		// thing a stranger probing tenant names wants to learn.
 		problem(w, http.StatusForbidden, "no access to this tenant")
-		return ref, false
+		return authz.Subject{}, ref, false
 	}
 
 	decision, err := g.authorizer.Authorize(r.Context(), sub, action, authz.Target{
@@ -81,16 +80,16 @@ func (g guard) admit(
 	})
 	if err != nil {
 		problem(w, http.StatusInternalServerError, "authorization failed")
-		return ref, false
+		return authz.Subject{}, ref, false
 	}
 	if !decision.Allow {
 		// The reason is returned, because a refusal nobody can explain is a
 		// support ticket. It is the authorizer's own words: the free one says
 		// which role was read, an enterprise one can say which policy matched.
 		problem(w, http.StatusForbidden, decision.Reason)
-		return ref, false
+		return authz.Subject{}, ref, false
 	}
-	return ref, true
+	return sub, ref, true
 }
 
 // me is who the session belongs to and where they are a member.
@@ -166,9 +165,9 @@ const (
 )
 
 // history is the deploy log for one app in one environment, newest first.
-func history(g guard, store evidence.Store) http.Handler {
+func history(g guard, st stores) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ref, ok := g.admit(w, r, authz.ActionEvidenceView)
+		_, ref, ok := g.admit(w, r, authz.ActionEvidenceView)
 		if !ok {
 			return
 		}
@@ -183,7 +182,7 @@ func history(g guard, store evidence.Store) http.Handler {
 			limit = min(n, maxHistoryPage)
 		}
 
-		page, err := store.History(r.Context(), evidence.Query{
+		page, err := st.evidence.History(r.Context(), evidence.Query{
 			Ref: ref, Limit: limit,
 			After: evidence.Cursor(r.URL.Query().Get("after")),
 			Order: evidence.OrderNewest,
@@ -215,14 +214,14 @@ func history(g guard, store evidence.Store) http.Handler {
 // The whole point of the evidence store is that this can be asked, so it is an
 // endpoint rather than a CLI-only operation: a claim nobody can check from the
 // page they are reading is a claim they have to take on trust.
-func verify(g guard, store evidence.Store) http.Handler {
+func verify(g guard, st stores) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ref, ok := g.admit(w, r, authz.ActionEvidenceView)
+		_, ref, ok := g.admit(w, r, authz.ActionEvidenceView)
 		if !ok {
 			return
 		}
 		q := r.URL.Query()
-		proof, err := store.Verify(r.Context(), ref,
+		proof, err := st.evidence.Verify(r.Context(), ref,
 			evidence.Cursor(q.Get("from")), evidence.Cursor(q.Get("to")))
 		if err != nil {
 			problem(w, http.StatusInternalServerError, "verifying the chain failed")
@@ -239,12 +238,12 @@ func verify(g guard, store evidence.Store) http.Handler {
 // retention is what the store promises to keep, which the evidence page prints
 // next to the history so that "nothing older than this" is visibly a policy
 // rather than an absence of data.
-func retention(g guard, store evidence.Store) http.Handler {
+func retention(g guard, st stores) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := g.admit(w, r, authz.ActionEvidenceView); !ok {
+		if _, _, ok := g.admit(w, r, authz.ActionEvidenceView); !ok {
 			return
 		}
-		policy, err := store.Retention(r.Context())
+		policy, err := st.evidence.Retention(r.Context())
 		if err != nil {
 			problem(w, http.StatusInternalServerError, "reading the retention policy failed")
 			return
@@ -280,9 +279,9 @@ func writeJSON(w http.ResponseWriter, v any) {
 // a browser and taking the whole log away are the same information at very
 // different scales, and an install that wants the second restricted should not
 // have to give up the first.
-func export(g guard, store evidence.Store) http.Handler {
+func export(g guard, st stores) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ref, ok := g.admit(w, r, authz.ActionEvidenceExport)
+		_, ref, ok := g.admit(w, r, authz.ActionEvidenceExport)
 		if !ok {
 			return
 		}
@@ -312,7 +311,7 @@ func export(g guard, store evidence.Store) http.Handler {
 		// Detectable because the last line of a JSONL export is a record whose
 		// hash chains to the one before it: a truncated export fails to verify
 		// at the point it was cut.
-		if _, err := store.Export(r.Context(), evidence.ExportRequest{
+		if _, err := st.evidence.Export(r.Context(), evidence.ExportRequest{
 			Query:  evidence.Query{Ref: ref, Order: evidence.OrderOldest},
 			Format: format,
 		}, w); err != nil {
@@ -329,17 +328,17 @@ func export(g guard, store evidence.Store) http.Handler {
 // Those differ — an app declared and never rolled out is absent here — and
 // this is the evidence API, so the honest answer is the one drawn from the
 // evidence rather than from an intention recorded somewhere else.
-func apps(g guard, store evidence.Store) http.Handler {
+func apps(g guard, st stores) http.Handler {
 	type entry struct {
 		App string `json:"app"`
 		Env string `json:"env"`
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ref, ok := g.admit(w, r, authz.ActionAppView)
+		_, ref, ok := g.admit(w, r, authz.ActionAppView)
 		if !ok {
 			return
 		}
-		refs, err := store.Refs(r.Context(), ref.TenantID)
+		refs, err := st.evidence.Refs(r.Context(), ref.TenantID)
 		if err != nil {
 			problem(w, http.StatusInternalServerError, "reading the evidence store failed")
 			return

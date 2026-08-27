@@ -38,6 +38,11 @@ import (
 	identitymem "github.com/damgahq/damga/identity/memory"
 	identitypg "github.com/damgahq/damga/identity/postgres"
 	identitysqlite "github.com/damgahq/damga/identity/sqlite"
+	"github.com/damgahq/damga/internal/gitwrite"
+	"github.com/damgahq/damga/placement"
+	placementmem "github.com/damgahq/damga/placement/memory"
+	placementpg "github.com/damgahq/damga/placement/postgres"
+	placementsqlite "github.com/damgahq/damga/placement/sqlite"
 )
 
 // Run starts the control plane and blocks until ctx is cancelled.
@@ -63,6 +68,32 @@ func Run(ctx context.Context, o Options) error {
 				log.Error("closing the identity store", "error", err)
 			}
 		}()
+	}
+
+	places := o.Placement
+	if places == nil {
+		var err error
+		places, err = openPlacement(ctx, o.Config)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := places.Close(); err != nil {
+				log.Error("closing the placement store", "error", err)
+			}
+		}()
+	}
+	o.Placement = places
+
+	if o.GitAuth == nil {
+		gitCreds, err := readGitAuth(o.Config.GitTokenFile)
+		if err != nil {
+			// At startup rather than at the first deploy. A token file that
+			// is missing or empty is a misconfiguration, and finding out when
+			// somebody presses deploy means finding out from them.
+			return err
+		}
+		o.GitAuth = gitCreds
 	}
 
 	store := o.Evidence
@@ -142,6 +173,18 @@ func Run(ctx context.Context, o Options) error {
 // table instead of in it is the one this arrangement cannot protect.
 const tenantScope = "/api/v1/tenants/{tenant}"
 
+// stores is everything a tenant-scoped handler is allowed to reach.
+//
+// One struct rather than a parameter each, so the route table stays one table
+// as endpoints grow. What is deliberately NOT in here is anything that could
+// answer "who is asking": that comes from the guard and from nowhere else.
+type stores struct {
+	evidence  evidence.Store
+	placement placement.Store
+	writer    *gitwrite.Writer
+	gitAuth   GitAuth
+}
+
 // tenantRoutes is every endpoint under tenantScope.
 //
 // Each handler takes the guard rather than the pieces it is built from, so
@@ -149,15 +192,18 @@ const tenantScope = "/api/v1/tenants/{tenant}"
 // construct one that does not authorize at all, because the guard is the only
 // thing in scope that can read the session.
 var tenantRoutes = []struct {
+	method  string
 	suffix  string
-	handler func(guard, evidence.Store) http.Handler
+	handler func(guard, stores) http.Handler
 }{
-	{"/apps", apps},
-	{"/apps/{app}/envs/{env}/evidence", currentEvidence},
-	{"/apps/{app}/envs/{env}/history", history},
-	{"/apps/{app}/envs/{env}/verify", verify},
-	{"/apps/{app}/envs/{env}/retention", retention},
-	{"/apps/{app}/envs/{env}/export", export},
+	{http.MethodGet, "/apps", apps},
+	{http.MethodGet, "/apps/{app}/envs/{env}/evidence", currentEvidence},
+	{http.MethodGet, "/apps/{app}/envs/{env}/history", history},
+	{http.MethodGet, "/apps/{app}/envs/{env}/verify", verify},
+	{http.MethodGet, "/apps/{app}/envs/{env}/retention", retention},
+	{http.MethodGet, "/apps/{app}/envs/{env}/export", export},
+	// The only one that writes, and it writes to git and to nothing else.
+	{http.MethodPost, "/apps/{app}/envs/{env}/deploys", deployRoute},
 }
 
 // handler builds the routes, then hands the mux to the Routes hook and wraps
@@ -191,8 +237,12 @@ func (o Options) handler(store evidence.Store, idStore identity.Store) (http.Han
 	// means the fifth endpoint is covered by being added to the table, not by
 	// whoever adds it remembering to write the test.
 	g := guard{authorizer: o.Authorizer, identity: idStore, sessions: sess}
+	st := stores{
+		evidence: store, placement: o.Placement,
+		writer: &gitwrite.Writer{Evidence: store}, gitAuth: o.GitAuth,
+	}
 	for _, rt := range tenantRoutes {
-		mux.Handle("GET "+tenantScope+rt.suffix, rt.handler(g, store))
+		mux.Handle(rt.method+" "+tenantScope+rt.suffix, rt.handler(g, st))
 	}
 
 	// Mounted only when there is one. There is no built-in bundle yet, and
@@ -243,6 +293,24 @@ func openIdentity(ctx context.Context, c Config, log *slog.Logger) (identity.Sto
 		return identitypg.Open(ctx, dsn)
 	default:
 		return identitysqlite.Open(ctx, dsn)
+	}
+}
+
+// openPlacement picks an engine from the DSN, the same way the other two do.
+//
+// It shares the evidence DSN because it is the same database: one install, one
+// place its state lives. Splitting them would be one more thing to configure
+// and one more thing to get half-migrated.
+func openPlacement(ctx context.Context, c Config) (placement.Store, error) {
+	switch dsn := c.EvidenceDSN; {
+	case dsn == "":
+		return placementmem.New(), nil
+	case strings.HasPrefix(dsn, "postgres://"),
+		strings.HasPrefix(dsn, "postgresql://"),
+		strings.HasPrefix(dsn, "pgx://"):
+		return placementpg.Open(ctx, dsn)
+	default:
+		return placementsqlite.Open(ctx, dsn)
 	}
 }
 

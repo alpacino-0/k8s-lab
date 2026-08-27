@@ -46,6 +46,7 @@ import (
 	"github.com/damgahq/damga/authz"
 	"github.com/damgahq/damga/evidence"
 	"github.com/damgahq/damga/identity"
+	"github.com/damgahq/damga/placement"
 )
 
 // Config is everything that arrives from flags, environment or a file. It holds
@@ -106,6 +107,14 @@ type Config struct {
 	// used. Zero is twelve hours.
 	SessionTTL time.Duration
 
+	// GitTokenFile is the path to a file holding the token damga pushes with.
+	//
+	// A file and not a flag value or an environment variable. A flag is in the
+	// process table and in the shell history; an environment variable is in
+	// /proc/<pid>/environ, in a crash dump, and in `kubectl describe pod`. A
+	// file is what a mounted Secret already is.
+	GitTokenFile string
+
 	// SecureCookies sets the session cookie's Secure attribute.
 	//
 	// Configuration rather than a constant because the documented first run is
@@ -134,6 +143,8 @@ func (c *Config) BindFlags(f *flag.FlagSet) {
 		"how long to wait for in-flight requests on shutdown")
 	f.DurationVar(&c.SessionTTL, "session-ttl", 12*time.Hour,
 		"how long a login lasts")
+	f.StringVar(&c.GitTokenFile, "git-token-file", "",
+		"file holding the token damga pushes tenant repositories with")
 	f.BoolVar(&c.SecureCookies, "secure-cookies", false,
 		"set Secure on the session cookie; required behind TLS, breaks plain http")
 	f.BoolVar(&c.ObserveDeploys, "observe-deploys", false,
@@ -176,6 +187,17 @@ type Options struct {
 	// accounts live. Making this replaceable would oblige damga-ee to
 	// reimplement teams and memberships for nothing.
 	Identity identity.Store
+
+	// Placement is where each app environment is written in git. Replaceable
+	// for the same reason Evidence is: a paid build may hold this somewhere
+	// else, and nothing above it needs to know.
+	Placement placement.Store
+
+	// GitAuth answers how to authenticate to a repository. nil means the
+	// free build's answer, built from Config.GitTokenFile — and with no token
+	// configured, a deploy is refused with a message that says which flag is
+	// missing rather than whatever the forge says about anonymous writes.
+	GitAuth GitAuth
 
 	// Panel is the front-end bundle, served at "/". nil mounts nothing, which
 	// is what the free build does today because there is no bundle yet.

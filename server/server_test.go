@@ -28,11 +28,18 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/go-git/go-git/v5"
+	gitconfig "github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 
 	"github.com/damgahq/damga/auth"
 	"github.com/damgahq/damga/authz"
@@ -40,6 +47,9 @@ import (
 	"github.com/damgahq/damga/evidence/memory"
 	"github.com/damgahq/damga/identity"
 	identitymem "github.com/damgahq/damga/identity/memory"
+	"github.com/damgahq/damga/internal/manifest"
+	"github.com/damgahq/damga/placement"
+	placementmem "github.com/damgahq/damga/placement/memory"
 	"github.com/damgahq/damga/server"
 )
 
@@ -830,4 +840,308 @@ func TestAMadeUpPageCursorIsTheCallersMistake(t *testing.T) {
 	if status, _ := get(t, prefix, cookieHeader(session)); status != http.StatusOK {
 		t.Errorf("history = %d, want 200", status)
 	}
+}
+
+// ---------------------------------------------------------------- deploy
+
+// testNamespace is where the deploy cases say their manifests run.
+const (
+	testNamespace = "acme-prod"
+	testPath      = "apps/api/prod"
+	testBranch    = "main"
+)
+
+// localAuth is the GitAuth an install would supply for a repository that needs
+// no credentials. It also proves Options.GitAuth is reachable from outside the
+// package, which is the whole point of the seam being exported.
+type localAuth struct{}
+
+func (localAuth) For(string) (transport.AuthMethod, error) { return nil, nil }
+
+// bareRepo makes a repository with one commit on main and returns its path.
+func bareRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "state.git")
+	if _, err := git.PlainInit(bare, true); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	// A bare repository has no worktree and an empty one cannot be cloned, so
+	// the first commit is made beside it and pushed.
+	work := filepath.Join(dir, "seed")
+	seed, err := git.PlainInit(work, false)
+	if err != nil {
+		t.Fatalf("seed init: %v", err)
+	}
+	if _, err := seed.CreateRemote(&gitconfig.RemoteConfig{
+		Name: "origin", URLs: []string{bare},
+	}); err != nil {
+		t.Fatalf("seed remote: %v", err)
+	}
+	tree, err := seed.Worktree()
+	if err != nil {
+		t.Fatalf("seed worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "README.md"), []byte("state\n"), 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	if _, err := tree.Add("README.md"); err != nil {
+		t.Fatalf("seed add: %v", err)
+	}
+	who := &object.Signature{Name: "seed", Email: "seed@example.test", When: time.Now()}
+	if _, err := tree.Commit("seed", &git.CommitOptions{Author: who, Committer: who}); err != nil {
+		t.Fatalf("seed commit: %v", err)
+	}
+	head, err := seed.Head()
+	if err != nil {
+		t.Fatalf("seed head: %v", err)
+	}
+	if err := seed.Storer.SetReference(
+		plumbing.NewHashReference(plumbing.NewBranchReferenceName("main"), head.Hash()),
+	); err != nil {
+		t.Fatalf("seed branch: %v", err)
+	}
+	if err := seed.Push(&git.PushOptions{RefSpecs: []gitconfig.RefSpec{
+		gitconfig.RefSpec("refs/heads/main:refs/heads/main"),
+	}}); err != nil {
+		t.Fatalf("seed push: %v", err)
+	}
+	return bare
+}
+
+// committedFile reads one path out of the remote's main branch.
+func committedFile(t *testing.T, repoPath, name string) string {
+	t.Helper()
+	repo, err := git.PlainOpen(repoPath)
+	if err != nil {
+		t.Fatalf("open remote: %v", err)
+	}
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName("main"), true)
+	if err != nil {
+		t.Fatalf("resolve main: %v", err)
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	f, err := commit.File(name)
+	if err != nil {
+		t.Fatalf("file %s: %v", name, err)
+	}
+	body, err := f.Contents()
+	if err != nil {
+		t.Fatalf("contents: %v", err)
+	}
+	return body
+}
+
+// The whole write path, end to end: an owner asks for an image, a commit
+// appears on the branch carrying a rendered Workload, and an evidence record
+// exists that names it.
+func TestADeployCommitsAWorkloadAndOpensARecord(t *testing.T) {
+	repo := bareRepo(t)
+	store := memory.New(0)
+	places := placementmem.New()
+	if _, err := places.Put(t.Context(), placement.Placement{
+		TenantID: testTenant, App: testApp, Env: testEnv,
+		RepoURL: repo, Branch: testBranch, Path: testPath, Namespace: testNamespace,
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	base := start(t, server.Options{
+		Evidence: store, Placement: places, GitAuth: localAuth{},
+		Identity: identityWith(t, identity.RoleOwner),
+	})
+	session := login(t, base)
+	url := fmt.Sprintf("%s/api/v1/tenants/%s/apps/%s/envs/%s/deploys",
+		base, testTenant, testApp, testEnv)
+
+	status, body := post(t, url, `{"image":"ghcr.io/acme/api:1.4.2","replicas":3}`, session)
+	if status != http.StatusAccepted {
+		t.Fatalf("deploy = %d %q, want 202", status, body)
+	}
+	// Accepted and not OK, and syncing and not running: at this point the only
+	// thing that is true is that a commit was pushed. Whether it reached the
+	// cluster is the observer's answer, and it has not given one yet.
+	if !strings.Contains(body, `"state":"syncing"`) {
+		t.Errorf("the deploy claimed something other than syncing: %s", body)
+	}
+	if strings.Contains(body, `"state":"running"`) {
+		t.Errorf("the deploy claimed the app is running: %s", body)
+	}
+	// The commit reaches the reader where a reader looks for it, even though
+	// the record was opened before the commit existed and Source could never
+	// hold it.
+	if !strings.Contains(body, `"commitSha":"`) || strings.Contains(body, `"commitSha":""`) {
+		t.Errorf("the response carries no commit: %s", body)
+	}
+
+	committed := committedFile(t, repo, testPath+"/"+manifest.File)
+	for _, want := range []string{
+		"kind: Workload",
+		"image: ghcr.io/acme/api:1.4.2",
+		"namespace: " + testNamespace,
+		"replicas: 3",
+		"damga.co/rollout:",
+	} {
+		if !strings.Contains(committed, want) {
+			t.Errorf("the committed manifest has no %q:\n%s", want, committed)
+		}
+	}
+
+	// The record and the commit agree about which commit it was.
+	rec, err := store.Current(t.Context(), evidence.Ref{
+		TenantID: testTenant, App: testApp, Env: testEnv,
+	})
+	if err != nil {
+		// Current only answers for applied or running; the record is pending,
+		// so read it through history instead.
+		page, hErr := store.History(t.Context(), evidence.Query{Ref: evidence.Ref{
+			TenantID: testTenant, App: testApp, Env: testEnv,
+		}})
+		if hErr != nil || len(page.Records) != 1 {
+			t.Fatalf("no record was opened: %v / %v", err, hErr)
+		}
+		rec = page.Records[0]
+	}
+	// In the store it is on the transition, not on Source — Source is the
+	// immutable half and the record predates the commit.
+	var sha string
+	for _, e := range rec.Transitions {
+		if e.Observation.Revision != "" {
+			sha = e.Observation.Revision
+		}
+	}
+	if sha == "" {
+		t.Error("the record does not name the commit it opened")
+	}
+	if rec.Tier != evidence.TierFree {
+		t.Errorf("record tier = %q, want the tenant's", rec.Tier)
+	}
+}
+
+// A second deploy changes only what it asked to change. Everything else is
+// read back out of the committed manifest, which is the state — so a deploy
+// that bumps the image cannot silently take the replica count with it.
+func TestADeployKeepsWhatItDidNotMention(t *testing.T) {
+	repo := bareRepo(t)
+	places := placementmem.New()
+	if _, err := places.Put(t.Context(), placement.Placement{
+		TenantID: testTenant, App: testApp, Env: testEnv,
+		RepoURL: repo, Branch: testBranch, Path: testPath, Namespace: testNamespace,
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	base := start(t, server.Options{
+		Evidence: memory.New(0), Placement: places, GitAuth: localAuth{},
+		Identity: identityWith(t, identity.RoleOwner),
+	})
+	session := login(t, base)
+	url := fmt.Sprintf("%s/api/v1/tenants/%s/apps/%s/envs/%s/deploys",
+		base, testTenant, testApp, testEnv)
+
+	if status, body := post(t, url,
+		`{"image":"ghcr.io/acme/api:1.0.0","replicas":4,"domain":"api.acme.example","port":9000}`,
+		session); status != http.StatusAccepted {
+		t.Fatalf("first deploy = %d %q", status, body)
+	}
+	if status, body := post(t, url, `{"image":"ghcr.io/acme/api:2.0.0"}`, session); status != http.StatusAccepted {
+		t.Fatalf("second deploy = %d %q", status, body)
+	}
+
+	committed := committedFile(t, repo, testPath+"/"+manifest.File)
+	for _, want := range []string{
+		"image: ghcr.io/acme/api:2.0.0",
+		"replicas: 4",
+		"domain: api.acme.example",
+		"port: 9000",
+	} {
+		if !strings.Contains(committed, want) {
+			t.Errorf("the second deploy lost %q:\n%s", want, committed)
+		}
+	}
+}
+
+// An app nobody has told the control plane where to write is a 409 that says
+// so, not a 500 and not a silent success.
+func TestADeployWithNoPlacementSaysWhatIsMissing(t *testing.T) {
+	base := start(t, server.Options{
+		Evidence: memory.New(0), Placement: placementmem.New(), GitAuth: localAuth{},
+		Identity: identityWith(t, identity.RoleOwner),
+	})
+	session := login(t, base)
+	url := fmt.Sprintf("%s/api/v1/tenants/%s/apps/%s/envs/%s/deploys",
+		base, testTenant, testApp, testEnv)
+
+	status, body := post(t, url, `{"image":"ghcr.io/acme/api:1.0.0"}`, session)
+	if status != http.StatusConflict {
+		t.Errorf("deploy without a placement = %d %q, want 409", status, body)
+	}
+	if !strings.Contains(body, "repository") {
+		t.Errorf("the refusal does not say what is missing: %s", body)
+	}
+}
+
+// A viewer may read the evidence page and may not deploy. The free authorizer
+// already draws that line; this is the check that the deploy endpoint asks it.
+func TestAViewerCannotDeploy(t *testing.T) {
+	repo := bareRepo(t)
+	places := placementmem.New()
+	if _, err := places.Put(t.Context(), placement.Placement{
+		TenantID: testTenant, App: testApp, Env: testEnv,
+		RepoURL: repo, Branch: testBranch, Path: testPath, Namespace: testNamespace,
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	base := start(t, server.Options{
+		Evidence: memory.New(0), Placement: places, GitAuth: localAuth{},
+		Identity: identityWith(t, identity.RoleViewer),
+	})
+	session := login(t, base)
+	url := fmt.Sprintf("%s/api/v1/tenants/%s/apps/%s/envs/%s/deploys",
+		base, testTenant, testApp, testEnv)
+
+	if status, body := post(t, url, `{"image":"ghcr.io/acme/api:1.0.0"}`, session); status != http.StatusForbidden {
+		t.Errorf("a viewer deployed: %d %q", status, body)
+	}
+	// And nothing reached the repository.
+	repoObj, err := git.PlainOpen(repo)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	ref, err := repoObj.Reference(plumbing.NewBranchReferenceName("main"), true)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	commit, err := repoObj.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if commit.Message != "seed" {
+		t.Errorf("a refused deploy still committed: %q", commit.Message)
+	}
+}
+
+// post sends JSON with the session cookie and returns the status and body.
+func post(t *testing.T, url, body string, cookie *http.Cookie) (int, string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("building the request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading the body: %v", err)
+	}
+	return resp.StatusCode, string(out)
 }

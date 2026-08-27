@@ -22,6 +22,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -112,7 +113,7 @@ func newWriter(store evidence.Store) *gitwrite.Writer {
 	return &gitwrite.Writer{Evidence: store}
 }
 
-func request(target string, render func(string) (map[string][]byte, error)) gitwrite.Request {
+func request(target string, render func(string, map[string][]byte) (map[string][]byte, error)) gitwrite.Request {
 	return gitwrite.Request{
 		Target:  gitwrite.Target{RepoURL: target, Branch: branch, Dir: "apps/api"},
 		Author:  gitwrite.Author{ID: "u-1", Name: "Orhan Yavuz", Email: authorEmail},
@@ -123,7 +124,7 @@ func request(target string, render func(string) (map[string][]byte, error)) gitw
 	}
 }
 
-func manifest(rolloutID string) (map[string][]byte, error) {
+func manifest(rolloutID string, _ map[string][]byte) (map[string][]byte, error) {
 	return map[string][]byte{
 		manifestPath: []byte("metadata:\n  annotations:\n    damga.co/rollout: " + rolloutID + "\n"),
 	}, nil
@@ -221,9 +222,9 @@ func TestTheRolloutIDIsAvailableBeforeTheManifestsAreRendered(t *testing.T) {
 	w := newWriter(store)
 
 	var seen string
-	res, err := w.Deploy(context.Background(), request(url, func(id string) (map[string][]byte, error) {
+	res, err := w.Deploy(context.Background(), request(url, func(id string, _ map[string][]byte) (map[string][]byte, error) {
 		seen = id
-		return manifest(id)
+		return manifest(id, nil)
 	}))
 	if err != nil {
 		t.Fatalf("Deploy: %v", err)
@@ -288,14 +289,14 @@ func TestAnIdenticalManifestIsNotACommit(t *testing.T) {
 	store := memory.New(0)
 	w := newWriter(store)
 
-	first, err := w.Deploy(context.Background(), request(url, func(string) (map[string][]byte, error) {
+	first, err := w.Deploy(context.Background(), request(url, func(string, map[string][]byte) (map[string][]byte, error) {
 		return map[string][]byte{manifestPath: []byte("same\n")}, nil
 	}))
 	if err != nil {
 		t.Fatalf("first Deploy: %v", err)
 	}
 
-	_, err = w.Deploy(context.Background(), request(url, func(string) (map[string][]byte, error) {
+	_, err = w.Deploy(context.Background(), request(url, func(string, map[string][]byte) (map[string][]byte, error) {
 		return map[string][]byte{manifestPath: []byte("same\n")}, nil
 	}))
 	if !errors.Is(err, gitwrite.ErrNoChange) {
@@ -348,13 +349,13 @@ func TestConsecutiveDeploysAreSeparateRecords(t *testing.T) {
 	store := memory.New(0)
 	w := newWriter(store)
 
-	first, err := w.Deploy(context.Background(), request(url, func(id string) (map[string][]byte, error) {
+	first, err := w.Deploy(context.Background(), request(url, func(id string, _ map[string][]byte) (map[string][]byte, error) {
 		return map[string][]byte{manifestPath: []byte("one " + id + "\n")}, nil
 	}))
 	if err != nil {
 		t.Fatalf("first Deploy: %v", err)
 	}
-	second, err := w.Deploy(context.Background(), request(url, func(id string) (map[string][]byte, error) {
+	second, err := w.Deploy(context.Background(), request(url, func(id string, _ map[string][]byte) (map[string][]byte, error) {
 		return map[string][]byte{manifestPath: []byte("two " + id + "\n")}, nil
 	}))
 	if err != nil {
@@ -367,4 +368,71 @@ func TestConsecutiveDeploysAreSeparateRecords(t *testing.T) {
 	if second.Record.Seq <= first.Record.Seq {
 		t.Errorf("seq went %d then %d; the order is lost", first.Record.Seq, second.Record.Seq)
 	}
+}
+
+// Render is handed what is already committed, which is what makes a deploy
+// that changes one field possible without the caller holding a copy of the
+// spec. The committed manifest is the state; this is how it is read.
+func TestRenderSeesWhatIsAlreadyCommitted(t *testing.T) {
+	url := remote(t)
+	store := memory.New(0)
+	w := newWriter(store)
+
+	// First deploy: the directory does not exist yet, which is the normal
+	// case for a new app and must not be an error.
+	var sawFirst map[string][]byte
+	if _, err := w.Deploy(context.Background(), request(url,
+		func(id string, current map[string][]byte) (map[string][]byte, error) {
+			sawFirst = current
+			return manifest(id, nil)
+		})); err != nil {
+		t.Fatalf("first Deploy: %v", err)
+	}
+	if sawFirst == nil {
+		t.Error("Render was handed a nil map for a directory that does not exist yet")
+	}
+	if len(sawFirst) != 0 {
+		t.Errorf("Render saw %v before anything was written", sawFirst)
+	}
+
+	// Second deploy: it sees the first one's file, by name and by content.
+	var sawSecond map[string][]byte
+	if _, err := w.Deploy(context.Background(), request(url,
+		func(id string, current map[string][]byte) (map[string][]byte, error) {
+			sawSecond = current
+			// Something different, or there would be no commit to make.
+			return map[string][]byte{manifestPath: []byte("image: two\n")}, nil
+		})); err != nil {
+		t.Fatalf("second Deploy: %v", err)
+	}
+	body, ok := sawSecond[manifestPath]
+	if !ok {
+		t.Fatalf("Render did not see %s; it saw %v", manifestPath, keysOf(sawSecond))
+	}
+	if !strings.Contains(string(body), "damga.co/rollout") {
+		t.Errorf("Render saw %s but not its contents: %q", manifestPath, body)
+	}
+
+	// Keyed relative to Target.Dir, the same way the return value is —
+	// otherwise a caller that passes current straight back would write the
+	// files one directory deeper on every deploy.
+	for name := range sawSecond {
+		if strings.Contains(name, "/") {
+			t.Errorf("Render saw %q, want a name relative to the directory", name)
+		}
+	}
+	// And it is that app's directory, not the repository root: the seed's
+	// README is not this app's business.
+	if _, leaked := sawSecond["README.md"]; leaked {
+		t.Error("Render saw the repository root rather than the app's directory")
+	}
+}
+
+func keysOf(m map[string][]byte) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
 }

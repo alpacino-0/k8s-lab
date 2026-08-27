@@ -122,14 +122,16 @@ func (s *Store) Put(ctx context.Context, p placement.Placement) (placement.Place
 	}
 
 	if _, err := tx.ExecContext(ctx, s.d.Rebind(`
-		INSERT INTO placement (tenant_id, app, env, repo_url, branch, path, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO placement (tenant_id, app, env, repo_url, branch, path, namespace, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (tenant_id, app, env) DO UPDATE SET
 			repo_url = excluded.repo_url,
 			branch = excluded.branch,
 			path = excluded.path,
+			namespace = excluded.namespace,
 			updated_at = excluded.updated_at`),
-		p.TenantID, p.App, p.Env, p.RepoURL, p.Branch, p.Path, created, asText(now)); err != nil {
+		p.TenantID, p.App, p.Env, p.RepoURL, p.Branch, p.Path, p.Namespace,
+		created, asText(now)); err != nil {
 		return placement.Placement{}, err
 	}
 
@@ -156,9 +158,9 @@ func (s *Store) Get(ctx context.Context, tenantID, app, env string) (placement.P
 	p := placement.Placement{TenantID: tenantID, App: app, Env: env}
 	var created, updated string
 	err := s.db.QueryRowContext(ctx, s.d.Rebind(`
-		SELECT repo_url, branch, path, created_at, updated_at FROM placement
+		SELECT repo_url, branch, path, namespace, created_at, updated_at FROM placement
 		WHERE tenant_id = ? AND app = ? AND env = ?`), tenantID, app, env).
-		Scan(&p.RepoURL, &p.Branch, &p.Path, &created, &updated)
+		Scan(&p.RepoURL, &p.Branch, &p.Path, &p.Namespace, &created, &updated)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return placement.Placement{}, fmt.Errorf("%w: %s/%s/%s", placement.ErrNotFound, tenantID, app, env)
@@ -176,7 +178,7 @@ func (s *Store) List(ctx context.Context, tenantID string) ([]placement.Placemen
 		return nil, fmt.Errorf("%w: List needs a tenant", placement.ErrInvalid)
 	}
 	rows, err := s.db.QueryContext(ctx, s.d.Rebind(`
-		SELECT app, env, repo_url, branch, path, created_at, updated_at FROM placement
+		SELECT app, env, repo_url, branch, path, namespace, created_at, updated_at FROM placement
 		WHERE tenant_id = ? ORDER BY app, env`), tenantID)
 	if err != nil {
 		return nil, err
@@ -187,7 +189,8 @@ func (s *Store) List(ctx context.Context, tenantID string) ([]placement.Placemen
 	for rows.Next() {
 		p := placement.Placement{TenantID: tenantID}
 		var created, updated string
-		if err := rows.Scan(&p.App, &p.Env, &p.RepoURL, &p.Branch, &p.Path, &created, &updated); err != nil {
+		if err := rows.Scan(&p.App, &p.Env, &p.RepoURL, &p.Branch, &p.Path, &p.Namespace,
+			&created, &updated); err != nil {
 			return nil, err
 		}
 		p, err = withTimes(p, created, updated)

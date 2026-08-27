@@ -98,6 +98,17 @@ func TestTheClaimIsAConstraint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
+	// Rolled back on every path out of here, including a failing assertion.
+	// Without this, a Fatalf below leaves the transaction holding locks on the
+	// schema, and the cleanup's DROP SCHEMA CASCADE waits for them — the test
+	// stops reporting a failure and starts hanging until the whole package
+	// times out. Measured: ten minutes instead of one line.
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO repo_owner (repo_url, tenant_id, claimed_at) VALUES ($1, $2, $3)`,
 		repo, "t_beta", "2026-08-27T00:00:00.000000Z"); err != nil {
@@ -111,6 +122,7 @@ func TestTheClaimIsAConstraint(t *testing.T) {
 		_, err := store.Put(ctx, placement.Placement{
 			TenantID: "t_alpha", App: "api", Env: "prod",
 			RepoURL: repo, Branch: "main", Path: "apps/api/prod",
+			Namespace: "alpha-prod",
 		})
 		done <- err
 	}()
@@ -127,6 +139,7 @@ func TestTheClaimIsAConstraint(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("committing the held claim: %v", err)
 	}
+	committed = true
 
 	select {
 	case err := <-done:

@@ -113,3 +113,49 @@ func TestEmptyIsRenderedAsEmptyAndNotAsNull(t *testing.T) {
 		t.Errorf("a real timestamp did not survive: %s", b)
 	}
 }
+
+// The commit reaches the reader where a reader looks for it.
+//
+// A record opened by the git write path cannot carry the SHA in Source: it has
+// to exist before the commit does, and Source is the immutable half. Without
+// this, the evidence page shows an empty commit for every deploy damga itself
+// made — which is every deploy damga made.
+func TestTheCommitIsReportedWhereverItWasRecorded(t *testing.T) {
+	const pushedAs = "bbb222"
+
+	// The ordinary case: an observed deploy that already knows its commit.
+	direct := toWireRecord(evidence.Record{
+		Source: evidence.Source{CommitSHA: "aaa111"},
+	})
+	if direct.Source.CommitSHA != "aaa111" {
+		t.Errorf("Source.CommitSHA = %q, want aaa111", direct.Source.CommitSHA)
+	}
+
+	// The damga-originated case: nothing in Source, the SHA on a transition.
+	opened := toWireRecord(evidence.Record{
+		Transitions: []evidence.Event{
+			{To: evidence.StateSyncing, Observation: evidence.Observation{Revision: pushedAs}},
+		},
+	})
+	if opened.Source.CommitSHA != pushedAs {
+		t.Errorf("a record opened before its commit reports %q, want bbb222", opened.Source.CommitSHA)
+	}
+
+	// Observed more than once: the commit it is about is the one it was
+	// pushed as, which is the last revision anything reported.
+	twice := toWireRecord(evidence.Record{
+		Transitions: []evidence.Event{
+			{Observation: evidence.Observation{Revision: pushedAs}},
+			{Observation: evidence.Observation{}},
+			{Observation: evidence.Observation{Revision: "ccc333"}},
+		},
+	})
+	if twice.Source.CommitSHA != "ccc333" {
+		t.Errorf("got %q, want the newest revision ccc333", twice.Source.CommitSHA)
+	}
+
+	// And nothing invented when there is nothing to report.
+	if empty := toWireRecord(evidence.Record{}); empty.Source.CommitSHA != "" {
+		t.Errorf("a record with no commit reports %q", empty.Source.CommitSHA)
+	}
+}

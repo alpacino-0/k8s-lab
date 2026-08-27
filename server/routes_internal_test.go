@@ -32,10 +32,11 @@ import (
 	"github.com/damgahq/damga/auth"
 	"github.com/damgahq/damga/authz"
 	"github.com/damgahq/damga/authz/rbac"
-	"github.com/damgahq/damga/evidence"
 	evidencemem "github.com/damgahq/damga/evidence/memory"
 	"github.com/damgahq/damga/identity"
 	identitymem "github.com/damgahq/damga/identity/memory"
+	"github.com/damgahq/damga/internal/gitwrite"
+	placementmem "github.com/damgahq/damga/placement/memory"
 )
 
 // Every endpoint that serves one tenant's data must refuse an anonymous caller
@@ -85,22 +86,28 @@ func TestEveryTenantRouteIsGuarded(t *testing.T) {
 	g := guard{authorizer: authz.Authorizer(rbac.New()), identity: idStore, sessions: sess}
 	store := evidencemem.New(0)
 	t.Cleanup(func() { _ = store.Close() })
+	places := placementmem.New()
+	t.Cleanup(func() { _ = places.Close() })
+	st := stores{
+		evidence: store, placement: places,
+		writer: &gitwrite.Writer{Evidence: store}, gitAuth: noAuth{},
+	}
 
 	if len(tenantRoutes) == 0 {
 		t.Fatal("tenantRoutes is empty: this test is asserting nothing")
 	}
 	for _, rt := range tenantRoutes {
 		t.Run(rt.suffix, func(t *testing.T) {
-			h := rt.handler(g, store)
+			h := rt.handler(g, st)
 
 			t.Run("anonymous", func(t *testing.T) {
-				code, _ := callRoute(t, h, rt.suffix, home, nil)
+				code, _ := callRoute(t, h, rt.method, rt.suffix, home, nil)
 				if code != http.StatusUnauthorized {
 					t.Errorf("%s without a cookie = %d, want 401", rt.suffix, code)
 				}
 			})
 			t.Run("another tenant", func(t *testing.T) {
-				code, body := callRoute(t, h, rt.suffix, foreign, cookie)
+				code, body := callRoute(t, h, rt.method, rt.suffix, foreign, cookie)
 				if code != http.StatusForbidden {
 					t.Errorf("%s in a tenant they do not belong to = %d, want 403", rt.suffix, code)
 				}
@@ -115,7 +122,7 @@ func TestEveryTenantRouteIsGuarded(t *testing.T) {
 				// Not asserting a specific success code — /evidence answers
 				// 404 with nothing deployed and the others answer 200. What
 				// matters is that the guard is not refusing a member.
-				code, _ := callRoute(t, h, rt.suffix, home, cookie)
+				code, _ := callRoute(t, h, rt.method, rt.suffix, home, cookie)
 				if code == http.StatusUnauthorized || code == http.StatusForbidden {
 					t.Errorf("%s refused an owner of the tenant: %d", rt.suffix, code)
 				}
@@ -127,10 +134,12 @@ func TestEveryTenantRouteIsGuarded(t *testing.T) {
 // callRoute drives one handler through a mux, so the {tenant} path value the
 // guard reads is set the way the real router sets it. Calling the handler
 // directly would leave it empty and every case would pass.
-func callRoute(t *testing.T, h http.Handler, pattern, tenant string, cookie *http.Cookie) (int, string) {
+func callRoute(
+	t *testing.T, h http.Handler, method, pattern, tenant string, cookie *http.Cookie,
+) (int, string) {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.Handle("GET "+tenantScope+pattern, h)
+	mux.Handle(method+" "+tenantScope+pattern, h)
 
 	// Built by substituting the pattern rather than written out, so a route
 	// whose shape differs from the others is still driven through the router
@@ -138,7 +147,10 @@ func callRoute(t *testing.T, h http.Handler, pattern, tenant string, cookie *htt
 	target := strings.NewReplacer(
 		"{tenant}", tenant, "{app}", "api", "{env}", "prod",
 	).Replace(tenantScope + pattern)
-	req := httptest.NewRequest(http.MethodGet, target, nil)
+	// An empty body for the writing routes: what is under test is the guard,
+	// which runs before anything reads one, and a handler that rejects the
+	// body afterwards has already proved the point.
+	req := httptest.NewRequest(method, target, strings.NewReader("{}"))
 	req.Host = "damga.example.test"
 	if cookie != nil {
 		req.AddCookie(cookie)
@@ -151,6 +163,6 @@ func callRoute(t *testing.T, h http.Handler, pattern, tenant string, cookie *htt
 // A compile-time reminder that the table's handlers all have one shape. If a
 // future endpoint needs something the guard cannot give it, that is a design
 // question, not a signature to widen.
-var _ = []func(guard, evidence.Store) http.Handler{
-	apps, currentEvidence, history, verify, retention, export,
+var _ = []func(guard, stores) http.Handler{
+	apps, currentEvidence, history, verify, retention, export, deployRoute,
 }

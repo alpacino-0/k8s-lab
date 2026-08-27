@@ -1,0 +1,148 @@
+/*
+Copyright 2026 Orhan Yavuz.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+package manifest_test
+
+import (
+	"strings"
+	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
+
+	platformv1alpha1 "github.com/damgahq/damga/api/v1alpha1"
+	"github.com/damgahq/damga/internal/manifest"
+)
+
+const (
+	appName   = "api"
+	namespace = "acme-prod"
+)
+
+func workload() platformv1alpha1.Workload {
+	return platformv1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: appName, Namespace: namespace},
+		Spec: platformv1alpha1.WorkloadSpec{
+			Image:    "ghcr.io/acme/api:1.4.2",
+			Port:     8080,
+			Replicas: ptr.To(int32(3)),
+			Domain:   "api.acme.example",
+			Env:      []platformv1alpha1.EnvVar{{Name: "LOG_LEVEL", Value: "info"}},
+		},
+	}
+}
+
+// The round trip is what makes a deploy that changes one field safe. If
+// anything is lost here, changing the image silently removes it.
+func TestEverySettingSurvivesTheRoundTrip(t *testing.T) {
+	body, err := manifest.Render(workload(), "rollout-1")
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	back, err := manifest.Parse(body)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	want := workload()
+	switch {
+	case back.Spec.Image != want.Spec.Image:
+		t.Errorf("Image = %q", back.Spec.Image)
+	case back.Spec.Port != want.Spec.Port:
+		t.Errorf("Port = %d", back.Spec.Port)
+	case back.Spec.Replicas == nil || *back.Spec.Replicas != *want.Spec.Replicas:
+		t.Errorf("Replicas = %v", back.Spec.Replicas)
+	case back.Spec.Domain != want.Spec.Domain:
+		t.Errorf("Domain = %q", back.Spec.Domain)
+	case len(back.Spec.Env) != 1 || back.Spec.Env[0].Value != "info":
+		t.Errorf("Env = %v", back.Spec.Env)
+	case back.Name != want.Name || back.Namespace != want.Namespace:
+		t.Errorf("identity = %s/%s", back.Namespace, back.Name)
+	}
+}
+
+// The chain that lets a record opened at commit time be closed by what
+// happened in the cluster: the id is on the Workload, the operator carries it
+// to the Deployment, the observer reads it there.
+func TestTheRolloutIDIsInTheFile(t *testing.T) {
+	body, err := manifest.Render(workload(), "t_alpha-api-prod-41")
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !strings.Contains(string(body), "damga.co/rollout: t_alpha-api-prod-41") {
+		t.Errorf("the rollout id is not in the file:\n%s", body)
+	}
+	if !strings.Contains(string(body), "apiVersion: platform.damga.co/v1alpha1") {
+		t.Errorf("the file has no apiVersion:\n%s", body)
+	}
+	if !strings.Contains(string(body), "kind: Workload") {
+		t.Errorf("the file has no kind:\n%s", body)
+	}
+}
+
+// A committed status is a claim about the world made by whoever last edited a
+// file. The cluster answers that question.
+func TestStatusIsNeverCommitted(t *testing.T) {
+	w := workload()
+	w.Status = platformv1alpha1.WorkloadStatus{
+		Conditions: []metav1.Condition{{
+			Type: "Ready", Status: metav1.ConditionTrue,
+			Reason: "Invented", LastTransitionTime: metav1.Now(),
+		}},
+	}
+	body, err := manifest.Render(w, "rollout-1")
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if strings.Contains(string(body), "Invented") {
+		t.Errorf("a status reached the committed file:\n%s", body)
+	}
+}
+
+// A field this build does not know must be an error, not a silent drop. The
+// alternative is a deploy that changes the image and removes a setting added
+// by a newer damga — data loss nobody would attribute to the deploy.
+func TestAnUnknownFieldIsRefusedRatherThanDropped(t *testing.T) {
+	body := []byte(`apiVersion: platform.damga.co/v1alpha1
+kind: Workload
+metadata:
+  name: api
+  namespace: acme-prod
+spec:
+  image: ghcr.io/acme/api:1.4.2
+  somethingFromANewerDamga: true
+`)
+	if _, err := manifest.Parse(body); err == nil {
+		t.Error("a field this build does not know was silently dropped")
+	}
+}
+
+func TestWhatIsNotAWorkloadIsRefused(t *testing.T) {
+	body := []byte("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\n")
+	if _, err := manifest.Parse(body); err == nil {
+		t.Error("a Deployment parsed as a Workload")
+	}
+	for _, w := range []platformv1alpha1.Workload{
+		{ObjectMeta: metav1.ObjectMeta{Namespace: namespace}, Spec: platformv1alpha1.WorkloadSpec{Image: "x"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: appName}, Spec: platformv1alpha1.WorkloadSpec{Image: "x"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: appName, Namespace: namespace}},
+	} {
+		if _, err := manifest.Render(w, ""); err == nil {
+			t.Errorf("Render accepted %+v", w.ObjectMeta)
+		}
+	}
+}

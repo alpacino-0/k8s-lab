@@ -19,6 +19,7 @@ package server
 
 import (
 	"encoding/hex"
+	"slices"
 	"time"
 
 	"github.com/damgahq/damga/evidence"
@@ -172,6 +173,34 @@ func toWireRef(r evidence.Ref) wireRef {
 	return wireRef{TenantID: r.TenantID, App: r.App, Env: r.Env}
 }
 
+// effectiveCommit is the commit a record is about, wherever it was recorded.
+//
+// A record opened by the git write path cannot carry the SHA in Source: the
+// record has to exist before the commit does, because the rollout id is minted
+// from it and has to be inside the manifests. Source is the immutable half, so
+// it can never be filled in afterwards — the SHA lands on the transition
+// instead, as Observation.Revision.
+//
+// Presenting it in source.commitSha is presentation and not invention: the
+// question a reader is asking is "which commit is this deploy", there is one
+// answer, and making every consumer know that damga-originated deploys keep it
+// somewhere else would mean every one of them getting it wrong once. The raw
+// transitions are in the same response for anyone who wants to see where it
+// actually came from.
+func effectiveCommit(r evidence.Record) string {
+	if r.Source.CommitSHA != "" {
+		return r.Source.CommitSHA
+	}
+	// Newest first: a record can be observed more than once, and the commit it
+	// is about is the one it was pushed as.
+	for _, e := range slices.Backward(r.Transitions) {
+		if rev := e.Observation.Revision; rev != "" {
+			return rev
+		}
+	}
+	return ""
+}
+
 func toWireRecord(r evidence.Record) wireRecord {
 	policies := make([]wirePolicy, 0, len(r.Policies))
 	for _, p := range r.Policies {
@@ -207,7 +236,7 @@ func toWireRecord(r evidence.Record) wireRecord {
 		},
 		Source: wireSource{
 			RepoURL: r.Source.RepoURL, Ref: r.Source.Ref, Path: r.Source.Path,
-			CommitSHA: r.Source.CommitSHA, AuthorEmail: r.Source.AuthorEmail,
+			CommitSHA: effectiveCommit(r), AuthorEmail: r.Source.AuthorEmail,
 			CommitterEmail: r.Source.CommitterEmail,
 		},
 		Image: wireImage{

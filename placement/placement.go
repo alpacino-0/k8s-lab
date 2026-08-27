@@ -74,6 +74,17 @@ type Placement struct {
 	// Path is the directory inside the repository, without a leading slash.
 	Path string
 
+	// Namespace is where the rendered manifest says it runs.
+	//
+	// A field and not a convention. Deriving it — tenant slug plus
+	// environment, say — makes the namespace a parse of an identity, which is
+	// the same mistake as parsing the tenant out of a path: the day a customer
+	// renames a tenant or wants two environments in one namespace, a layout
+	// decision has become a rewrite. It also means two installs can never
+	// disagree about the rule, which sounds like a feature until somebody has
+	// an existing namespace they need this to deploy into.
+	Namespace string
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -117,6 +128,8 @@ func (p Placement) Validate() error {
 		return fmt.Errorf("%w: a placement needs a tenant, an app and an environment", ErrInvalid)
 	case p.RepoURL == "":
 		return fmt.Errorf("%w: a placement needs a repository", ErrInvalid)
+	case p.Namespace == "":
+		return fmt.Errorf("%w: a placement needs a namespace", ErrInvalid)
 	case p.Branch == "":
 		// Not defaulted to main. A wrong guess here commits to a branch
 		// nothing is watching, which looks exactly like a deploy that worked.
