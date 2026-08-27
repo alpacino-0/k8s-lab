@@ -93,6 +93,19 @@ curl http://app.local:8080/stats           # the service
 make smoke                                 # 30 end-to-end checks
 ```
 
+That brings up the cluster and the sample workload. The control plane — the
+panel, the API and the evidence store — runs on its own and needs no cluster:
+
+```bash
+go build -o damga ./cmd/damga
+./damga bootstrap -evidence-dsn ./damga.db -email you@example.com -tenant acme
+./damga -evidence-dsn ./damga.db -listen-address 127.0.0.1:8080
+```
+
+`bootstrap` prints a password once. See [CONTROL-PLANE.md](CONTROL-PLANE.md)
+for the flags that are easy to get wrong, what is on the API, and what is not
+built yet.
+
 ## The service
 
 `http://app.local:8080` is a working notes API. Every response carries the

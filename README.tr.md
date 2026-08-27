@@ -90,6 +90,19 @@ curl http://app.local:8080/stats           # servis
 make smoke                                 # 30 uçtan uca kontrol
 ```
 
+Bu, kümeyi ve örnek iş yükünü ayağa kaldırır. Kontrol düzlemi — panel, API ve
+kanıt deposu — kendi başına çalışır, kümeye ihtiyaç duymaz:
+
+```bash
+go build -o damga ./cmd/damga
+./damga bootstrap -evidence-dsn ./damga.db -email siz@example.com -tenant acme
+./damga -evidence-dsn ./damga.db -listen-address 127.0.0.1:8080
+```
+
+`bootstrap` parolayı bir kez yazdırır. Yanlış ayarlanması kolay bayraklar,
+API'de ne olduğu ve henüz neyin yazılmadığı için:
+[CONTROL-PLANE.md](CONTROL-PLANE.md).
+
 ## Servis
 
 `http://app.local:8080` çalışan bir notlar API'si. Her yanıt, onu üreten
