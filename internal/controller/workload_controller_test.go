@@ -153,6 +153,44 @@ var _ = Describe("Workload Controller", func() {
 	// Deleting by name alone would destroy an object that merely shares a name
 	// with this Workload — one that could be carrying live traffic and that this
 	// operator never created.
+	// The join between the git write path and the observer, across an update.
+	//
+	// The rollout id changes on every deploy by definition, so a Deployment
+	// that keeps the id it was created with is an observer permanently
+	// attaching new deploys to the oldest record — and once that record is
+	// closed, to nothing at all. Every deploy would then sit pending until the
+	// sweep marked it unknown: the platform reporting it cannot tell what
+	// happened to its own deploy.
+	It("carries a new rollout id onto a Deployment that already exists", func() {
+		Expect(k8sClient.Create(ctx, &platformv1alpha1.Workload{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: namespace,
+				Annotations: map[string]string{"damga.co/rollout": "rollout-1"},
+			},
+			Spec: platformv1alpha1.WorkloadSpec{Image: testImage, Port: 3000},
+		})).To(Succeed())
+		reconcileNow()
+
+		deploy := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, key, deploy)).To(Succeed())
+		Expect(deploy.Annotations).To(HaveKeyWithValue("damga.co/rollout", "rollout-1"))
+
+		By("deploying again")
+		app := &platformv1alpha1.Workload{}
+		Expect(k8sClient.Get(ctx, key, app)).To(Succeed())
+		app.Annotations["damga.co/rollout"] = "rollout-2"
+		app.Spec.Image = "ghcr.io/example/app:2.0.0"
+		Expect(k8sClient.Update(ctx, app)).To(Succeed())
+		reconcileNow()
+
+		Expect(k8sClient.Get(ctx, key, deploy)).To(Succeed())
+		Expect(deploy.Annotations).To(HaveKeyWithValue("damga.co/rollout", "rollout-2"),
+			"the observer would attach this deploy to the previous deploy's record")
+		// And the pod template still does not carry it, or every deploy would
+		// roll the pods a second time on a value that is not part of the app.
+		Expect(deploy.Spec.Template.Annotations).NotTo(HaveKey("damga.co/rollout"))
+	})
+
 	It("refuses to delete an object it does not own", func() {
 		foreign := &networkingv1.Ingress{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},

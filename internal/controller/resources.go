@@ -18,6 +18,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package controller
 
 import (
+	"strings"
+
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -85,6 +87,40 @@ func selectorFor(app *platformv1alpha1.Workload) map[string]string {
 	}
 }
 
+// annotationPrefix is what marks an annotation as this platform's own, and
+// therefore as something worth carrying from a Workload onto what it renders.
+//
+// A prefix rather than a list because the set grows, and a filter rather than
+// copying everything because a Workload arrives through git and through Argo
+// CD and picks up their annotations on the way. last-applied-configuration on
+// a Deployment it does not describe is noise at best; a sync-wave copied onto
+// a child object is an instruction meant for the parent.
+const annotationPrefix = "damga.co/"
+
+// platformAnnotations returns the Workload's own annotations, and nil rather
+// than an empty map when there are none — an empty map is a diff Argo CD
+// reports for ever.
+func platformAnnotations(app *platformv1alpha1.Workload) map[string]string {
+	var out map[string]string
+	for k, v := range app.Annotations {
+		if !strings.HasPrefix(k, annotationPrefix) {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// withAnnotations attaches annotations to metadata built by objectMeta,
+// leaving the field nil when there are none.
+func withAnnotations(meta metav1.ObjectMeta, annotations map[string]string) metav1.ObjectMeta {
+	meta.Annotations = annotations
+	return meta
+}
+
 func objectMeta(app *platformv1alpha1.Workload) metav1.ObjectMeta {
 	return metav1.ObjectMeta{
 		Name:      app.Name,
@@ -103,6 +139,13 @@ func desiredServiceAccount(app *platformv1alpha1.Workload) *corev1.ServiceAccoun
 	}
 }
 
+// desiredDeployment renders the Deployment.
+//
+// It is the only resource that carries the platform's annotations, and the
+// only one that needs to: the observer watches Deployments, reads
+// damga.co/rollout off one, and attaches the running state to the evidence
+// record that annotation names. Putting them on the Service or the autoscaler
+// as well would be annotations nothing reads.
 func desiredDeployment(app *platformv1alpha1.Workload) *appsv1.Deployment {
 	probe := func(path string) *corev1.Probe {
 		return &corev1.Probe{
@@ -143,7 +186,7 @@ func desiredDeployment(app *platformv1alpha1.Workload) *appsv1.Deployment {
 	}
 
 	return &appsv1.Deployment{
-		ObjectMeta: objectMeta(app),
+		ObjectMeta: withAnnotations(objectMeta(app), platformAnnotations(app)),
 		Spec: appsv1.DeploymentSpec{
 			Replicas: replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: selectorFor(app)},

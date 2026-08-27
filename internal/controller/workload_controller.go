@@ -120,6 +120,11 @@ func (r *WorkloadReconciler) reconcileOwned(ctx context.Context, app *platformv1
 		e.Spec.Strategy = d.Spec.Strategy
 		e.Spec.Template = d.Spec.Template
 		e.Labels = d.Labels
+		// Annotations too, and not only on create. The rollout id changes on
+		// every deploy by definition, so an existing Deployment that keeps its
+		// first one is an observer permanently attaching new deploys to the
+		// oldest record — or, once that record is closed, to nothing.
+		e.Annotations = d.Annotations
 	}); err != nil {
 		return fmt.Errorf("deployment: %w", err)
 	}

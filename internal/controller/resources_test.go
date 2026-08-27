@@ -256,3 +256,62 @@ func TestPreStopDoesNotDependOnTheImage(t *testing.T) {
 		t.Error("preStop does not use the kubelet's own sleep")
 	}
 }
+
+// The rollout annotation has to reach the Deployment, and it has to reach the
+// object rather than the pod template.
+//
+// This is the join between the git write path and the observer, and it was
+// missing: objectMeta set a name, a namespace and labels, so a Workload
+// carrying damga.co/rollout produced a Deployment carrying nothing. The
+// observer reads the annotation off the Deployment and treats its absence as
+// "not ours, nothing to move", so every record damga itself opened would have
+// stayed pending until the sweep gave up and marked it unknown — the platform
+// reporting that it could not tell what happened to its own deploy.
+//
+// Both halves were broken. desiredDeployment never set it, and the apply's
+// mutate function copied labels and not annotations, so even once it was set a
+// second deploy's new id would never land on an existing Deployment.
+func TestTheRolloutAnnotationReachesTheDeploymentObject(t *testing.T) {
+	const rollout = "t_alpha-api-prod-41"
+	a := app(func(a *platformv1alpha1.Workload) {
+		a.Annotations = map[string]string{
+			"damga.co/rollout": rollout,
+			// Argo CD's, kubectl's, and anything else that annotates the
+			// object on its way through. Copying everything would drag these
+			// onto a Deployment they say nothing true about.
+			"kubectl.kubernetes.io/last-applied-configuration": "{...}",
+			"argocd.argoproj.io/sync-wave":                     "1",
+		}
+	})
+
+	d := desiredDeployment(a)
+	if got := d.Annotations["damga.co/rollout"]; got != rollout {
+		t.Errorf("the Deployment's rollout annotation is %q, want %q — the observer cannot "+
+			"attach this deploy to the record that opened it", got, rollout)
+	}
+	for _, k := range []string{
+		"kubectl.kubernetes.io/last-applied-configuration",
+		"argocd.argoproj.io/sync-wave",
+	} {
+		if _, copied := d.Annotations[k]; copied {
+			t.Errorf("%q was copied onto the Deployment", k)
+		}
+	}
+
+	// On the object, never on the pod template. The deployment controller
+	// hashes .spec.template alone, so a template annotation would roll every
+	// pod on a value that changes on every deploy — and the rollout id changes
+	// on every deploy by definition.
+	if _, onTemplate := d.Spec.Template.Annotations["damga.co/rollout"]; onTemplate {
+		t.Error("the rollout annotation is on the pod template, which makes every deploy roll pods twice")
+	}
+}
+
+// A Workload with nothing of ours on it must not grow an empty annotation map,
+// which shows up as a diff Argo CD reports for ever.
+func TestNoDamgaAnnotationsMeansNoAnnotations(t *testing.T) {
+	d := desiredDeployment(app())
+	if len(d.Annotations) != 0 {
+		t.Errorf("Deployment annotations = %v, want none", d.Annotations)
+	}
+}
