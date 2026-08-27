@@ -43,6 +43,12 @@ type Store struct {
 	creds    map[string]identity.Credential
 	members  map[string]identity.Membership // accountID + "\x00" + tenantID
 	sessions map[string]identity.Session    // hex digest
+
+	// The one-time claim. A bool rather than a derived "does any owner
+	// membership exist", for the same reason the SQL stores keep a table:
+	// the derived form is a read followed by a write, and two of those
+	// interleave into two owners that each believe they are the first.
+	bootstrapped bool
 }
 
 func New() *Store {
@@ -360,3 +366,77 @@ func (s *Store) PruneExpired(_ context.Context, now time.Time) (int, error) {
 func (s *Store) Close() error { return nil }
 
 var _ identity.Store = (*Store)(nil)
+
+// Bootstrap is identity.Store.Bootstrap: the first tenant, the first account
+// and the owner membership between them, all under one hold of the mutex.
+//
+// The SQL stores get all-or-nothing from a transaction. Here it comes from
+// validating everything before writing anything, which is the same guarantee
+// as long as nothing between the first write and the last can fail — so
+// nothing between them is allowed to.
+func (s *Store) Bootstrap(
+	_ context.Context, t identity.Tenant, a identity.Account, cred identity.Credential,
+) error {
+	switch {
+	case t.ID == "" || t.Slug == "":
+		return fmt.Errorf("%w: a tenant needs an id and a slug", identity.ErrInvalid)
+	case !t.Tier.Valid():
+		return fmt.Errorf("%w: tier %q", identity.ErrInvalid, t.Tier)
+	case a.ID == "" || a.Email == "":
+		return fmt.Errorf("%w: an account needs an id and an email", identity.ErrInvalid)
+	case a.Kind != "user" && a.Kind != "automation":
+		return fmt.Errorf("%w: kind %q", identity.ErrInvalid, a.Kind)
+	case a.AuditEmail == "":
+		return fmt.Errorf("%w: an account needs an audit email", identity.ErrInvalid)
+	case cred.Hash == "":
+		// The one account that may not be passwordless. It is created before
+		// any identity provider exists, so a federated first account is an
+		// install nobody can sign in to.
+		return fmt.Errorf("%w: the first account needs a password", identity.ErrInvalid)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.bootstrapped {
+		return fmt.Errorf("%w: this install already has an owner", identity.ErrDuplicate)
+	}
+	if _, taken := s.slugs[t.Slug]; taken {
+		return fmt.Errorf("%w: that tenant already exists", identity.ErrDuplicate)
+	}
+	if _, taken := s.tenants[t.ID]; taken {
+		return fmt.Errorf("%w: that tenant already exists", identity.ErrDuplicate)
+	}
+	if _, taken := s.emails[fold(a.Email)]; taken {
+		return fmt.Errorf("%w: that account already exists", identity.ErrDuplicate)
+	}
+	if _, taken := s.accounts[a.ID]; taken {
+		return fmt.Errorf("%w: that account already exists", identity.ErrDuplicate)
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if t.CreatedAt.IsZero() {
+		t.CreatedAt = now
+	}
+	t.CreatedAt = t.CreatedAt.UTC().Truncate(time.Microsecond)
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = now
+	}
+	a.CreatedAt = a.CreatedAt.UTC().Truncate(time.Microsecond)
+	cred.AccountID, cred.UpdatedAt = a.ID, a.CreatedAt
+
+	s.tenants[t.ID], s.slugs[t.Slug] = t, t.ID
+	s.accounts[a.ID], s.emails[fold(a.Email)] = a, a.ID
+	s.creds[a.ID] = cred
+	s.members[memberKey(a.ID, t.ID)] = identity.Membership{
+		AccountID: a.ID, TenantID: t.ID, Role: identity.RoleOwner, CreatedAt: a.CreatedAt,
+	}
+	s.bootstrapped = true
+	return nil
+}
+
+// Bootstrapped is identity.Store.Bootstrapped.
+func (s *Store) Bootstrapped(_ context.Context) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bootstrapped, nil
+}

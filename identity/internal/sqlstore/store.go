@@ -116,20 +116,11 @@ func isUnique(err error) bool {
 // ---------------------------------------------------------------- tenants
 
 func (s *Store) CreateTenant(ctx context.Context, t identity.Tenant) (identity.Tenant, error) {
-	if t.ID == "" || t.Slug == "" {
-		return identity.Tenant{}, fmt.Errorf("%w: a tenant needs an id and a slug", identity.ErrInvalid)
+	if err := validTenant(&t, s.now); err != nil {
+		return identity.Tenant{}, err
 	}
-	if !t.Tier.Valid() {
-		return identity.Tenant{}, fmt.Errorf("%w: tier %q", identity.ErrInvalid, t.Tier)
-	}
-	if t.CreatedAt.IsZero() {
-		t.CreatedAt = s.now()
-	}
-	t.CreatedAt = t.CreatedAt.UTC().Truncate(time.Microsecond)
 
-	err := s.exec(ctx, `
-		INSERT INTO tenant (id, slug, display_name, tier, suspended, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+	err := s.exec(ctx, insertTenant,
 		t.ID, t.Slug, t.DisplayName, string(t.Tier), boolInt(t.Suspended), asText(t.CreatedAt))
 	switch {
 	case isUnique(err):
@@ -176,20 +167,11 @@ func (s *Store) scanTenant(r *sql.Row) (identity.Tenant, error) {
 func (s *Store) CreateAccount(
 	ctx context.Context, a identity.Account, cred identity.Credential,
 ) (identity.Account, error) {
-	switch {
-	case a.ID == "" || a.Email == "":
-		return identity.Account{}, fmt.Errorf("%w: an account needs an id and an email", identity.ErrInvalid)
-	case a.Kind != "user" && a.Kind != "automation":
-		return identity.Account{}, fmt.Errorf("%w: kind %q", identity.ErrInvalid, a.Kind)
-	case a.AuditEmail == "":
-		// Never defaulted. What goes into a commit and into the hash chain can
-		// never be redacted, so choosing it is the caller's.
-		return identity.Account{}, fmt.Errorf("%w: an account needs an audit email", identity.ErrInvalid)
+	// The audit email is never defaulted in there: what goes into a commit and
+	// into the hash chain can never be redacted, so choosing it is the caller's.
+	if err := validAccount(&a, s.now); err != nil {
+		return identity.Account{}, err
 	}
-	if a.CreatedAt.IsZero() {
-		a.CreatedAt = s.now()
-	}
-	a.CreatedAt = a.CreatedAt.UTC().Truncate(time.Microsecond)
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -197,9 +179,7 @@ func (s *Store) CreateAccount(
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	_, err = tx.ExecContext(ctx, s.d.Rebind(`
-		INSERT INTO account (id, kind, email, email_folded, audit_email, display_name, disabled, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+	_, err = tx.ExecContext(ctx, s.d.Rebind(insertAccount),
 		a.ID, a.Kind, a.Email, fold(a.Email), a.AuditEmail, a.DisplayName,
 		boolInt(a.Disabled), asText(a.CreatedAt))
 	switch {
@@ -216,8 +196,7 @@ func (s *Store) CreateAccount(
 		if cred.UpdatedAt.IsZero() {
 			cred.UpdatedAt = a.CreatedAt
 		}
-		if _, err := tx.ExecContext(ctx, s.d.Rebind(
-			`INSERT INTO credential (account_id, hash, updated_at) VALUES (?, ?, ?)`),
+		if _, err := tx.ExecContext(ctx, s.d.Rebind(insertCredential),
 			a.ID, cred.Hash, asText(cred.UpdatedAt)); err != nil {
 			return identity.Account{}, err
 		}
@@ -356,8 +335,7 @@ func (s *Store) AddMember(ctx context.Context, m identity.Membership) error {
 	if m.CreatedAt.IsZero() {
 		m.CreatedAt = s.now()
 	}
-	err := s.exec(ctx,
-		`INSERT INTO membership (account_id, tenant_id, role, created_at) VALUES (?, ?, ?, ?)`,
+	err := s.exec(ctx, insertMembership,
 		m.AccountID, m.TenantID, string(m.Role), asText(m.CreatedAt))
 	switch {
 	case isUnique(err):

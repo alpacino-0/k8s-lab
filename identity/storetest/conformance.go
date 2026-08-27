@@ -33,6 +33,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,6 +69,11 @@ func Run(t *testing.T, newStore Factory) {
 		{"SessionsCanBeTerminatedByAccount", testSessionsCanBeTerminatedByAccount},
 		{"PruneRemovesOnlyWhatExpired", testPruneRemovesOnlyWhatExpired},
 		{"NotFoundIsDistinguishable", testNotFoundIsDistinguishable},
+		{"BootstrapMakesAnOwnerWhoCanSignIn", testBootstrapMakesAnOwnerWhoCanSignIn},
+		{"BootstrapHappensAtMostOnce", testBootstrapHappensAtMostOnce},
+		{"AFailedBootstrapLeavesNothingBehind", testAFailedBootstrapLeavesNothingBehind},
+		{"BootstrapRefusesAnAccountWithNoPassword", testBootstrapRefusesAnAccountWithNoPassword},
+		{"ConcurrentBootstrapsProduceOneOwner", testConcurrentBootstrapsProduceOneOwner},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) { c.fn(t, newStore) })
@@ -80,6 +86,16 @@ const (
 	tenantID = "t_alpha"
 	acctID   = "a_orhan"
 	email    = "orhan@example.test"
+
+	// The second tenant. Several cases need somewhere an account is not a
+	// member of, which is the state a leak would show up in.
+	otherTenantID = "t_beta"
+
+	kindUser = "user"
+	// Not a real hash. The cases here are about what the store keeps and
+	// returns, not about argon2id — auth's own tests cover that, and hashing
+	// for real would make this suite take minutes per engine.
+	fakeHash = "argon2id$fake"
 )
 
 func tenant() identity.Tenant {
@@ -91,7 +107,7 @@ func tenant() identity.Tenant {
 
 func account() identity.Account {
 	return identity.Account{
-		ID: acctID, Kind: "user", Email: email,
+		ID: acctID, Kind: kindUser, Email: email,
 		AuditEmail: "a_orhan@users.damga.local", DisplayName: "Orhan Yavuz",
 	}
 }
@@ -107,7 +123,7 @@ func seedTenantAndAccount(t *testing.T, s identity.Store) {
 	if _, err := s.CreateTenant(ctx, tenant()); err != nil {
 		t.Fatalf("CreateTenant: %v", err)
 	}
-	if _, err := s.CreateAccount(ctx, account(), identity.Credential{Hash: "argon2id$fake"}); err != nil {
+	if _, err := s.CreateAccount(ctx, account(), identity.Credential{Hash: fakeHash}); err != nil {
 		t.Fatalf("CreateAccount: %v", err)
 	}
 }
@@ -168,7 +184,7 @@ func testSlugIsUnique(t *testing.T, newStore Factory) {
 		t.Fatalf("first: %v", err)
 	}
 	other := tenant()
-	other.ID = "t_beta"
+	other.ID = otherTenantID
 	if _, err := s.CreateTenant(ctx, other); !errors.Is(err, identity.ErrDuplicate) {
 		t.Errorf("a second tenant took the same slug: %v", err)
 	}
@@ -544,5 +560,172 @@ func testNotFoundIsDistinguishable(t *testing.T, newStore Factory) {
 		if !errors.Is(err, identity.ErrNotFound) {
 			t.Errorf("%s on a missing row = %v, want ErrNotFound", name, err)
 		}
+	}
+}
+
+// ---------------------------------------------------------------- bootstrap
+
+// The whole point of the call: an install that had nobody now has somebody who
+// can sign in and grant access to everyone else. Checked through the same reads
+// login uses, not through Bootstrapped — the claim being set proves the row was
+// written, not that the owner exists.
+func testBootstrapMakesAnOwnerWhoCanSignIn(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	if was, err := s.Bootstrapped(ctx); err != nil || was {
+		t.Fatalf("a fresh store reports Bootstrapped=%v, err=%v", was, err)
+	}
+	if err := s.Bootstrap(ctx, tenant(), account(), identity.Credential{Hash: fakeHash}); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	acct, err := s.AccountByEmail(ctx, email)
+	if err != nil {
+		t.Fatalf("the owner cannot be found by the address they would type: %v", err)
+	}
+	if _, err := s.Credential(ctx, acct.ID); err != nil {
+		t.Fatalf("the owner has no password: %v", err)
+	}
+	m, err := s.Membership(ctx, acct.ID, tenantID)
+	if err != nil {
+		t.Fatalf("Membership: %v", err)
+	}
+	if m.Role != identity.RoleOwner {
+		t.Errorf("the first account is %q, want owner — nobody can finish the install", m.Role)
+	}
+	if _, err := s.Tenant(ctx, tenantID); err != nil {
+		t.Fatalf("Tenant: %v", err)
+	}
+	if was, err := s.Bootstrapped(ctx); err != nil || !was {
+		t.Errorf("after Bootstrap the claim reads %v, err=%v", was, err)
+	}
+}
+
+// A second bootstrap is refused on the claim, not on a collision. Everything
+// about the second call is different — other tenant, other address, other id —
+// so anything that lets it through is a stranger with an owner account on
+// somebody else's install.
+func testBootstrapHappensAtMostOnce(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+	cred := identity.Credential{Hash: fakeHash}
+
+	if err := s.Bootstrap(ctx, tenant(), account(), cred); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	other := identity.Tenant{ID: otherTenantID, Slug: "beta", DisplayName: "Beta", Tier: identity.TierFree}
+	stranger := identity.Account{
+		ID: "a_stranger", Kind: kindUser, Email: "stranger@example.test",
+		AuditEmail: "a_stranger@users.damga.local", DisplayName: "Stranger",
+	}
+	err := s.Bootstrap(ctx, other, stranger, cred)
+	if !errors.Is(err, identity.ErrDuplicate) {
+		t.Fatalf("a second bootstrap returned %v, want ErrDuplicate", err)
+	}
+	if _, err := s.AccountByEmail(ctx, stranger.Email); !errors.Is(err, identity.ErrNotFound) {
+		t.Error("the refused bootstrap created its account anyway")
+	}
+	if _, err := s.Tenant(ctx, other.ID); !errors.Is(err, identity.ErrNotFound) {
+		t.Error("the refused bootstrap created its tenant anyway")
+	}
+}
+
+// Bootstrap writes four rows. A failure on any of them has to leave zero — and
+// crucially has to leave the claim unspent, because a claim without an owner is
+// an install that can never be signed into and can never be bootstrapped again.
+//
+// The failure is provoked with a tenant slug that is already taken, which is
+// reachable in practice: this store is also what a migration or a restore
+// writes into, so "empty" and "unclaimed" are not the same state.
+func testAFailedBootstrapLeavesNothingBehind(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateTenant(ctx, tenant()); err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+
+	err := s.Bootstrap(ctx, tenant(), account(), identity.Credential{Hash: fakeHash})
+	if !errors.Is(err, identity.ErrDuplicate) {
+		t.Fatalf("Bootstrap over a taken slug returned %v, want ErrDuplicate", err)
+	}
+	if _, err := s.AccountByEmail(ctx, email); !errors.Is(err, identity.ErrNotFound) {
+		t.Error("the account survived a bootstrap that failed after it")
+	}
+	if was, err := s.Bootstrapped(ctx); err != nil || was {
+		t.Fatal("the claim was spent by a bootstrap that failed: nobody can ever own this install")
+	}
+
+	// And the proof that the state is still usable: a bootstrap that does not
+	// collide still works.
+	free := identity.Tenant{ID: otherTenantID, Slug: "beta", DisplayName: "Beta", Tier: identity.TierFree}
+	if err := s.Bootstrap(ctx, free, account(), identity.Credential{Hash: fakeHash}); err != nil {
+		t.Fatalf("the store is unusable after a failed bootstrap: %v", err)
+	}
+}
+
+// Every other account may exist without a password; that is what a federated
+// account is. This one may not — it is created before any identity provider is
+// configured, so it would be an owner nobody can sign in as.
+func testBootstrapRefusesAnAccountWithNoPassword(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	if err := s.Bootstrap(ctx, tenant(), account(), identity.Credential{}); !errors.Is(err, identity.ErrInvalid) {
+		t.Fatalf("Bootstrap without a password returned %v, want ErrInvalid", err)
+	}
+	if was, err := s.Bootstrapped(ctx); err != nil || was {
+		t.Error("a refused bootstrap spent the claim")
+	}
+}
+
+// The reason the claim is a row rather than "does any owner membership exist".
+// The derived form is a read followed by a write, and two of those interleave
+// into two owners that were each told they were the first.
+func testConcurrentBootstrapsProduceOneOwner(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	const racers = 8
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		errs []error
+	)
+	for i := range racers {
+		wg.Go(func() {
+			// Each racer wants a different tenant and a different account, so
+			// no two of them can collide on anything except the claim itself.
+			tn := identity.Tenant{
+				ID: "t_" + string(rune('a'+i)), Slug: string(rune('a' + i)),
+				DisplayName: "T", Tier: identity.TierFree,
+			}
+			ac := identity.Account{
+				ID: "a_" + string(rune('a'+i)), Kind: kindUser,
+				Email:      string(rune('a'+i)) + "@example.test",
+				AuditEmail: "a@users.damga.local", DisplayName: "A",
+			}
+			err := s.Bootstrap(ctx, tn, ac, identity.Credential{Hash: fakeHash})
+			mu.Lock()
+			errs = append(errs, err)
+			mu.Unlock()
+		})
+	}
+	wg.Wait()
+
+	won := 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			won++
+		case errors.Is(err, identity.ErrDuplicate):
+		default:
+			t.Errorf("a losing racer got %v, want ErrDuplicate", err)
+		}
+	}
+	if won != 1 {
+		t.Fatalf("%d of %d concurrent bootstraps succeeded, want exactly 1", won, racers)
 	}
 }

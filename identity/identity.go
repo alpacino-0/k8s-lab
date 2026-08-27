@@ -245,5 +245,27 @@ type Store interface {
 	// refused by Session; this is housekeeping, not a security control.
 	PruneExpired(ctx context.Context, now time.Time) (int, error)
 
+	// Bootstrap creates the first tenant, the first account, and the owner
+	// membership that joins them — in one transaction, and at most once for
+	// the lifetime of this store. A second call returns ErrDuplicate no
+	// matter what it is given.
+	//
+	// It is one method rather than a claim followed by the three writes,
+	// because a claim that commits separately can be followed by a crash,
+	// and the install is then permanently marked as owned while having no
+	// owner: nobody can log in and the only remedy is editing the database.
+	// All-or-nothing is the only version of this that is safe to run once.
+	//
+	// The membership role is always owner. There is no argument for it
+	// because there is no useful answer other than owner — an install whose
+	// first account cannot grant anyone else access is an install with
+	// nobody who can finish setting it up.
+	Bootstrap(ctx context.Context, t Tenant, a Account, cred Credential) error
+
+	// Bootstrapped reports whether Bootstrap has already succeeded, so a
+	// caller can say so plainly instead of translating a duplicate-key
+	// error into advice.
+	Bootstrapped(ctx context.Context) (bool, error)
+
 	Close() error
 }

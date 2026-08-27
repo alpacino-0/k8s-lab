@@ -24,9 +24,11 @@ package server_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -536,3 +538,103 @@ var (
 	_ authz.Authorizer = (*refusingAuthorizer)(nil)
 	_ evidence.Store   = (*countingStore)(nil)
 )
+
+// ---------------------------------------------------------------- bootstrap
+
+// What every bootstrap case asks for. The owner's address is deliberately not
+// testEmail: these cases create the account rather than finding a seeded one,
+// and reusing that name would hide a bootstrap that quietly did nothing.
+const (
+	bootstrapSlug  = "acme"
+	bootstrapEmail = "owner@example.test"
+)
+
+// The seam the whole subcommand exists for: an install with nothing in it gets
+// an account that can sign in over HTTP with the password that was printed.
+// Run against a real file, because the thing being checked is that the two
+// processes — the one that bootstraps and the one that serves — agree about
+// what is in the database, and an in-memory store cannot disagree.
+func TestBootstrapProducesAnOwnerWhoCanSignIn(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "damga.db")
+	cfg := server.Config{EvidenceDSN: dsn}
+
+	res, err := server.Bootstrap(t.Context(), cfg, server.BootstrapRequest{
+		Email: bootstrapEmail, TenantSlug: bootstrapSlug,
+	})
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if !res.Generated || len(res.Password) < 20 {
+		t.Fatalf("generated password is %d characters, generated=%v", len(res.Password), res.Generated)
+	}
+
+	base := start(t, server.Options{Config: cfg})
+
+	body := strings.NewReader(`{"email":"` + bootstrapEmail + `","password":"` + res.Password + `"}`)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, base+"/api/v1/login", body)
+	if err != nil {
+		t.Fatalf("building the login request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/v1/login: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the bootstrapped owner cannot sign in: login = %d, want 200", resp.StatusCode)
+	}
+	var cookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == auth.CookieName {
+			cookie = c
+		}
+	}
+	if cookie == nil {
+		t.Fatal("login returned no session cookie")
+	}
+
+	// And the owner is an owner of the tenant that was just created — 404
+	// rather than 403, because nothing is deployed there yet.
+	url := base + "/api/v1/tenants/" + res.TenantID + "/apps/api/envs/prod/evidence"
+	if code, _ := get(t, url, cookieHeader(cookie)); code != http.StatusNotFound {
+		t.Errorf("evidence in the bootstrapped tenant = %d, want 404", code)
+	}
+	// Somewhere they are not a member of stays refused.
+	other := base + "/api/v1/tenants/t_elsewhere/apps/api/envs/prod/evidence"
+	if code, _ := get(t, other, cookieHeader(cookie)); code != http.StatusForbidden {
+		t.Errorf("evidence in another tenant = %d, want 403", code)
+	}
+}
+
+// Running it twice is a mistake, not a failure, and the caller has to be able
+// to tell — a deployment script that reruns this needs to continue rather than
+// abort, and it cannot parse a message to find that out.
+func TestBootstrapRefusesToRunTwice(t *testing.T) {
+	cfg := server.Config{EvidenceDSN: filepath.Join(t.TempDir(), "damga.db")}
+	req := server.BootstrapRequest{Email: bootstrapEmail, TenantSlug: bootstrapSlug}
+
+	if _, err := server.Bootstrap(t.Context(), cfg, req); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	req.Email, req.TenantSlug = "stranger@example.test", "beta"
+	_, err := server.Bootstrap(t.Context(), cfg, req)
+	if !errors.Is(err, server.ErrAlreadyBootstrapped) {
+		t.Fatalf("a second bootstrap returned %v, want ErrAlreadyBootstrapped", err)
+	}
+}
+
+// Without a DSN the server keeps identities in memory, so this would report an
+// owner into a database that stops existing when the command returns — and the
+// operator would find out at the login screen.
+func TestBootstrapRefusesAnInstallThatForgets(t *testing.T) {
+	_, err := server.Bootstrap(t.Context(), server.Config{}, server.BootstrapRequest{
+		Email: bootstrapEmail, TenantSlug: bootstrapSlug,
+	})
+	if err == nil {
+		t.Fatal("bootstrapping without a DSN succeeded; the owner would vanish on exit")
+	}
+	if !strings.Contains(err.Error(), "-evidence-dsn") {
+		t.Errorf("the error does not say which flag is missing: %v", err)
+	}
+}
