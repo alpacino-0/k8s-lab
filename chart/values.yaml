@@ -59,11 +59,17 @@ config:
   SECURE_COOKIE: "false"
 
 # Application secret. In a real cluster this comes from an external manager
-# (see docs) — the plain value here exists only so `helm install` works locally.
+# (see docs); set create: false and point the deployment at that one.
+#
+# Left empty on purpose. An empty value is generated on first install and then
+# kept across upgrades, so a zero-configuration install is safe rather than
+# merely convenient — this used to read `change-me`, and a chart's default is
+# what most people run. Setting a value here still wins, and writes it into the
+# values file, which is the reason the documentation prefers a manager.
 appSecret:
   create: true
   values:
-    API_TOKEN: change-me
+    API_TOKEN: ""
 
 service:
   type: ClusterIP
@@ -199,7 +205,10 @@ postgres:
   auth:
     username: labuser
     database: labdb
-    password: change-me    # ignored when existingSecret is set
+    # Empty on purpose: generated on first install and kept afterwards.
+    # Ignored when existingSecret is set. A non-empty default here was a
+    # known password that the `required` guard could never catch.
+    password: ""
     # Preferred in any real cluster: create the secret out of band and name it
     # here, so no password is ever written into a values file or a shell
     # history. It must contain POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB.

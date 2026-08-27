@@ -1,16 +1,38 @@
 {{- if .Values.postgres.enabled }}
 {{- if not .Values.postgres.auth.existingSecret }}
+{{- /*
+  Generated when unset, and kept once the database exists.
+
+  `required` was the guard here and it does not catch what actually happens: it
+  fires on an empty value, and the default was the non-empty string `change-me`,
+  so the check passed and the install got a known password. An empty default
+  plus generation is the shape that has no such gap.
+
+  Preserving the live value is not tidiness here — the password is baked into
+  the data directory when Postgres first initialises, so a value that rotates on
+  upgrade locks the application out of its own database while the server keeps
+  the old one.
+*/}}
+{{- $pgName := include "postgres.fullname" . }}
+{{- $livePg := (lookup "v1" "Secret" .Release.Namespace $pgName) | default dict }}
+{{- $livePgData := (get $livePg "data") | default dict }}
 apiVersion: v1
 kind: Secret
 metadata:
-  name: {{ include "postgres.fullname" . }}
+  name: {{ $pgName }}
   labels:
     {{- include "app.labels" . | nindent 4 }}
 type: Opaque
-stringData:
-  POSTGRES_USER: {{ .Values.postgres.auth.username | quote }}
-  POSTGRES_PASSWORD: {{ required "set postgres.auth.password or postgres.auth.existingSecret" .Values.postgres.auth.password | quote }}
-  POSTGRES_DB: {{ .Values.postgres.auth.database | quote }}
+data:
+  POSTGRES_USER: {{ .Values.postgres.auth.username | toString | b64enc | quote }}
+  POSTGRES_DB: {{ .Values.postgres.auth.database | toString | b64enc | quote }}
+  {{- if .Values.postgres.auth.password }}
+  POSTGRES_PASSWORD: {{ .Values.postgres.auth.password | toString | b64enc | quote }}
+  {{- else if hasKey $livePgData "POSTGRES_PASSWORD" }}
+  POSTGRES_PASSWORD: {{ get $livePgData "POSTGRES_PASSWORD" | quote }}
+  {{- else }}
+  POSTGRES_PASSWORD: {{ randAlphaNum 40 | b64enc | quote }}
+  {{- end }}
 ---
 {{- end }}
 apiVersion: v1

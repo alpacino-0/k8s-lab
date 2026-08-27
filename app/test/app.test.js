@@ -456,3 +456,141 @@ test('logger writes one JSON object per line', () => {
   assert.strictEqual(parsed.app, 't');
   assert.strictEqual(parsed.k, 1);
 });
+
+// The measured attack, in miniature. On a running pod about 2,300 invented
+// paths took the registry from 14 series to 2,332 counters and 23,280 histogram
+// buckets, and /metrics from 14 KB to 2.9 MB — permanently, because prom-client
+// series never expire and Prometheus had already scraped them. No credentials
+// were needed and restricting /metrics would not have helped, because the series
+// are created by traffic to the application port.
+//
+// Fifty 404s is enough to tell a bounded label from an unbounded one: with the
+// raw path as the label this produces fifty route values, and with the route
+// template it produces one.
+test('a sweep of invented paths cannot grow the metrics registry', async () => {
+  await withServer({}, async (base, metrics) => {
+    for (let i = 0; i < 50; i++) {
+      await fetch(`${base}/does-not-exist/${i}/${Math.random()}`);
+    }
+
+    const series = await metrics.registry.getMetricsAsJSON();
+    const requests = series.find((s) => s.name === 'http_requests_total');
+    const routes = new Set((requests?.values || []).map((v) => v.labels.route));
+
+    assert.ok(
+      routes.size <= 2,
+      `route label took ${routes.size} distinct values from 50 invented paths; ` +
+      'every one of them is a permanent counter plus a nine-bucket histogram, ' +
+      'and the number of URLs a stranger can type is not bounded',
+    );
+    assert.ok(
+      routes.has('unmatched'),
+      'requests that matched no route should collapse to one series, not one each',
+    );
+  });
+});
+
+// The other half: collapsing everything would also be "bounded", and useless.
+test('a request that matches a route is labelled with that route', async () => {
+  await withServer({}, async (base, metrics) => {
+    await fetch(`${base}/healthz`);
+
+    const series = await metrics.registry.getMetricsAsJSON();
+    const requests = series.find((s) => s.name === 'http_requests_total');
+    const routes = new Set((requests?.values || []).map((v) => v.labels.route));
+
+    assert.ok(
+      routes.has('/healthz'),
+      `route labels were ${[...routes].join(', ')}; a registered route is a value this ` +
+      'application chose and is what the label is for',
+    );
+  });
+});
+
+// The measured bypass. Against limits of 40 writes a minute and 20 notes per
+// visitor, 60 posts sent with one cookie produced 20 created, 20 rate-limited
+// and 20 over quota — every guard working. The same 60 posts sent with no
+// cookie at all produced 60 created and nothing else, in one second, because
+// each request minted a new identity and therefore a new empty budget.
+//
+// Both halves have to hold: the cookieless loop has to be stopped, and a
+// visitor who accepted the cookie has to keep the limit the demo advertises.
+test('a cookieless write loop cannot buy itself a fresh budget', async () => {
+  const stored = [];
+  const db = {
+    async listNotes() { return stored; },
+    async countNotesFor() { return stored.length; },
+    async createNote(visitor, text) {
+      const note = { id: stored.length + 1, visitor, text };
+      stored.push(note);
+      return note;
+    },
+    async ping() {},
+  };
+
+  await withServer({ db, config: { limits: { ...loadConfig({}).limits, cookielessWritesPerMinute: 5 } } },
+    async (base) => {
+      let created = 0;
+      let limited = 0;
+      for (let i = 0; i < 30; i++) {
+        // No cookie jar, exactly as the attack ran it.
+        const res = await fetch(`${base}/notes`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ text: `spam ${i}` }),
+        });
+        if (res.status === 201) created++;
+        if (res.status === 429) limited++;
+      }
+
+      assert.ok(
+        created <= 5,
+        `${created} cookieless writes were accepted; a request that brings no identity ` +
+        'gets a brand-new one, so metering it per visitor meters nothing',
+      );
+      assert.ok(limited > 0, 'nothing was rate limited, so no floor applied at all');
+    });
+});
+
+test('a visitor who keeps their cookie keeps the per-visitor limit', async () => {
+  const stored = [];
+  const db = {
+    async listNotes() { return stored; },
+    async countNotesFor() { return stored.length; },
+    async createNote(visitor, text) {
+      const note = { id: stored.length + 1, visitor, text };
+      stored.push(note);
+      return note;
+    },
+    async ping() {},
+  };
+
+  await withServer({ db, config: { limits: { ...loadConfig({}).limits, writesPerMinute: 8, maxNotesPerVisitor: 100 } } },
+    async (base) => {
+      // One request to be handed a cookie, then keep presenting it.
+      const first = await fetch(`${base}/notes`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: 'hello' }),
+      });
+      const cookie = (first.headers.get('set-cookie') || '').split(';')[0];
+      assert.ok(cookie, 'no visitor cookie was issued');
+
+      let created = first.status === 201 ? 1 : 0;
+      for (let i = 0; i < 20; i++) {
+        const res = await fetch(`${base}/notes`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', cookie },
+          body: JSON.stringify({ text: `note ${i}` }),
+        });
+        if (res.status === 201) created++;
+      }
+
+      assert.ok(
+        created > 5 && created <= 9,
+        `${created} writes were accepted with a cookie; the cookieless floor is not ` +
+        'supposed to apply to a visitor who has an identity, and the per-visitor ' +
+        'limit still is',
+      );
+    });
+});

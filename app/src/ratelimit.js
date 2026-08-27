@@ -19,7 +19,14 @@ function createRateLimiter({ limit, windowMs = 60_000, now = () => Date.now() })
   }
 
   return {
-    /** @returns {{allowed: boolean, remaining: number, retryAfter: number}} */
+    /**
+     * `count` is the number of hits in the current window, returned alongside
+     * the verdict so a caller can apply a tighter ceiling than this limiter was
+     * built with — the cookieless write floor is one such, and without the raw
+     * count the caller can only ask "was 40 exceeded", never "was 5".
+     *
+     * @returns {{allowed: boolean, count: number, remaining: number, retryAfter: number}}
+     */
     check(key) {
       const current = now();
       // Cheap amortised cleanup; the map only holds active windows.
@@ -34,6 +41,7 @@ function createRateLimiter({ limit, windowMs = 60_000, now = () => Date.now() })
       const allowed = entry.count <= limit;
       return {
         allowed,
+        count: entry.count,
         remaining: Math.max(0, limit - entry.count),
         retryAfter: Math.ceil((entry.resetAt - current) / 1000),
       };

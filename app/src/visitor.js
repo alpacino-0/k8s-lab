@@ -45,6 +45,12 @@ function visitorMiddleware(limits) {
     }
 
     req.visitorId = id;
+    // Whether this identity was minted a line ago or arrived with the request.
+    // A caller that meters anything per visitor has to know: an identity the
+    // server just invented is not a subject, it is a blank cheque, and handing
+    // out a fresh one per request is what let a cookieless loop write past
+    // every limit the demo has.
+    req.visitorIsNew = id !== existing;
     next();
   };
 }

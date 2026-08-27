@@ -23,6 +23,11 @@ function loadConfig(env = process.env) {
     demoEndpoints: env.DEMO_ENDPOINTS === 'true',
     // Above this, a successful request is still worth a line.
     slowRequestMs: num(env.SLOW_REQUEST_MS, 250, 'SLOW_REQUEST_MS'),
+    // How many proxies in front of this process are ours. Express reads
+    // req.ip by counting back this many entries of X-Forwarded-For, so
+    // this is what stops a client from choosing its own rate-limit key by
+    // writing the header. One is the ingress controller.
+    trustedProxyHops: num(env.TRUSTED_PROXY_HOPS, 1, 'TRUSTED_PROXY_HOPS'),
 
     // Public-exposure limits. Anyone can use the demo without signing up, so
     // the guard rails are per visitor rather than per account.
@@ -38,6 +43,17 @@ function loadConfig(env = process.env) {
       // is this multiplied by the replica count — the ingress limiter is the
       // one that actually bounds a client.
       writesPerMinute: num(env.WRITES_PER_MINUTE, 40, 'WRITES_PER_MINUTE'),
+      // The floor for a write from a visitor who presented no cookie.
+      //
+      // Every other limit here is per visitor, and a visitor with no
+      // cookie is a brand-new one every request — measured: 60 cookieless
+      // posts in one second produced 60 notes, no rate limit and no quota,
+      // against limits of 40 a minute and 20 notes. So a write that
+      // arrives with no identity is metered on the address instead, which
+      // is the one thing about such a request the client does not choose.
+      // Low on purpose: a real visitor pays it once and then has a cookie.
+      cookielessWritesPerMinute: num(
+        env.COOKIELESS_WRITES_PER_MINUTE, 5, 'COOKIELESS_WRITES_PER_MINUTE'),
       readsPerMinute: num(env.READS_PER_MINUTE, 240, 'READS_PER_MINUTE'),
     },
 

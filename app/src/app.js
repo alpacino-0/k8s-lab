@@ -6,6 +6,32 @@ const { visitorMiddleware } = require('./visitor');
 const { createRateLimiter } = require('./ratelimit');
 
 /**
+ * The value of the `route` metric label: the registered Express route, or one
+ * constant for everything that matched nothing.
+ *
+ * It used to be `req.path`, the raw URL. Every distinct path a client invented
+ * then created permanent series in the registry — one counter plus a histogram
+ * with nine buckets, a _sum and a _count — and prom-client series never expire.
+ * Measured on a running pod: about 2,300 made-up paths took the registry from
+ * 14 series to 2,332 counters and 23,280 histogram buckets, and /metrics from
+ * 14 KB to 2.9 MB. Prometheus kept them. The pod's memory limit is 192Mi and
+ * the number of URLs a stranger can type is not bounded, so this was an
+ * unauthenticated way to kill the process and bloat the TSDB behind it, needing
+ * nothing but a loop over 404s. Restricting /metrics does not help — the series
+ * are created by traffic to the application port.
+ *
+ * A registered route is a value this application chose, so the label is bounded
+ * by the routing table. Anything else collapses to "unmatched", which is one
+ * series no matter how many ways it is reached. req.route only exists once the
+ * router has matched, which is why the caller reads it at finish and not when
+ * the timer starts.
+ */
+function routeLabel(req) {
+  if (!req.route) return 'unmatched';
+  return `${req.baseUrl || ''}${req.route.path}`;
+}
+
+/**
  * Build the Express app. Dependencies are injected so tests can run without
  * a database or a real metrics registry.
  */
@@ -23,9 +49,19 @@ function createApp({ config, logger, metrics, db, redis = null }) {
   });
   const limits = config.limits;
   app.disable('x-powered-by');
-  // Trust the ingress controller's X-Forwarded-For so proxy hops do not hide
-  // the real client from anything that inspects it.
-  app.set('trust proxy', true);
+  // Trust exactly one hop: the ingress controller in front of this pod.
+  //
+  // `true` trusts the whole chain, which means req.ip is the leftmost entry of
+  // X-Forwarded-For — a header the client writes. Nothing read req.ip when that
+  // was set, so it cost nothing; the moment a limit is keyed on the address it
+  // would be a limit the client picks the key for, which is not a limit. One hop
+  // makes req.ip the entry ingress-nginx appended, which is the address it
+  // actually accepted the connection from.
+  //
+  // If another proxy is put in front of this, that number goes up. It is the
+  // count of proxies you control, not a level of caution: too high trusts a
+  // forged hop, too low rate-limits the whole cluster as one client.
+  app.set('trust proxy', config.trustedProxyHops);
   app.use(express.json({ limit: '32kb' }));
   app.use(visitorMiddleware(limits));
 
@@ -39,9 +75,26 @@ function createApp({ config, logger, metrics, db, redis = null }) {
    */
   function limited(limiter, limit) {
     return async (req, res, next) => {
-      // Keyed on the visitor rather than the IP: shared networks and mobile
-      // carriers put many people behind a single address.
-      const key = `rl:${req.method === 'GET' ? 'r' : 'w'}:${req.visitorId}`;
+      const isWrite = req.method !== 'GET';
+
+      // Keyed on the visitor rather than the IP, because shared networks and
+      // mobile carriers put many people behind one address — but only for a
+      // visitor who brought an identity with them. One the server minted a
+      // moment ago is not a subject to meter: sending no cookie means a fresh
+      // key every request, and 60 cookieless posts in one second were measured
+      // producing 60 notes with neither the 40-a-minute limit nor the 20-note
+      // quota firing once. The one thing such a request does not get to choose
+      // is where it came from, so that is what it is metered on.
+      //
+      // Writes only. A cookieless read is cheap and a strict address limit on
+      // reads would break exactly the shared networks the visitor key exists to
+      // protect — and the first read is what hands out the cookie that makes
+      // the following writes meterable.
+      const meterByAddress = isWrite && req.visitorIsNew === true;
+      const subject = meterByAddress ? `ip:${req.ip}` : `v:${req.visitorId}`;
+      const effective = meterByAddress ? limits.cookielessWritesPerMinute : limit;
+
+      const key = `rl:${isWrite ? 'w' : 'r'}:${subject}`;
       let backend = 'memory';
       let allowed;
       let remaining;
@@ -50,12 +103,16 @@ function createApp({ config, logger, metrics, db, redis = null }) {
       const shared = redis ? await redis.slidingWindow(key, 60_000) : null;
       if (shared) {
         backend = 'redis';
-        allowed = shared.count <= limit;
-        remaining = Math.max(0, limit - shared.count);
+        allowed = shared.count <= effective;
+        remaining = Math.max(0, effective - shared.count);
       } else {
-        const local = limiter.check(req.visitorId);
-        allowed = local.allowed;
-        remaining = local.remaining;
+        // The same key as the shared store, not just the visitor id. They had
+        // drifted: Redis counted reads and writes in separate buckets and the
+        // in-memory fallback counted them in one, so which limit applied
+        // depended on whether Redis happened to be up.
+        const local = limiter.check(key);
+        allowed = local.allowed && local.count <= effective;
+        remaining = Math.max(0, effective - local.count);
         retryAfter = local.retryAfter;
       }
 
@@ -65,7 +122,10 @@ function createApp({ config, logger, metrics, db, redis = null }) {
 
       if (!allowed) {
         res.setHeader('Retry-After', String(retryAfter));
-        metrics.rateLimited.inc({ route: req.path });
+        // routeLabel here too: this counter carries a route label and a
+        // 429 is exactly what a flood of invented paths produces, so the
+        // raw path would make the rate limiter its own cardinality bomb.
+        metrics.rateLimited.inc({ route: routeLabel(req) });
         return res.status(429).json({ error: 'too many requests, slow down' });
       }
       next();
@@ -91,14 +151,14 @@ function createApp({ config, logger, metrics, db, redis = null }) {
   app.use((req, res, next) => {
     if (req.path === '/metrics') return next();
     const startedNs = process.hrtime.bigint();
-    const stop = metrics.httpDuration.startTimer({
-      route: req.path,
-      method: req.method,
-    });
+    // No route label yet — see routeLabel. The timer takes the rest of its
+    // labels now and the route when it stops.
+    const stop = metrics.httpDuration.startTimer({ method: req.method });
     res.on('finish', () => {
-      stop();
+      const route = routeLabel(req);
+      stop({ route });
       metrics.httpRequests.inc({
-        route: req.path,
+        route,
         method: req.method,
         status: res.statusCode,
       });

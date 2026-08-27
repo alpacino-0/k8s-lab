@@ -19,10 +19,16 @@ Reach the service:
 {{- if .Values.postgres.enabled }}
 {{- if .Values.postgres.auth.existingSecret }}
   Credentials: secret "{{ .Values.postgres.auth.existingSecret }}" (managed outside this chart)
-{{- else if eq .Values.postgres.auth.password "change-me" }}
+{{- else if not .Values.postgres.auth.password }}
 
-WARNING: the database password is still the chart default. Either override it:
-  helm upgrade {{ .Release.Name }} ... --set postgres.auth.password=<strong-password>
-or, better, create the secret out of band and set postgres.auth.existingSecret.
+  The database password was generated and stored in secret "{{ include "postgres.fullname" . }}".
+  It is kept across upgrades, and this chart is the only copy — read it with:
+    kubectl -n {{ .Release.Namespace }} get secret {{ include "postgres.fullname" . }} \
+      -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d
+
+  For anything you intend to keep, create the secret out of band instead and set
+  postgres.auth.existingSecret: a generated password lives only in the cluster,
+  so restoring this release into a new cluster restores an application that
+  cannot open its own database.
 {{- end }}
 {{- end }}
