@@ -114,6 +114,46 @@ func platformAnnotations(app *platformv1alpha1.Workload) map[string]string {
 	return out
 }
 
+// reconcileAnnotations brings the platform's annotations on a live object up to
+// date without claiming the ones it does not own.
+//
+// Nothing owns a Deployment's annotation map outright, and this operator least
+// of all. The deployment controller owns deployment.kubernetes.io/revision and
+// writes it on every sync; kubectl owns last-applied-configuration; Argo CD
+// owns its tracking id. Assigning the whole map — which is what the mutate used
+// to do — claims all of them, so every reconcile deletes the revision
+// annotation, the deployment controller puts it back, that write wakes this
+// controller through Owns(&appsv1.Deployment{}), and the two rewrite one object
+// without pause. The write the deployment controller loses in that fight is its
+// own status write, which is how a Deployment reports READY 0/2 while every pod
+// is Ready and its own ReplicaSet reports 2.
+//
+// So the operator claims exactly one namespace of keys, annotationPrefix, and
+// reconciles that namespace and nothing else: desired keys are written, keys
+// under the prefix that the Workload has stopped carrying are deleted so a
+// rollout id can be retracted, and every other key is left as it was found.
+//
+// It changes nothing when there is nothing to change — no key is deleted that
+// was not there, no value is written that is not different, and an object with
+// no annotations keeps a nil map rather than growing an empty one. That is what
+// makes the reconcile idempotent, and idempotence here is not tidiness: a write
+// per pass is what turns a shared object into a war.
+func reconcileAnnotations(existing, desired map[string]string) map[string]string {
+	for k := range existing {
+		if _, wanted := desired[k]; wanted || !strings.HasPrefix(k, annotationPrefix) {
+			continue
+		}
+		delete(existing, k)
+	}
+	for k, v := range desired {
+		if existing == nil {
+			existing = make(map[string]string, len(desired))
+		}
+		existing[k] = v
+	}
+	return existing
+}
+
 // withAnnotations attaches annotations to metadata built by objectMeta,
 // leaving the field nil when there are none.
 func withAnnotations(meta metav1.ObjectMeta, annotations map[string]string) metav1.ObjectMeta {

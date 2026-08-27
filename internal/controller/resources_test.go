@@ -27,7 +27,20 @@ import (
 	platformv1alpha1 "github.com/damgahq/damga/api/v1alpha1"
 )
 
-const testDomain = "blog.example.com"
+const (
+	testDomain = "blog.example.com"
+
+	// Two annotations named side by side, because telling them apart is the
+	// whole subject of the tests below: the first is this operator's to write
+	// and retract, the second belongs to the deployment controller and is only
+	// ever passed through.
+	rolloutAnnotation  = annotationPrefix + "rollout"
+	revisionAnnotation = "deployment.kubernetes.io/revision"
+
+	// A rollout id and the one that replaces it.
+	oldRollout = "t_1"
+	newRollout = "t_2"
+)
 
 func app(mutate ...func(*platformv1alpha1.Workload)) *platformv1alpha1.Workload {
 	a := &platformv1alpha1.Workload{
@@ -275,7 +288,7 @@ func TestTheRolloutAnnotationReachesTheDeploymentObject(t *testing.T) {
 	const rollout = "t_alpha-api-prod-41"
 	a := app(func(a *platformv1alpha1.Workload) {
 		a.Annotations = map[string]string{
-			"damga.co/rollout": rollout,
+			rolloutAnnotation: rollout,
 			// Argo CD's, kubectl's, and anything else that annotates the
 			// object on its way through. Copying everything would drag these
 			// onto a Deployment they say nothing true about.
@@ -285,7 +298,7 @@ func TestTheRolloutAnnotationReachesTheDeploymentObject(t *testing.T) {
 	})
 
 	d := desiredDeployment(a)
-	if got := d.Annotations["damga.co/rollout"]; got != rollout {
+	if got := d.Annotations[rolloutAnnotation]; got != rollout {
 		t.Errorf("the Deployment's rollout annotation is %q, want %q — the observer cannot "+
 			"attach this deploy to the record that opened it", got, rollout)
 	}
@@ -302,16 +315,79 @@ func TestTheRolloutAnnotationReachesTheDeploymentObject(t *testing.T) {
 	// hashes .spec.template alone, so a template annotation would roll every
 	// pod on a value that changes on every deploy — and the rollout id changes
 	// on every deploy by definition.
-	if _, onTemplate := d.Spec.Template.Annotations["damga.co/rollout"]; onTemplate {
+	if _, onTemplate := d.Spec.Template.Annotations[rolloutAnnotation]; onTemplate {
 		t.Error("the rollout annotation is on the pod template, which makes every deploy roll pods twice")
 	}
 }
 
 // A Workload with nothing of ours on it must not grow an empty annotation map,
 // which shows up as a diff Argo CD reports for ever.
+//
+// This is about the object desiredDeployment renders, not the one on the
+// cluster. Reading it as "a managed Deployment carries no annotations" is how
+// the outage happened: the mutate assigned this nil over the live map and took
+// deployment.kubernetes.io/revision with it. What the operator renders and what
+// it may claim on an object it shares are two different questions —
+// reconcileAnnotations answers the second.
 func TestNoDamgaAnnotationsMeansNoAnnotations(t *testing.T) {
 	d := desiredDeployment(app())
 	if len(d.Annotations) != 0 {
 		t.Errorf("Deployment annotations = %v, want none", d.Annotations)
+	}
+}
+
+// The nil map is the trap in reconcileAnnotations, and it is worth pinning
+// separately: writing into a nil map panics, and allocating one when there is
+// nothing to put in it turns every reconcile of an unannotated Workload into a
+// diff — an empty map where the live object has none.
+func TestReconcileAnnotationsOwnsOnlyItsOwnPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		existing, desired map[string]string
+		want              map[string]string
+	}{
+		{
+			name:     "nothing on either side stays nil",
+			existing: nil, desired: nil, want: nil,
+		},
+		{
+			name:     "keeps what other controllers own",
+			existing: map[string]string{revisionAnnotation: "7"},
+			desired:  map[string]string{rolloutAnnotation: newRollout},
+			want: map[string]string{
+				revisionAnnotation: "7",
+				rolloutAnnotation:  newRollout,
+			},
+		},
+		{
+			name:     "a new rollout id replaces the old one",
+			existing: map[string]string{rolloutAnnotation: oldRollout, "argocd.argoproj.io/tracking-id": "x"},
+			desired:  map[string]string{rolloutAnnotation: newRollout},
+			want: map[string]string{
+				rolloutAnnotation:                newRollout,
+				"argocd.argoproj.io/tracking-id": "x",
+			},
+		},
+		{
+			name:     "one the Workload stopped carrying is retracted",
+			existing: map[string]string{rolloutAnnotation: oldRollout, revisionAnnotation: "7"},
+			desired:  nil,
+			want:     map[string]string{revisionAnnotation: "7"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := reconcileAnnotations(tc.existing, tc.desired)
+			if len(got) != len(tc.want) {
+				t.Fatalf("annotations = %v, want %v", got, tc.want)
+			}
+			if tc.want == nil && got != nil {
+				t.Fatalf("annotations = %v, want a nil map rather than an empty one", got)
+			}
+			for k, v := range tc.want {
+				if got[k] != v {
+					t.Errorf("annotation %q = %q, want %q", k, got[k], v)
+				}
+			}
+		})
 	}
 }

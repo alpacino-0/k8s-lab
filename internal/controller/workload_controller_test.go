@@ -165,7 +165,7 @@ var _ = Describe("Workload Controller", func() {
 		Expect(k8sClient.Create(ctx, &platformv1alpha1.Workload{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: name, Namespace: namespace,
-				Annotations: map[string]string{"damga.co/rollout": "rollout-1"},
+				Annotations: map[string]string{rolloutAnnotation: "rollout-1"},
 			},
 			Spec: platformv1alpha1.WorkloadSpec{Image: testImage, Port: 3000},
 		})).To(Succeed())
@@ -173,22 +173,93 @@ var _ = Describe("Workload Controller", func() {
 
 		deploy := &appsv1.Deployment{}
 		Expect(k8sClient.Get(ctx, key, deploy)).To(Succeed())
-		Expect(deploy.Annotations).To(HaveKeyWithValue("damga.co/rollout", "rollout-1"))
+		Expect(deploy.Annotations).To(HaveKeyWithValue(rolloutAnnotation, "rollout-1"))
 
 		By("deploying again")
 		app := &platformv1alpha1.Workload{}
 		Expect(k8sClient.Get(ctx, key, app)).To(Succeed())
-		app.Annotations["damga.co/rollout"] = "rollout-2"
+		app.Annotations[rolloutAnnotation] = "rollout-2"
 		app.Spec.Image = "ghcr.io/example/app:2.0.0"
 		Expect(k8sClient.Update(ctx, app)).To(Succeed())
 		reconcileNow()
 
 		Expect(k8sClient.Get(ctx, key, deploy)).To(Succeed())
-		Expect(deploy.Annotations).To(HaveKeyWithValue("damga.co/rollout", "rollout-2"),
+		Expect(deploy.Annotations).To(HaveKeyWithValue(rolloutAnnotation, "rollout-2"),
 			"the observer would attach this deploy to the previous deploy's record")
 		// And the pod template still does not carry it, or every deploy would
 		// roll the pods a second time on a value that is not part of the app.
-		Expect(deploy.Spec.Template.Annotations).NotTo(HaveKey("damga.co/rollout"))
+		Expect(deploy.Spec.Template.Annotations).NotTo(HaveKey(rolloutAnnotation))
+	})
+
+	// The Deployment's annotation map has other writers, and the reconcile has to
+	// share it. The deployment controller owns deployment.kubernetes.io/revision
+	// and rewrites it on every sync; kubectl and Argo CD own theirs. Assigning
+	// the map instead of merging into it deletes the revision annotation, the
+	// deployment controller writes it back, that write wakes this controller
+	// through Owns(&appsv1.Deployment{}), and the two rewrite one object without
+	// pause — with the deployment controller's own status write as the casualty.
+	// That is a Deployment stuck at READY 0/2 while every pod is Ready and its
+	// ReplicaSet reports 2, which is how this arrived: a green e2e on one commit
+	// and a 180-second timeout on the next.
+	//
+	// envtest runs no kube-controller-manager, so this spec plays its part and
+	// writes the annotation by hand. Without that seeded key the spec is
+	// vacuous: every annotation on the Deployment is then one the operator put
+	// there itself, so replacing the map loses nothing and the bug passes.
+	It("shares the annotation map with the controllers that also write to it", func() {
+		Expect(k8sClient.Create(ctx, &platformv1alpha1.Workload{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: namespace,
+				Annotations: map[string]string{rolloutAnnotation: "rollout-1"},
+			},
+			Spec: platformv1alpha1.WorkloadSpec{Image: testImage, Port: 3000},
+		})).To(Succeed())
+		reconcileNow()
+
+		By("standing in for the deployment controller and kubectl")
+		dep := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
+		dep.Annotations[revisionAnnotation] = "1"
+		dep.Annotations["kubectl.kubernetes.io/last-applied-configuration"] = "{}"
+		Expect(k8sClient.Update(ctx, dep)).To(Succeed())
+		Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
+		settled := dep.ResourceVersion
+
+		reconcileNow()
+
+		Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
+		Expect(dep.Annotations).To(HaveKeyWithValue(revisionAnnotation, "1"),
+			"the operator deleted an annotation the deployment controller owns; that "+
+				"controller writes it back, each write wakes the other, and the "+
+				"Deployment's status never converges")
+		Expect(dep.Annotations).To(HaveKeyWithValue("kubectl.kubernetes.io/last-applied-configuration", "{}"))
+		Expect(dep.ResourceVersion).To(Equal(settled),
+			"a reconcile with nothing to change still wrote to the Deployment, so every "+
+				"pass emits a watch event and wakes every controller watching this object")
+
+		By("carrying a new rollout id without disturbing the rest")
+		app := &platformv1alpha1.Workload{}
+		Expect(k8sClient.Get(ctx, key, app)).To(Succeed())
+		app.Annotations[rolloutAnnotation] = "rollout-2"
+		Expect(k8sClient.Update(ctx, app)).To(Succeed())
+		reconcileNow()
+
+		Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
+		Expect(dep.Annotations).To(HaveKeyWithValue(rolloutAnnotation, "rollout-2"))
+		Expect(dep.Annotations).To(HaveKeyWithValue(revisionAnnotation, "1"))
+
+		By("retracting one the Workload no longer carries")
+		Expect(k8sClient.Get(ctx, key, app)).To(Succeed())
+		delete(app.Annotations, rolloutAnnotation)
+		Expect(k8sClient.Update(ctx, app)).To(Succeed())
+		reconcileNow()
+
+		// Merging without ever deleting would be the other half of the same bug:
+		// the operator could carry an annotation but never take one back.
+		Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
+		Expect(dep.Annotations).NotTo(HaveKey(rolloutAnnotation),
+			"an annotation removed from the Workload can never be retracted")
+		Expect(dep.Annotations).To(HaveKeyWithValue(revisionAnnotation, "1"))
 	})
 
 	It("refuses to delete an object it does not own", func() {

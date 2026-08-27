@@ -124,7 +124,12 @@ func (r *WorkloadReconciler) reconcileOwned(ctx context.Context, app *platformv1
 		// every deploy by definition, so an existing Deployment that keeps its
 		// first one is an observer permanently attaching new deploys to the
 		// oldest record — or, once that record is closed, to nothing.
-		e.Annotations = d.Annotations
+		//
+		// Merged rather than assigned, because this operator is not the only
+		// writer here: the deployment controller owns
+		// deployment.kubernetes.io/revision on this same map. See
+		// reconcileAnnotations for what deleting it costs.
+		e.Annotations = reconcileAnnotations(e.Annotations, d.Annotations)
 	}); err != nil {
 		return fmt.Errorf("deployment: %w", err)
 	}
