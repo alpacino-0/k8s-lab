@@ -28,7 +28,13 @@ import (
 // in the common case, and that is worth spelling once: a fixture that gives
 // them three different values would pass while hiding which of the three the
 // identity is actually built from.
-const appName = "shop"
+const (
+	appName = "shop"
+
+	// One connection renders one of these per environment the app runs in,
+	// which is why the namespace is an argument rather than a field.
+	testNamespace = "acme-prod"
+)
 
 func conn(mutate ...func(*Connection)) Connection {
 	c := Connection{
@@ -39,7 +45,6 @@ func conn(mutate ...func(*Connection)) Connection {
 		Repo:            appName,
 		Branch:          "main",
 		WorkflowPath:    ".github/workflows/damga-sign.yml",
-		Namespace:       "acme-prod",
 		ImageRepository: "ghcr.io/acme/" + appName,
 	}
 	for _, m := range mutate {
@@ -67,7 +72,7 @@ func TestIdentityIsOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rendering workflow: %v", err)
 	}
-	policy, err := c.Policy()
+	policy, err := c.Policy(testNamespace)
 	if err != nil {
 		t.Fatalf("rendering policy: %v", err)
 	}
@@ -114,7 +119,7 @@ func TestTriggerIsPinnedOnBothSides(t *testing.T) {
 			"for in the certificate", WorkflowTrigger)
 	}
 
-	policy, err := c.Policy()
+	policy, err := c.Policy(testNamespace)
 	if err != nil {
 		t.Fatalf("rendering policy: %v", err)
 	}
@@ -135,11 +140,11 @@ func TestBothHalvesFollowTheConnection(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			base, other := conn(), conn(mutate)
 
-			bp, err := base.Policy()
+			bp, err := base.Policy(testNamespace)
 			if err != nil {
 				t.Fatalf("rendering base policy: %v", err)
 			}
-			op, err := other.Policy()
+			op, err := other.Policy(testNamespace)
 			if err != nil {
 				t.Fatalf("rendering policy: %v", err)
 			}
@@ -190,7 +195,7 @@ func TestAnIdentityThatWouldBeTooWideIsRefused(t *testing.T) {
 			if err := c.Validate(); err == nil {
 				t.Errorf("accepted, and would render the subject %q", c.Identity())
 			}
-			if _, err := c.Policy(); err == nil {
+			if _, err := c.Policy(testNamespace); err == nil {
 				t.Error("a policy was rendered from a connection that cannot name one workflow")
 			}
 			if _, err := c.Workflow(); err == nil {
@@ -220,7 +225,7 @@ func TestAForgeThatCannotSignIsRefusedByName(t *testing.T) {
 // tenant's workflow as an accepted attestor for every tenant's images.
 func TestThePolicyIsScopedToOneTenant(t *testing.T) {
 	c := conn()
-	policy, err := c.Policy()
+	policy, err := c.Policy(testNamespace)
 	if err != nil {
 		t.Fatalf("rendering policy: %v", err)
 	}
@@ -249,8 +254,8 @@ func TestThePolicyIsScopedToOneTenant(t *testing.T) {
 		t.Errorf("kind = %q; a ClusterPolicy would accept every tenant's identity for "+
 			"every tenant's images", p.Kind)
 	}
-	if p.Metadata.Namespace != c.Namespace {
-		t.Errorf("namespace = %q, want %q", p.Metadata.Namespace, c.Namespace)
+	if p.Metadata.Namespace != testNamespace {
+		t.Errorf("namespace = %q, want %q", p.Metadata.Namespace, testNamespace)
 	}
 	if p.Spec.ValidationFailureAction != "Enforce" {
 		t.Errorf("action = %q; an audit-only signature rule records the thing it was "+
@@ -368,4 +373,47 @@ func keys(m map[string]any) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// One connection, several environments. This is the shape the key correction
+// exists for: the identity is a property of the source repository and does not
+// move between environments, while the policy is namespace-scoped and there is
+// one per environment the app runs in.
+func TestOneConnectionPolicesEveryEnvironment(t *testing.T) {
+	c := conn()
+
+	subjects := map[string]string{}
+	for _, ns := range []string{"acme-dev", "acme-staging", "acme-prod"} {
+		policy, err := c.Policy(ns)
+		if err != nil {
+			t.Fatalf("rendering policy for %s: %v", ns, err)
+		}
+		var p struct {
+			Metadata struct {
+				Namespace string `json:"namespace"`
+			} `json:"metadata"`
+		}
+		if err := yaml.Unmarshal(policy, &p); err != nil {
+			t.Fatalf("parsing policy: %v", err)
+		}
+		if p.Metadata.Namespace != ns {
+			t.Errorf("policy for %s landed in %s", ns, p.Metadata.Namespace)
+		}
+		subjects[ns] = keylessSubject(t, policy)
+	}
+
+	for ns, got := range subjects {
+		if got != c.Identity() {
+			t.Errorf("the identity changed with the environment: %s pins %q, want %q — "+
+				"an app has one source repository and one signing identity, and "+
+				"deploys to several environments out of it", ns, got, c.Identity())
+		}
+	}
+}
+
+func TestAPolicyNeedsSomewhereToLive(t *testing.T) {
+	if _, err := conn().Policy(""); err == nil {
+		t.Error("rendered a namespace-scoped policy with no namespace, which applies " +
+			"nowhere while looking like a rule that is in force")
+	}
 }

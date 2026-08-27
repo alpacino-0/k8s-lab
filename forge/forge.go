@@ -62,9 +62,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package forge
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Connection is a tenant's source repository, and everything about it that
@@ -101,8 +103,80 @@ type Connection struct {
 	// matches before it checks a signature at all. Without it the policy would
 	// have to apply to every image in the namespace, including ones this tenant
 	// never built.
-	Namespace       string
+	//
+	// Per app and not per environment, like everything else here. Environments
+	// deploy different digests out of one repository; they do not each get
+	// their own.
 	ImageRepository string
+
+	// Set by the store, ignored on the way in. UpdatedAt is what the drift
+	// check will compare against: a connection edited after the pull request
+	// was merged is the open question phase 2 still owes an answer to.
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// Key is what identifies a connection. One source repository per app, and the
+// environments are not part of it.
+//
+// This was nearly (tenant, app, env), and it is worth writing down why that is
+// wrong: an app has one source repository and one signing identity, and it
+// deploys to several environments out of it. Keying by environment would mean
+// three rows differing only in namespace, each rendering the identical identity
+// — and then "which repository is this app connected to" has no single answer,
+// which is the question the pull request and the drift check both have to ask.
+type Key struct {
+	TenantID string
+	App      string
+}
+
+// Key returns this connection's key.
+func (c Connection) Key() Key { return Key{TenantID: c.TenantID, App: c.App} }
+
+var (
+	// ErrNotFound is no such connection.
+	ErrNotFound = errors.New("forge: not found")
+
+	// ErrConflict is a connection that would break an invariant somebody else
+	// already relies on.
+	ErrConflict = errors.New("forge: conflict")
+
+	// ErrInvalid is a connection that could never produce a signing identity.
+	ErrInvalid = errors.New("forge: invalid")
+)
+
+// Store is where connections live. The same shape as the other stores here: an
+// interface the paid build can replace, with one SQL implementation per engine
+// behind it.
+type Store interface {
+	// Put creates or replaces the connection for (TenantID, App).
+	//
+	// It fails with ErrConflict when the identity this connection would render
+	// already belongs to a different tenant. Two tenants pointing at one source
+	// repository and branch would be two tenants whose images are accepted by
+	// each other's policy — the subject is the same string, and a policy cannot
+	// tell which tenant's build produced a signature bearing it.
+	Put(ctx context.Context, c Connection) (Connection, error)
+
+	// Get returns one connection.
+	Get(ctx context.Context, k Key) (Connection, error)
+
+	// List returns everything one tenant has connected, ordered by app so a
+	// page built from it does not reshuffle between loads. Scoped to a tenant
+	// and never global, for the same reason placement.List is.
+	List(ctx context.Context, tenantID string) ([]Connection, error)
+
+	// Delete removes one connection, and releases the identity it held.
+	Delete(ctx context.Context, k Key) error
+
+	// IdentityOwner reports which tenant holds an identity, if any.
+	//
+	// Read before the pull request is opened, so that proposing a workflow into
+	// a repository whose identity is already spoken for is a refusal rather
+	// than a second policy accepting the first tenant's signatures.
+	IdentityOwner(ctx context.Context, identity string) (string, error)
+
+	Close() error
 }
 
 // SupportedHost is the only forge this build can express a keyless identity
@@ -160,7 +234,7 @@ func (c Connection) Validate() error {
 	}{
 		{"tenant", c.TenantID}, {"app", c.App},
 		{"owner", c.Owner}, {"repo", c.Repo}, {"branch", c.Branch},
-		{"namespace", c.Namespace}, {"image repository", c.ImageRepository},
+		{"image repository", c.ImageRepository},
 		{"workflow path", c.WorkflowPath},
 	} {
 		if strings.TrimSpace(f.value) == "" {

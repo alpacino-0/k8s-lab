@@ -19,6 +19,7 @@ package forge
 
 import (
 	"fmt"
+	"strings"
 
 	"sigs.k8s.io/yaml"
 )
@@ -34,9 +35,14 @@ import (
 // upgrade, and none of the newer CEL policy types help, because
 // NamespacedImageValidatingPolicy does not exist and ImageValidatingPolicy is
 // cluster-scoped.
-func (c Connection) Policy() ([]byte, error) {
+func (c Connection) Policy(namespace string) ([]byte, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
+	}
+	// The namespace is an argument and not a field on the connection, because
+	// one connection produces one of these per environment the app runs in.
+	if strings.TrimSpace(namespace) == "" {
+		return nil, fmt.Errorf("forge: a policy needs a namespace to be scoped to")
 	}
 
 	p := map[string]any{
@@ -44,7 +50,7 @@ func (c Connection) Policy() ([]byte, error) {
 		"kind":       "Policy",
 		"metadata": map[string]any{
 			"name":      "damga-image-signature",
-			"namespace": c.Namespace,
+			"namespace": namespace,
 			"labels": map[string]any{
 				"app.kubernetes.io/managed-by": "damga-platform",
 				"damga.co/tenant":              c.TenantID,
