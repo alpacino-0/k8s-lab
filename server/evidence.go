@@ -22,59 +22,16 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/damgahq/damga/auth"
 	"github.com/damgahq/damga/authz"
 	"github.com/damgahq/damga/evidence"
-	"github.com/damgahq/damga/identity"
 )
 
 // currentEvidence answers what is deployed right now for one app in one
-// environment. It is one endpoint rather than a whole API because it is the one
-// that exercises every seam at once: who is asking comes from a session and a
-// membership row, whether they may is Options.Authorizer, and what is returned
-// is Options.Evidence.
-func currentEvidence(
-	a authz.Authorizer, store evidence.Store, idStore identity.Store, sess *auth.Sessions,
-) http.Handler {
+// environment. It is the endpoint the live evidence page opens with.
+func currentEvidence(g guard, store evidence.Store) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ref := evidence.Ref{
-			TenantID: r.PathValue("tenant"),
-			App:      r.PathValue("app"),
-			Env:      r.PathValue("env"),
-		}
-
-		live, err := sess.Resolve(r.Context(), r)
-		if err != nil {
-			problem(w, http.StatusUnauthorized, "not signed in")
-			return
-		}
-
-		// The subject is built from the session and the membership row, and
-		// from nothing the caller sent. A subject assembled from a request
-		// parameter would be a viewer in whatever tenant it named — and a
-		// viewer may read this page.
-		sub, err := subjectFrom(r.Context(), idStore, live, ref.TenantID)
-		if err != nil {
-			// Deliberately the same answer as a refusal. "You are signed in but
-			// not a member here" confirms the tenant exists, which is the one
-			// thing a stranger probing tenant names wants to learn.
-			problem(w, http.StatusForbidden, "no access to this tenant")
-			return
-		}
-
-		decision, err := a.Authorize(r.Context(), sub, authz.ActionEvidenceView, authz.Target{
-			Tenant: ref.TenantID, App: ref.App, Env: ref.Env,
-		})
-		if err != nil {
-			problem(w, http.StatusInternalServerError, "authorization failed")
-			return
-		}
-		if !decision.Allow {
-			// The reason is returned, because a refusal nobody can explain is
-			// a support ticket. It is the authorizer's own words: the free one
-			// says which role was read, an enterprise one can say which policy
-			// matched.
-			problem(w, http.StatusForbidden, decision.Reason)
+		ref, ok := g.admit(w, r, authz.ActionEvidenceView)
+		if !ok {
 			return
 		}
 
@@ -89,13 +46,7 @@ func currentEvidence(
 			problem(w, http.StatusInternalServerError, "reading the evidence store failed")
 			return
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(rec); err != nil {
-			// The status is already written; there is nothing to say to the
-			// client, and the connection is the only thing left to close.
-			return
-		}
+		writeJSON(w, toWireRecord(rec))
 	})
 }
 

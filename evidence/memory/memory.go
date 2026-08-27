@@ -89,6 +89,20 @@ func (s *Store) Append(_ context.Context, rec evidence.Record) (evidence.Record,
 func (s *Store) Transition(_ context.Context, id evidence.ID, t evidence.Transition) (evidence.Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// The store will not invent this. It stamps its own CreatedAt and
+	// UpdatedAt, which are facts about the row, but At is a fact about the
+	// world: when the deploy actually reached this state. Defaulting it to
+	// now() would be right for a transition written the moment it happened
+	// and wrong for exactly the case the version fence exists for — an
+	// observation computed before a leader handover and written after it,
+	// which would then be recorded minutes late and hashed that way forever.
+	//
+	// A zero At is chained like any other value, so this is not a cosmetic
+	// gap: Verify would report the chain valid over an event that claims to
+	// have happened in year one.
+	if t.At.IsZero() {
+		return evidence.Record{}, fmt.Errorf("%w: a transition needs the time it happened", evidence.ErrInvalid)
+	}
 	rec, ok := s.byID[id]
 	if !ok {
 		return evidence.Record{}, evidence.ErrNotFound
@@ -228,6 +242,22 @@ func match(r *evidence.Record, q evidence.Query) bool {
 }
 
 func (s *Store) Export(ctx context.Context, req evidence.ExportRequest, w io.Writer) (evidence.ExportResult, error) {
+	// The format is checked rather than ignored. ExportCSV is a declared
+	// constant that nothing here writes, and an Export that quietly returned
+	// JSONL for it would hand somebody a file whose name, content type and
+	// contents disagree — and they would find out when their spreadsheet
+	// opened one long column.
+	//
+	// CSV is not implemented rather than not wanted. A record has nested
+	// policies and transitions, so flattening it is a real decision about what
+	// a row is and what is lost, and an export that loses the policy results
+	// cannot be re-verified. That is a format to design, not to infer here.
+	switch req.Format {
+	case "", evidence.ExportJSONL:
+	default:
+		return evidence.ExportResult{}, fmt.Errorf(
+			"%w: export format %q is not implemented", evidence.ErrInvalid, req.Format)
+	}
 	q := req.Query
 	q.Order = evidence.OrderOldest
 	var res evidence.ExportResult

@@ -48,6 +48,12 @@ var (
 	// ErrImmutable is returned when a caller tries to change a field a record
 	// does not allow to change after it is written.
 	ErrImmutable = errors.New("evidence: record is immutable")
+
+	// ErrInvalid is a write the store refuses to record rather than record
+	// wrongly. Separate from ErrConflict: a conflict means try again with a
+	// fresh read, this means the call itself is wrong and retrying it will
+	// not help.
+	ErrInvalid = errors.New("evidence: invalid")
 )
 
 // ID is the store-assigned identifier. It is time-ordered (UUIDv7 in the free
@@ -396,7 +402,14 @@ const (
 	// ExportJSONL is one record per line, in Seq order, with the hash chain
 	// intact so the file verifies on its own.
 	ExportJSONL ExportFormat = "jsonl"
-	ExportCSV   ExportFormat = "csv"
+	// ExportCSV is declared and not implemented. Export refuses it rather
+	// than falling back to JSONL, so that a caller asking for it finds out
+	// here instead of from a spreadsheet that opened as one long column.
+	//
+	// Flattening a record is a decision, not a detail: the policies and the
+	// transitions are lists, and an export that drops them cannot be
+	// re-verified — which is the only reason to export at all.
+	ExportCSV ExportFormat = "csv"
 )
 
 // ExportRequest is a query plus an encoding.

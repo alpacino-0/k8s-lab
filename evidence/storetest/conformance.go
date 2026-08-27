@@ -72,6 +72,7 @@ func Run(t *testing.T, newStore Factory) {
 		{"DuplicateReturnsExistingRecord", testDuplicateReturnsExistingRecord},
 		{"SeqIsPerRefAndGapless", testSeqIsPerRefAndGapless},
 		{"TransitionIsCompareAndSet", testTransitionIsCompareAndSet},
+		{"TransitionRequiresTheTimeItHappened", testTransitionRequiresTheTimeItHappened},
 		{"RacingTransitionsProduceOneWinner", testRacingTransitionsProduceOneWinner},
 		{"StaleWriteIsFencedByVersion", testStaleWriteIsFencedByVersion},
 		{"VerifyHoldsAfterTransition", testVerifyHoldsAfterTransition},
@@ -81,6 +82,7 @@ func Run(t *testing.T, newStore Factory) {
 		{"HistoryPagesWithoutOffset", testHistoryPagesWithoutOffset},
 		{"PruneNeverRemovesCurrent", testPruneNeverRemovesCurrent},
 		{"ExportRoundTripsAndVerifies", testExportRoundTripsAndVerifies},
+		{"ExportRefusesAFormatItCannotWrite", testExportRefusesAFormatItCannotWrite},
 		{"NotFoundIsDistinguishable", testNotFoundIsDistinguishable},
 	}
 	for _, c := range cases {
@@ -525,8 +527,12 @@ func testHashSurvivesARoundTrip(t *testing.T, newStore Factory) {
 	if len(moved.Transitions) != 1 {
 		t.Fatalf("Transitions = %d, want 1", len(moved.Transitions))
 	}
-	if got := moved.Transitions[0].At; !got.Equal(evidence.Canonical(got)) {
-		t.Errorf("Transition kept At at %s, finer than evidence.Precision", got.Format(time.RFC3339Nano))
+	// Compared against the value that went in, not against Canonical(itself).
+	// Every time equals its own reduction, the zero time included, so the
+	// self-comparison passes for a store that dropped At entirely.
+	if got, want := moved.Transitions[0].At, evidence.Canonical(odd); !got.Equal(want) {
+		t.Errorf("Transition stored At as %s, want %s",
+			got.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))
 	}
 
 	// The round trip itself: what comes back out has to hash to what went in.
@@ -758,5 +764,77 @@ func testNotFoundIsDistinguishable(t *testing.T, newStore Factory) {
 	}
 	if _, err := s.Current(ctx, ref("nosuch", prod)); !errors.Is(err, evidence.ErrNotFound) {
 		t.Errorf("Current on an unknown Ref = %v, want ErrNotFound", err)
+	}
+}
+
+// An event with no time is the one thing an append-only log of state changes
+// cannot be missing, and it is the easiest to write by accident: leave the
+// field off and every store here accepted it, chained the zero time, and
+// Verify went on reporting the range valid.
+//
+// Nothing found this until a record was rendered for the panel and the
+// timestamps came out blank. Every real caller sets At — the git writer, the
+// deploy watcher, the sweep — so the suite's own fixtures did too, which is
+// how a suite ends up agreeing with three implementations about something none
+// of them checks.
+func testTransitionRequiresTheTimeItHappened(t *testing.T, newStore Factory) {
+	s := newStore(t, 0)
+	ctx := context.Background()
+	r := mustAppend(t, s, rec("commit:aaa", ref("api", prod), "aaa"))
+
+	_, err := s.Transition(ctx, r.ID, evidence.Transition{
+		From: []evidence.State{evidence.StatePending}, To: evidence.StateApplied,
+		Reason: "no At",
+	})
+	if !errors.Is(err, evidence.ErrInvalid) {
+		t.Fatalf("a transition with no At returned %v, want ErrInvalid", err)
+	}
+
+	// And it was refused rather than half-applied.
+	after, err := s.Get(ctx, r.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if after.State != evidence.StatePending || len(after.Transitions) != 0 {
+		t.Errorf("the refused transition was recorded anyway: state=%s events=%d",
+			after.State, len(after.Transitions))
+	}
+}
+
+// A store that ignores ExportRequest.Format writes JSONL for every value of it
+// and reports success. Nothing caught that: the suite only ever asked for the
+// format the store happened to write, so three implementations agreed about a
+// field none of them read.
+//
+// It surfaced from the HTTP endpoint, where the mismatch is visible — the
+// response said text/csv, the filename ended .csv, and the body was JSONL.
+func testExportRefusesAFormatItCannotWrite(t *testing.T, newStore Factory) {
+	s := newStore(t, 0)
+	ctx := context.Background()
+	mustAppend(t, s, rec("commit:aaa", ref("api", prod), "aaa"))
+
+	var buf bytes.Buffer
+	_, err := s.Export(ctx, evidence.ExportRequest{
+		Query: evidence.Query{Ref: ref("api", prod)}, Format: evidence.ExportCSV,
+	}, &buf)
+	if !errors.Is(err, evidence.ErrInvalid) {
+		t.Fatalf("Export as CSV returned %v, want ErrInvalid", err)
+	}
+	if buf.Len() > 0 {
+		t.Errorf("the refused export wrote %d bytes anyway", buf.Len())
+	}
+
+	// The format it does write still works, and the empty value still means
+	// the default rather than an error.
+	for _, format := range []evidence.ExportFormat{"", evidence.ExportJSONL} {
+		buf.Reset()
+		if _, err := s.Export(ctx, evidence.ExportRequest{
+			Query: evidence.Query{Ref: ref("api", prod)}, Format: format,
+		}, &buf); err != nil {
+			t.Errorf("Export as %q: %v", format, err)
+		}
+		if buf.Len() == 0 {
+			t.Errorf("Export as %q wrote nothing", format)
+		}
 	}
 }

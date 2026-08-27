@@ -131,6 +131,29 @@ func Run(ctx context.Context, o Options) error {
 	return <-serveErr
 }
 
+// tenantScope is the prefix every endpoint that reads one tenant's data
+// shares. The tenant is a path segment and never a header or a body field: it
+// has to be visible to the router for the guard to read it before the handler
+// runs, and it has to be the same segment the guard checks membership against.
+const tenantScope = "/api/v1/tenants/{tenant}/apps/{app}/envs/{env}"
+
+// tenantRoutes is every endpoint under tenantScope.
+//
+// Each handler takes the guard rather than the pieces it is built from, so
+// there is no way to construct one that authorizes differently — and no way to
+// construct one that does not authorize at all, because the guard is the only
+// thing in scope that can read the session.
+var tenantRoutes = []struct {
+	suffix  string
+	handler func(guard, evidence.Store) http.Handler
+}{
+	{"/evidence", currentEvidence},
+	{"/history", history},
+	{"/verify", verify},
+	{"/retention", retention},
+	{"/export", export},
+}
+
 // handler builds the routes, then hands the mux to the Routes hook and wraps
 // the result in Middleware.
 func (o Options) handler(store evidence.Store, idStore identity.Store) (http.Handler, error) {
@@ -153,8 +176,18 @@ func (o Options) handler(store evidence.Store, idStore identity.Store) (http.Han
 	})
 	mux.Handle("POST /api/v1/login", o.login(idStore, sess, hasher))
 	mux.Handle("POST /api/v1/logout", o.logout(sess))
-	mux.Handle("GET /api/v1/tenants/{tenant}/apps/{app}/envs/{env}/evidence",
-		currentEvidence(o.Authorizer, store, idStore, sess))
+	mux.Handle("GET /api/v1/me", o.me(idStore, sess))
+
+	// Registered from a table rather than one call each, so that "these are
+	// the endpoints that expose one tenant's data" is a list something can
+	// walk. TestEveryTenantRouteIsGuarded walks it and asserts each one
+	// refuses an anonymous caller and a caller from another tenant — which
+	// means the fifth endpoint is covered by being added to the table, not by
+	// whoever adds it remembering to write the test.
+	g := guard{authorizer: o.Authorizer, identity: idStore, sessions: sess}
+	for _, rt := range tenantRoutes {
+		mux.Handle("GET "+tenantScope+rt.suffix, rt.handler(g, store))
+	}
 
 	// Mounted only when there is one. There is no built-in bundle yet, and
 	// serving a 404 at "/" from an embedded empty FS would be a worse answer
