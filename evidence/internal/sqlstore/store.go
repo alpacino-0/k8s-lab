@@ -461,6 +461,36 @@ func (s *Store) History(ctx context.Context, q evidence.Query) (evidence.Page, e
 	return page, nil
 }
 
+// Refs is evidence.Store.Refs.
+func (s *Store) Refs(ctx context.Context, tenantID string) ([]evidence.Ref, error) {
+	if tenantID == "" {
+		// Not "every tenant". An empty filter here would be the one query in
+		// the store that crosses a tenant boundary, and it would be reached by
+		// a caller that forgot to fill in a variable.
+		return nil, fmt.Errorf("%w: Refs needs a tenant", evidence.ErrInvalid)
+	}
+	// DISTINCT over the leading columns of record_by_ref, so this is an
+	// index scan rather than a walk of every record the tenant ever wrote.
+	rows, err := s.query(ctx, `
+		SELECT DISTINCT app, env FROM record
+		WHERE tenant_id = ?
+		ORDER BY app, env`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []evidence.Ref
+	for rows.Next() {
+		ref := evidence.Ref{TenantID: tenantID}
+		if err := rows.Scan(&ref.App, &ref.Env); err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) Export(ctx context.Context, req evidence.ExportRequest, w io.Writer) (evidence.ExportResult, error) {
 	// The format is checked rather than ignored. ExportCSV is a declared
 	// constant that nothing here writes, and an Export that quietly returned

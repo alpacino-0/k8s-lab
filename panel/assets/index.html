@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Damga</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="data:,">
+</head>
+<body>
+
+<main id="signin" hidden>
+  <form id="signin-form" class="card">
+    <h1>Damga</h1>
+    <p class="muted">Sign in to see what is running.</p>
+    <label>Email<input type="email" name="email" autocomplete="username" required></label>
+    <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
+    <p id="signin-error" class="error" role="alert" hidden></p>
+    <button type="submit">Sign in</button>
+  </form>
+  <p class="muted footnote">
+    No account yet? The first one is created on the server:
+    <code>damga bootstrap -email you@example.com -tenant acme</code>
+  </p>
+</main>
+
+<div id="app" hidden>
+  <header>
+    <span class="brand">Damga</span>
+    <select id="tenant" aria-label="Tenant"></select>
+    <span class="spacer"></span>
+    <span id="who" class="muted"></span>
+    <button id="signout" class="link">Sign out</button>
+  </header>
+
+  <div class="layout">
+    <nav id="apps" aria-label="Applications"></nav>
+    <section id="detail">
+      <p class="muted empty">Choose an application.</p>
+    </section>
+  </div>
+</div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

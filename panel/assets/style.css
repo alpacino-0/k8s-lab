@@ -1,0 +1,120 @@
+:root {
+  color-scheme: light dark;
+  --bg: #fbfbfa;
+  --panel: #ffffff;
+  --ink: #1a1a18;
+  --muted: #6b6b66;
+  --line: #e3e3df;
+  --accent: #2f5d50;
+  --ok: #1e6b47;
+  --bad: #a32b2b;
+  --warn: #8a6d1f;
+  --radius: 6px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181a;
+    --panel: #1e2124;
+    --ink: #e8e8e4;
+    --muted: #9a9a94;
+    --line: #2e3236;
+    --accent: #7fc0aa;
+    --ok: #6fbf92;
+    --bad: #e2807f;
+    --warn: #d6b45c;
+  }
+}
+* { box-sizing: border-box; }
+
+/* The browser's own rule for [hidden] is `display: none`, and it lives in the
+   user-agent stylesheet — so any author rule that sets display beats it. Both
+   #signin and #app carry one, which meant hidden did nothing to them: the
+   whole panel rendered correctly, underneath a sign-in screen that was 100dvh
+   tall and would not go away. It looked exactly like a login that was not
+   working, and it was not one. !important because the author rules that
+   collide with this are the point of it. */
+[hidden] { display: none !important; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+code, .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; font-size: .92em; }
+.muted { color: var(--muted); }
+button { font: inherit; cursor: pointer; }
+
+/* ---- sign in ---- */
+#signin { min-height: 100dvh; display: grid; place-content: center; gap: 1rem; padding: 2rem; }
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 2rem; width: min(24rem, 90vw); display: grid; gap: .9rem;
+}
+.card h1 { margin: 0; font-size: 1.5rem; letter-spacing: -.01em; }
+.card p { margin: 0; }
+label { display: grid; gap: .3rem; font-size: .85rem; color: var(--muted); }
+input {
+  font: inherit; padding: .5rem .6rem; border: 1px solid var(--line);
+  border-radius: var(--radius); background: var(--bg); color: var(--ink);
+}
+input:focus-visible, button:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+.card button {
+  padding: .55rem; border: 0; border-radius: var(--radius);
+  background: var(--accent); color: #fff; font-weight: 600;
+}
+.card button[disabled] { opacity: .6; cursor: progress; }
+.error { color: var(--bad); font-size: .88rem; }
+.footnote { font-size: .82rem; text-align: center; max-width: 30rem; }
+.footnote code { display: block; margin-top: .35rem; word-break: break-all; }
+
+/* ---- shell ---- */
+header {
+  display: flex; align-items: center; gap: .75rem;
+  padding: .6rem 1rem; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.brand { font-weight: 700; letter-spacing: -.01em; }
+.spacer { flex: 1; }
+select {
+  font: inherit; padding: .25rem .4rem; border: 1px solid var(--line);
+  border-radius: var(--radius); background: var(--bg); color: var(--ink);
+}
+.link { background: none; border: 0; color: var(--accent); text-decoration: underline; padding: 0; }
+.layout { display: grid; grid-template-columns: minmax(12rem, 16rem) 1fr; min-height: calc(100dvh - 3rem); }
+@media (max-width: 42rem) { .layout { grid-template-columns: 1fr; } }
+nav { border-right: 1px solid var(--line); padding: .75rem; background: var(--panel); }
+nav button {
+  display: block; width: 100%; text-align: left; padding: .4rem .5rem;
+  border: 0; background: none; color: inherit; border-radius: var(--radius);
+}
+nav button:hover { background: var(--bg); }
+nav button[aria-current="true"] { background: var(--accent); color: #fff; }
+nav .env { color: var(--muted); font-size: .85em; }
+nav button[aria-current="true"] .env { color: #fff; opacity: .8; }
+section { padding: 1.25rem; overflow-x: auto; }
+.empty { padding: 2rem 0; }
+
+/* ---- record ---- */
+h2 { margin: 0 0 .2rem; font-size: 1.25rem; letter-spacing: -.01em; }
+.sub { margin: 0 0 1.2rem; }
+.grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); }
+.box { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: .9rem 1rem; }
+.box h3 { margin: 0 0 .5rem; font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: .25rem .75rem; }
+dt { color: var(--muted); font-size: .85rem; }
+dd { margin: 0; word-break: break-all; }
+.pill {
+  display: inline-block; padding: .1rem .5rem; border-radius: 99px;
+  font-size: .78rem; font-weight: 600; border: 1px solid currentColor;
+}
+.banner { border-left: 3px solid var(--bad); margin-bottom: 1rem; }
+.banner h3 { color: var(--bad); }
+.banner p { margin: 0 0 .25rem; }
+.pill.ok { color: var(--ok); } .pill.bad { color: var(--bad); } .pill.warn { color: var(--warn); }
+table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; }
+tbody tr:last-child td { border-bottom: 0; }
+.actions { margin-top: 1rem; display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+a { color: var(--accent); }

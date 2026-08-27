@@ -35,6 +35,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/damgahq/damga/panel"
 	"github.com/damgahq/damga/server"
 )
 
@@ -49,6 +50,9 @@ func main() {
 	}
 
 	var opts server.Options
+	// The one implementation this main supplies that a paid main would swap.
+	// Everything else it passes is a default the server picks for itself.
+	opts.Panel = panel.FS()
 	opts.Config.BindFlags(flag.CommandLine)
 	flag.Parse()
 

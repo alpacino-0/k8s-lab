@@ -485,6 +485,20 @@ type Store interface {
 	// History pages through records. Keyset, not offset.
 	History(ctx context.Context, q Query) (Page, error)
 
+	// Refs lists the app and environment pairs one tenant has evidence for,
+	// ordered by app then env so a page built from it does not reshuffle
+	// between loads.
+	//
+	// Scoped to a tenant and never global. A method that could list every Ref
+	// in the store is a directory of every customer on the install, and the
+	// only thing standing between it and a caller would be whoever remembers
+	// to filter at the call site.
+	//
+	// A Ref that has ever been deployed to stays listed for as long as its
+	// records do, and Prune never removes the current record — so this does
+	// not go quiet at the retention edge while the app is still running.
+	Refs(ctx context.Context, tenantID string) ([]Ref, error)
+
 	// Export streams records in the requested encoding. Free and paid differ
 	// in how far back the query can reach, not in whether export exists.
 	Export(ctx context.Context, req ExportRequest, w io.Writer) (ExportResult, error)

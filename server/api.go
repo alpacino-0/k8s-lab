@@ -305,3 +305,33 @@ func export(g guard, store evidence.Store) http.Handler {
 		}
 	})
 }
+
+// apps lists what this tenant has evidence for, which is how the panel knows
+// where to look without being told.
+//
+// It answers with what has been deployed, not with what has been configured.
+// Those differ — an app declared and never rolled out is absent here — and
+// this is the evidence API, so the honest answer is the one drawn from the
+// evidence rather than from an intention recorded somewhere else.
+func apps(g guard, store evidence.Store) http.Handler {
+	type entry struct {
+		App string `json:"app"`
+		Env string `json:"env"`
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ref, ok := g.admit(w, r, authz.ActionAppView)
+		if !ok {
+			return
+		}
+		refs, err := store.Refs(r.Context(), ref.TenantID)
+		if err != nil {
+			problem(w, http.StatusInternalServerError, "reading the evidence store failed")
+			return
+		}
+		out := make([]entry, 0, len(refs))
+		for _, got := range refs {
+			out = append(out, entry{App: got.App, Env: got.Env})
+		}
+		writeJSON(w, map[string]any{"apps": out})
+	})
+}

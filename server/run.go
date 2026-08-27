@@ -135,7 +135,12 @@ func Run(ctx context.Context, o Options) error {
 // shares. The tenant is a path segment and never a header or a body field: it
 // has to be visible to the router for the guard to read it before the handler
 // runs, and it has to be the same segment the guard checks membership against.
-const tenantScope = "/api/v1/tenants/{tenant}/apps/{app}/envs/{env}"
+//
+// The scope stops at the tenant rather than at the environment so that
+// endpoints above an app — the list of apps itself — are inside the table and
+// therefore inside the test that walks it. A route registered next to the
+// table instead of in it is the one this arrangement cannot protect.
+const tenantScope = "/api/v1/tenants/{tenant}"
 
 // tenantRoutes is every endpoint under tenantScope.
 //
@@ -147,11 +152,12 @@ var tenantRoutes = []struct {
 	suffix  string
 	handler func(guard, evidence.Store) http.Handler
 }{
-	{"/evidence", currentEvidence},
-	{"/history", history},
-	{"/verify", verify},
-	{"/retention", retention},
-	{"/export", export},
+	{"/apps", apps},
+	{"/apps/{app}/envs/{env}/evidence", currentEvidence},
+	{"/apps/{app}/envs/{env}/history", history},
+	{"/apps/{app}/envs/{env}/verify", verify},
+	{"/apps/{app}/envs/{env}/retention", retention},
+	{"/apps/{app}/envs/{env}/export", export},
 }
 
 // handler builds the routes, then hands the mux to the Routes hook and wraps

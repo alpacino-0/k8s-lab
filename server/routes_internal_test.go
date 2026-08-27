@@ -94,13 +94,13 @@ func TestEveryTenantRouteIsGuarded(t *testing.T) {
 			h := rt.handler(g, store)
 
 			t.Run("anonymous", func(t *testing.T) {
-				code, _ := callRoute(t, h, home, nil)
+				code, _ := callRoute(t, h, rt.suffix, home, nil)
 				if code != http.StatusUnauthorized {
 					t.Errorf("%s without a cookie = %d, want 401", rt.suffix, code)
 				}
 			})
 			t.Run("another tenant", func(t *testing.T) {
-				code, body := callRoute(t, h, foreign, cookie)
+				code, body := callRoute(t, h, rt.suffix, foreign, cookie)
 				if code != http.StatusForbidden {
 					t.Errorf("%s in a tenant they do not belong to = %d, want 403", rt.suffix, code)
 				}
@@ -115,7 +115,7 @@ func TestEveryTenantRouteIsGuarded(t *testing.T) {
 				// Not asserting a specific success code — /evidence answers
 				// 404 with nothing deployed and the others answer 200. What
 				// matters is that the guard is not refusing a member.
-				code, _ := callRoute(t, h, home, cookie)
+				code, _ := callRoute(t, h, rt.suffix, home, cookie)
 				if code == http.StatusUnauthorized || code == http.StatusForbidden {
 					t.Errorf("%s refused an owner of the tenant: %d", rt.suffix, code)
 				}
@@ -127,12 +127,17 @@ func TestEveryTenantRouteIsGuarded(t *testing.T) {
 // callRoute drives one handler through a mux, so the {tenant} path value the
 // guard reads is set the way the real router sets it. Calling the handler
 // directly would leave it empty and every case would pass.
-func callRoute(t *testing.T, h http.Handler, tenant string, cookie *http.Cookie) (int, string) {
+func callRoute(t *testing.T, h http.Handler, pattern, tenant string, cookie *http.Cookie) (int, string) {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.Handle("GET "+tenantScope+"/probe", h)
+	mux.Handle("GET "+tenantScope+pattern, h)
 
-	target := "/api/v1/tenants/" + tenant + "/apps/api/envs/prod/probe"
+	// Built by substituting the pattern rather than written out, so a route
+	// whose shape differs from the others is still driven through the router
+	// that sets its path values.
+	target := strings.NewReplacer(
+		"{tenant}", tenant, "{app}", "api", "{env}", "prod",
+	).Replace(tenantScope + pattern)
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	req.Host = "damga.example.test"
 	if cookie != nil {
@@ -147,5 +152,5 @@ func callRoute(t *testing.T, h http.Handler, tenant string, cookie *http.Cookie)
 // future endpoint needs something the guard cannot give it, that is a design
 // question, not a signature to widen.
 var _ = []func(guard, evidence.Store) http.Handler{
-	currentEvidence, history, verify, retention,
+	apps, currentEvidence, history, verify, retention, export,
 }

@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -387,3 +388,37 @@ func (s *Store) Verify(ctx context.Context, ref evidence.Ref, from, to evidence.
 func (s *Store) Close() error { return nil }
 
 var _ evidence.Store = (*Store)(nil)
+
+// Refs is evidence.Store.Refs.
+//
+// Built from the live records rather than from s.seq, which keeps a Ref's
+// counter after its records are pruned: a gapless Seq has to survive pruning,
+// but a Ref whose records are all gone is not something to offer the panel as
+// somewhere to look.
+func (s *Store) Refs(_ context.Context, tenantID string) ([]evidence.Ref, error) {
+	if tenantID == "" {
+		return nil, fmt.Errorf("%w: Refs needs a tenant", evidence.ErrInvalid)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	seen := map[evidence.Ref]bool{}
+	var out []evidence.Ref
+	for _, rec := range s.byID {
+		if rec.Ref.TenantID != tenantID || seen[rec.Ref] {
+			continue
+		}
+		seen[rec.Ref] = true
+		out = append(out, rec.Ref)
+	}
+	// Map iteration is deliberately unordered in Go, so this has to sort or
+	// the panel's list would reshuffle on every load — and the SQL stores,
+	// which order in the query, would disagree with this one.
+	slices.SortFunc(out, func(a, b evidence.Ref) int {
+		if c := strings.Compare(a.App, b.App); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Env, b.Env)
+	})
+	return out, nil
+}

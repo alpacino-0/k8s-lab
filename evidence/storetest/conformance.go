@@ -40,6 +40,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -80,6 +81,7 @@ func Run(t *testing.T, newStore Factory) {
 		{"CurrentPrefersRunning", testCurrentPrefersRunning},
 		{"FindBySourceResolvesCommit", testFindBySourceResolvesCommit},
 		{"HistoryPagesWithoutOffset", testHistoryPagesWithoutOffset},
+		{"RefsAreScopedToOneTenant", testRefsAreScopedToOneTenant},
 		{"PruneNeverRemovesCurrent", testPruneNeverRemovesCurrent},
 		{"ExportRoundTripsAndVerifies", testExportRoundTripsAndVerifies},
 		{"ExportRefusesAFormatItCannotWrite", testExportRefusesAFormatItCannotWrite},
@@ -101,6 +103,11 @@ func ref(app, env string) evidence.Ref {
 const (
 	prod    = "prod"
 	staging = "staging"
+
+	// The tenant every case works in, and a second one that exists only to be
+	// somewhere the first cannot see.
+	tenantA = "t_alpha"
+	tenantB = "t_beta"
 )
 
 // rec is a complete record rather than a minimal one. A store that only keeps
@@ -836,5 +843,54 @@ func testExportRefusesAFormatItCannotWrite(t *testing.T, newStore Factory) {
 		if buf.Len() == 0 {
 			t.Errorf("Export as %q wrote nothing", format)
 		}
+	}
+}
+
+// Refs is what the panel builds its list of apps from, so the thing to get
+// right is the boundary: a tenant must never appear in another tenant's list.
+// The free authorizer would let the read through — the caller is an owner
+// somewhere — and the only thing keeping the two apart is this query.
+func testRefsAreScopedToOneTenant(t *testing.T, newStore Factory) {
+	s := newStore(t, 0)
+	ctx := context.Background()
+
+	mine := evidence.Ref{TenantID: tenantA, App: "api", Env: prod}
+	alsoMine := evidence.Ref{TenantID: tenantA, App: "api", Env: "staging"}
+	// Deliberately sorts before "api", so an implementation that returns
+	// insertion order rather than sorting fails on the order check below.
+	andMine := evidence.Ref{TenantID: tenantA, App: "admin", Env: prod}
+	theirs := evidence.Ref{TenantID: tenantB, App: "billing", Env: prod}
+
+	for i, r := range []evidence.Ref{mine, alsoMine, andMine, theirs} {
+		mustAppend(t, s, rec("commit:"+string(rune('a'+i)), r, string(rune('a'+i))))
+	}
+
+	got, err := s.Refs(ctx, tenantA)
+	if err != nil {
+		t.Fatalf("Refs: %v", err)
+	}
+	want := []evidence.Ref{andMine, mine, alsoMine} // admin/prod, api/prod, api/staging
+	if !slices.Equal(got, want) {
+		t.Errorf("Refs = %v\nwant %v (sorted by app then env)", got, want)
+	}
+	for _, r := range got {
+		if r.TenantID != tenantA {
+			t.Errorf("another tenant's ref is in the list: %+v", r)
+		}
+	}
+
+	// A tenant with nothing is an empty list, not an error: an install with no
+	// deploys yet is a normal state the page has to render.
+	empty, err := s.Refs(ctx, "t_nobody")
+	if err != nil {
+		t.Errorf("Refs for an unknown tenant: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("Refs for an unknown tenant returned %v", empty)
+	}
+
+	// And no tenant at all is refused rather than treated as every tenant.
+	if _, err := s.Refs(ctx, ""); !errors.Is(err, evidence.ErrInvalid) {
+		t.Errorf("Refs with no tenant returned %v, want ErrInvalid", err)
 	}
 }
