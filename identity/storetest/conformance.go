@@ -54,6 +54,7 @@ func Run(t *testing.T, newStore Factory) {
 		{"TenantRoundTrips", testTenantRoundTrips},
 		{"TenantRejectsAnInvalidTier", testTenantRejectsAnInvalidTier},
 		{"SlugIsUnique", testSlugIsUnique},
+		{"UpdateTenantChangesOnlyTheMutableHalf", testUpdateTenantChangesOnlyTheMutableHalf},
 		{"AccountRoundTrips", testAccountRoundTrips},
 		{"EmailIsUniqueAndCaseInsensitive", testEmailIsUniqueAndCaseInsensitive},
 		{"AccountRequiresAnAuditEmail", testAccountRequiresAnAuditEmail},
@@ -90,6 +91,12 @@ const (
 	// The second tenant. Several cases need somewhere an account is not a
 	// member of, which is the state a leak would show up in.
 	otherTenantID = "t_beta"
+
+	// The second tenant's slug and name, and the slug a rename moves the
+	// first one to.
+	betaSlug    = "beta"
+	betaName    = "Beta"
+	renamedSlug = "alpha-renamed"
 
 	kindUser = "user"
 	// Not a real hash. The cases here are about what the store keeps and
@@ -615,7 +622,7 @@ func testBootstrapHappensAtMostOnce(t *testing.T, newStore Factory) {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 
-	other := identity.Tenant{ID: otherTenantID, Slug: "beta", DisplayName: "Beta", Tier: identity.TierFree}
+	other := identity.Tenant{ID: otherTenantID, Slug: betaSlug, DisplayName: betaName, Tier: identity.TierFree}
 	stranger := identity.Account{
 		ID: "a_stranger", Kind: kindUser, Email: "stranger@example.test",
 		AuditEmail: "a_stranger@users.damga.local", DisplayName: "Stranger",
@@ -660,7 +667,7 @@ func testAFailedBootstrapLeavesNothingBehind(t *testing.T, newStore Factory) {
 
 	// And the proof that the state is still usable: a bootstrap that does not
 	// collide still works.
-	free := identity.Tenant{ID: otherTenantID, Slug: "beta", DisplayName: "Beta", Tier: identity.TierFree}
+	free := identity.Tenant{ID: otherTenantID, Slug: betaSlug, DisplayName: betaName, Tier: identity.TierFree}
 	if err := s.Bootstrap(ctx, free, account(), identity.Credential{Hash: fakeHash}); err != nil {
 		t.Fatalf("the store is unusable after a failed bootstrap: %v", err)
 	}
@@ -727,5 +734,74 @@ func testConcurrentBootstrapsProduceOneOwner(t *testing.T, newStore Factory) {
 	}
 	if won != 1 {
 		t.Fatalf("%d of %d concurrent bootstraps succeeded, want exactly 1", won, racers)
+	}
+}
+
+// The administrative change: suspend a tenant, move it to another plan.
+//
+// Two things must not move. The id, because evidence records carry a copy of
+// it across a boundary with no foreign key — changing it orphans every record
+// ever written about the tenant. And CreatedAt, because a caller that passes a
+// zero value should not silently reset when the tenant came into existence.
+func testUpdateTenantChangesOnlyTheMutableHalf(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	created, err := s.CreateTenant(ctx, tenant())
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+
+	// Deliberately passing a zero CreatedAt, which is what any caller that
+	// builds the row from a form will do.
+	updated, err := s.UpdateTenant(ctx, identity.Tenant{
+		ID: tenantID, Slug: renamedSlug, DisplayName: "Alpha Renamed",
+		Tier: identity.TierEnterprise, Suspended: true,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTenant: %v", err)
+	}
+	switch {
+	case updated.Tier != identity.TierEnterprise:
+		t.Errorf("Tier = %q, want enterprise", updated.Tier)
+	case !updated.Suspended:
+		t.Error("Suspended did not take")
+	case updated.Slug != renamedSlug:
+		t.Errorf("Slug = %q", updated.Slug)
+	case !updated.CreatedAt.Equal(created.CreatedAt):
+		t.Errorf("CreatedAt moved from %s to %s", created.CreatedAt, updated.CreatedAt)
+	}
+
+	// It is the same row, and reachable under the new slug and not the old.
+	if _, err := s.TenantBySlug(ctx, renamedSlug); err != nil {
+		t.Errorf("TenantBySlug after rename: %v", err)
+	}
+	if _, err := s.TenantBySlug(ctx, "alpha"); !errors.Is(err, identity.ErrNotFound) {
+		t.Errorf("the old slug still resolves: %v", err)
+	}
+	stored, err := s.Tenant(ctx, tenantID)
+	if err != nil || !stored.Suspended || stored.Tier != identity.TierEnterprise {
+		t.Errorf("the change did not survive a read: %+v err=%v", stored, err)
+	}
+
+	// An update to a tenant that does not exist is not a silent success. Both
+	// engines treat an UPDATE matching no rows as fine, so this is the case
+	// that has to be checked rather than assumed.
+	if _, err := s.UpdateTenant(ctx, identity.Tenant{
+		ID: "t_nobody", Slug: "nobody", Tier: identity.TierFree,
+	}); !errors.Is(err, identity.ErrNotFound) {
+		t.Errorf("updating a tenant that does not exist returned %v, want ErrNotFound", err)
+	}
+
+	// And a slug another tenant already holds is refused rather than taken.
+	if _, err := s.CreateTenant(ctx, identity.Tenant{
+		ID: otherTenantID, Slug: betaSlug, DisplayName: betaName, Tier: identity.TierFree,
+	}); err != nil {
+		t.Fatalf("CreateTenant beta: %v", err)
+	}
+	if _, err := s.UpdateTenant(ctx, identity.Tenant{
+		ID: otherTenantID, Slug: renamedSlug, Tier: identity.TierFree,
+	}); !errors.Is(err, identity.ErrDuplicate) {
+		t.Errorf("taking another tenant's slug returned %v, want ErrDuplicate", err)
 	}
 }

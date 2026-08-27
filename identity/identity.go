@@ -185,6 +185,19 @@ type Store interface {
 	CreateTenant(ctx context.Context, t Tenant) (Tenant, error)
 	// Tenant returns one by ID.
 	Tenant(ctx context.Context, id string) (Tenant, error)
+	// UpdateTenant replaces the mutable half of a tenant: its slug, display
+	// name, tier and suspension. The id and CreatedAt are not among them —
+	// evidence records carry a copy of the id across a boundary with no
+	// foreign key, so a mutable id silently orphans every record ever written
+	// about the tenant.
+	//
+	// Whole-row rather than one setter per field. Suspending a tenant and
+	// moving it to another plan are the same kind of act — an administrative
+	// change to one row — and a store with SetTier, SetSuspended, SetSlug
+	// grows a method every time the model does, each with its own chance of
+	// forgetting the not-found case.
+	UpdateTenant(ctx context.Context, t Tenant) (Tenant, error)
+
 	// TenantBySlug returns one by its human-facing name.
 	TenantBySlug(ctx context.Context, slug string) (Tenant, error)
 

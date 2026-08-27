@@ -131,6 +131,40 @@ func (s *Store) CreateTenant(ctx context.Context, t identity.Tenant) (identity.T
 	return t, nil
 }
 
+// UpdateTenant is identity.Store.UpdateTenant.
+func (s *Store) UpdateTenant(ctx context.Context, t identity.Tenant) (identity.Tenant, error) {
+	if t.ID == "" || t.Slug == "" {
+		return identity.Tenant{}, fmt.Errorf("%w: a tenant needs an id and a slug", identity.ErrInvalid)
+	}
+	if !t.Tier.Valid() {
+		return identity.Tenant{}, fmt.Errorf("%w: tier %q", identity.ErrInvalid, t.Tier)
+	}
+	err := s.exec(ctx, `
+		UPDATE tenant SET slug = ?, display_name = ?, tier = ?, suspended = ?
+		WHERE id = ?`,
+		t.Slug, t.DisplayName, string(t.Tier), boolInt(t.Suspended), t.ID)
+	switch {
+	case isUnique(err):
+		return identity.Tenant{}, fmt.Errorf("%w: slug %q", identity.ErrDuplicate, t.Slug)
+	case err != nil:
+		return identity.Tenant{}, err
+	}
+	// The read-back is not only for the return value. An UPDATE that matches
+	// nothing is not an error to either engine, so a change to a tenant that
+	// does not exist would otherwise report success; matching on the primary
+	// key, "no rows updated" and "no such tenant" are the same condition, and
+	// this turns it into ErrNotFound.
+	//
+	// It is also what makes CreatedAt the stored one rather than the
+	// argument's, so a caller that builds the row from a form and leaves it
+	// zero does not move when the tenant came into existence.
+	//
+	// A RowsAffected check ahead of it was written first and removed: with
+	// the read-back present it never fires, which the conformance case proved
+	// by passing without it.
+	return s.Tenant(ctx, t.ID)
+}
+
 func (s *Store) Tenant(ctx context.Context, id string) (identity.Tenant, error) {
 	return s.scanTenant(s.row(ctx, tenantSelect+` WHERE id = ?`, id))
 }

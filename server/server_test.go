@@ -638,3 +638,119 @@ func TestBootstrapRefusesAnInstallThatForgets(t *testing.T) {
 		t.Errorf("the error does not say which flag is missing: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------- tier
+
+// capturingAuthorizer records the subject it was handed and then allows, so a
+// test can assert what the checkpoint was told rather than what it decided.
+type capturingAuthorizer struct{ got authz.Subject }
+
+func (a *capturingAuthorizer) Authorize(
+	_ context.Context, s authz.Subject, _ authz.Action, _ authz.Target,
+) (authz.Decision, error) {
+	a.got = s
+	return authz.Decision{Allow: true, Reason: "captured"}, nil
+}
+
+// The tier reaches the authorizer, and it comes from the tenant row.
+//
+// This is phase 1's remaining non-negotiable: a paid authorizer has to be able
+// to see which plan it is deciding for, and it has to see it at the one
+// checkpoint rather than by reaching into the database itself. What must never
+// work is a caller supplying it — a tier that arrives in a request is a licence
+// check with a query parameter for a bypass.
+func TestTheTierReachesTheCheckpointFromTheTenantRow(t *testing.T) {
+	ctx := context.Background()
+	idStore := identityWith(t, identity.RoleOwner)
+	if err := setTier(ctx, idStore, identity.TierEnterprise); err != nil {
+		t.Fatalf("setting the tier: %v", err)
+	}
+
+	captured := &capturingAuthorizer{}
+	store := memory.New(0)
+	ref := evidence.Ref{TenantID: testTenant, App: testApp, Env: testEnv}
+	seed(t, store, ref)
+	base := start(t, server.Options{
+		Evidence: store, Identity: idStore, Authorizer: captured,
+	})
+	session := login(t, base)
+
+	// Every shape a caller could use to smuggle one in.
+	url := fmt.Sprintf("%s/api/v1/tenants/%s/apps/%s/envs/%s/evidence?tier=free",
+		base, ref.TenantID, ref.App, ref.Env)
+	header := cookieHeader(session)
+	header["X-Damga-Tier"] = []string{"free"}
+	if status, _ := get(t, url, header); status != http.StatusOK {
+		t.Fatalf("evidence = %d, want 200", status)
+	}
+	if captured.got.Tier != string(identity.TierEnterprise) {
+		t.Errorf("the checkpoint saw tier %q, want %q — it did not come from the tenant row",
+			captured.got.Tier, identity.TierEnterprise)
+	}
+	if captured.got.Tenant != testTenant {
+		t.Errorf("the checkpoint saw tenant %q, want %q", captured.got.Tenant, testTenant)
+	}
+}
+
+// A suspended tenant is refused before any authorizer runs.
+//
+// Refused here rather than by each authorizer because suspension is a fact
+// about the tenant, not a policy: leaving it to the authorizer means the free
+// one and a paid one can disagree about whether an unpaid account still works,
+// and the disagreement shows up as a customer who was supposed to be cut off
+// and was not.
+func TestASuspendedTenantIsRefusedBeforeAnyPolicyRuns(t *testing.T) {
+	ctx := context.Background()
+	idStore := identityWith(t, identity.RoleOwner)
+
+	store := memory.New(0)
+	ref := evidence.Ref{TenantID: testTenant, App: testApp, Env: testEnv}
+	seed(t, store, ref)
+	captured := &capturingAuthorizer{}
+	base := start(t, server.Options{
+		Evidence: store, Identity: idStore, Authorizer: captured,
+	})
+	session := login(t, base)
+	url := fmt.Sprintf("%s/api/v1/tenants/%s/apps/%s/envs/%s/evidence",
+		base, ref.TenantID, ref.App, ref.Env)
+
+	// While it is running, the owner can read.
+	if status, _ := get(t, url, cookieHeader(session)); status != http.StatusOK {
+		t.Fatalf("evidence before suspension = %d, want 200", status)
+	}
+
+	if err := suspend(ctx, idStore); err != nil {
+		t.Fatalf("suspending: %v", err)
+	}
+	captured.got = authz.Subject{}
+
+	// The existing session is not enough: suspension takes effect on the next
+	// request, not on the next login. Anything else means a tenant cut off on
+	// Friday keeps deploying all weekend.
+	if status, body := get(t, url, cookieHeader(session)); status != http.StatusForbidden {
+		t.Errorf("a suspended tenant served the evidence page: %d %q", status, body)
+	}
+	if captured.got.ID != "" {
+		t.Error("the authorizer was consulted about a suspended tenant")
+	}
+}
+
+// Read, change, write — the same three steps an administrative endpoint will
+// take, so these exercise the path rather than reaching past it.
+func setTier(ctx context.Context, s identity.Store, tier identity.Tier) error {
+	return mutateTenant(ctx, s, func(t *identity.Tenant) { t.Tier = tier })
+}
+
+func suspend(ctx context.Context, s identity.Store) error {
+	return mutateTenant(ctx, s, func(t *identity.Tenant) { t.Suspended = true })
+}
+
+func mutateTenant(ctx context.Context, s identity.Store, change func(*identity.Tenant)) error {
+	current, err := s.Tenant(ctx, testTenant)
+	if err != nil {
+		return err
+	}
+	change(&current)
+	_, err = s.UpdateTenant(ctx, current)
+	return err
+}

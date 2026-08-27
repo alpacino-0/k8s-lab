@@ -169,10 +169,28 @@ func subjectFrom(
 	if err != nil {
 		return authz.Subject{}, err
 	}
+
+	// The tenant row is read for two things that cannot come from anywhere
+	// else: whether it is suspended, and which plan it is on.
+	tenant, err := idStore.Tenant(ctx, m.TenantID)
+	if err != nil {
+		return authz.Subject{}, err
+	}
+	if tenant.Suspended {
+		// A suspended tenant is refused here rather than by each authorizer.
+		// Suspension is a fact about the tenant, not a policy decision, so
+		// leaving it to the authorizer would mean the free one and a paid one
+		// could disagree about whether an unpaid account can still deploy.
+		return authz.Subject{}, identity.ErrNotFound
+	}
+
 	return authz.Subject{
 		ID:     account.ID,
 		Tenant: m.TenantID,
 		Email:  account.Email,
 		Groups: []string{string(m.Role)},
+		// From the row, never from the request. A tier a caller could set is
+		// a licence check with a query parameter for a bypass.
+		Tier: string(tenant.Tier),
 	}, nil
 }

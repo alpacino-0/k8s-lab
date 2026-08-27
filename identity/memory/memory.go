@@ -93,6 +93,33 @@ func (s *Store) CreateTenant(_ context.Context, t identity.Tenant) (identity.Ten
 	return t, nil
 }
 
+// UpdateTenant is identity.Store.UpdateTenant.
+func (s *Store) UpdateTenant(_ context.Context, t identity.Tenant) (identity.Tenant, error) {
+	if t.ID == "" || t.Slug == "" {
+		return identity.Tenant{}, fmt.Errorf("%w: a tenant needs an id and a slug", identity.ErrInvalid)
+	}
+	if !t.Tier.Valid() {
+		return identity.Tenant{}, fmt.Errorf("%w: tier %q", identity.ErrInvalid, t.Tier)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	old, ok := s.tenants[t.ID]
+	if !ok {
+		return identity.Tenant{}, fmt.Errorf("%w: tenant %q", identity.ErrNotFound, t.ID)
+	}
+	if holder, taken := s.slugs[t.Slug]; taken && holder != t.ID {
+		return identity.Tenant{}, fmt.Errorf("%w: slug %q", identity.ErrDuplicate, t.Slug)
+	}
+	// The stored one, not the argument's. Neither is the caller's to move.
+	t.CreatedAt = old.CreatedAt
+
+	delete(s.slugs, old.Slug)
+	s.slugs[t.Slug] = t.ID
+	s.tenants[t.ID] = t
+	return t, nil
+}
+
 func (s *Store) Tenant(_ context.Context, id string) (identity.Tenant, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
