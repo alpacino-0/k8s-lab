@@ -226,10 +226,20 @@ jobs:
           version: v3.16.3
 
       - name: Create kind cluster
-        uses: helm/kind-action@v1
+        # Both the action and the node image are pinned, and the node image is
+        # the reason. `helm/kind-action@v1` is a moving tag whose default node
+        # image moves with it, so the Kubernetes version underneath this job
+        # could change with no commit in this repository — and a control plane
+        # that changes on its own turns a red build into a question nobody can
+        # answer from the diff. It cost hours once already: a genuine operator
+        # bug was suspected of being version drift, and ruling that out meant
+        # digging the node image out of three separate run logs to prove all
+        # three had been identical.
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           cluster_name: ci
           config: kind-config.yaml
+          node_image: kindest/node:v1.35.0
 
       # Applied first, so the release has to satisfy them rather than being
       # grandfathered in — and so the API server has picked the bindings up
@@ -442,8 +452,15 @@ jobs:
           EOF
           if ! kubectl -n damga wait --for=condition=Ready workload/ci-probe --timeout=180s; then
             kubectl -n damga get workload ci-probe -o jsonpath='{.status.conditions}' | tr ',' '\n'
+            # READY and RESTARTS, not just phase. A container that is Running
+            # and a container that is Ready are different claims, and the first
+            # time this timed out only the weaker one was printed — which sent
+            # the search after the readiness probe when the probe was passing.
             kubectl -n damga get pod -l app.kubernetes.io/instance=ci-probe \
-              -o custom-columns=NAME:.metadata.name,STATUS:.status.phase,IMAGE:.spec.containers[0].image,REASON:.status.containerStatuses[0].state.waiting.reason
+              -o custom-columns=NAME:.metadata.name,PHASE:.status.phase,READY:.status.containerStatuses[0].ready,RESTARTS:.status.containerStatuses[0].restartCount,IMAGE:.spec.containers[0].image,REASON:.status.containerStatuses[0].state.waiting.reason
+            # All three levels, because they can disagree, and which pair
+            # disagrees says which controller is at fault.
+            kubectl -n damga get deployment,replicaset -l app.kubernetes.io/instance=ci-probe -o wide
             exit 1
           fi
 
@@ -476,14 +493,65 @@ jobs:
           kubectl -n damga get all -l app.kubernetes.io/managed-by=damga-platform
           exit 1
 
+      # The cluster is deleted when this job ends, so whatever is not printed
+      # here is gone. That is not hypothetical: a Workload once sat at
+      # NoReadyReplicas for three minutes and the only evidence captured was
+      # phase and image, both of which said the pods were fine. Two more runs
+      # were spent re-failing it on purpose to collect what should have been
+      # here the first time — the pods were Ready all along and the Deployment's
+      # own status was the thing stuck.
+      #
+      # So this collects the three things that dead end cost: whether the
+      # container is ready as opposed to merely running, what the controllers
+      # this operator shares its objects with are saying, and the operator's own
+      # log. The operator lives in another namespace and had never been read at
+      # all.
       - name: Diagnostics on failure
         if: failure()
         run: |
+          echo "::group::workloads and their status"
+          kubectl -n damga get workloads -o wide || true
+          kubectl -n damga describe workloads || true
+          echo "::endgroup::"
+
+          echo "::group::damga namespace"
           kubectl -n damga get all,pvc,networkpolicy,ingress
+          # READY and RESTARTS are the two columns whose absence sent the last
+          # investigation after the wrong controller.
+          kubectl -n damga get pods -o wide
           kubectl -n damga describe pods
+          echo "::endgroup::"
+
+          echo "::group::deployment status, which is not the same as pod status"
+          # A Deployment can report zero ready replicas while its own ReplicaSet
+          # and every pod under it report otherwise. Printing all three is what
+          # tells those apart.
+          kubectl -n damga get deployments,replicasets -o wide || true
+          kubectl -n damga describe deployments || true
+          echo "::endgroup::"
+
+          echo "::group::the operator"
+          kubectl -n damga-platform-system get pods -o wide || true
+          kubectl -n damga-platform-system describe pods || true
+          kubectl -n damga-platform-system logs \
+            deployment/damga-platform-controller-manager \
+            --tail=300 --all-containers --prefix || true
+          echo "::endgroup::"
+
+          echo "::group::the controllers this operator shares objects with"
+          # A conflict between this operator and a built-in controller shows up
+          # here as "the object has been modified" at a steady rate, and as
+          # client-side throttling when one of them is losing the race for the
+          # API server.
+          kubectl -n kube-system logs kube-controller-manager-ci-control-plane \
+            --tail=200 2>/dev/null | grep -Ei 'ci-probe|throttl|cannot be fulfilled' || true
+          echo "::endgroup::"
+
+          echo "::group::ingress controller and events"
           kubectl -n ingress-nginx get pods
           kubectl -n damga logs -l app.kubernetes.io/name=damga-app --tail=100 --all-containers || true
-          kubectl -n damga get events --sort-by=.lastTimestamp | tail -40
+          kubectl -n damga get events --sort-by=.lastTimestamp | tail -60
+          echo "::endgroup::"
 
   # ---------------------------------------------------------------- build
   # Each architecture is built on a runner of that architecture.
@@ -747,10 +815,20 @@ jobs:
           version: v3.16.3
 
       - name: Create kind cluster
-        uses: helm/kind-action@v1
+        # Both the action and the node image are pinned, and the node image is
+        # the reason. `helm/kind-action@v1` is a moving tag whose default node
+        # image moves with it, so the Kubernetes version underneath this job
+        # could change with no commit in this repository — and a control plane
+        # that changes on its own turns a red build into a question nobody can
+        # answer from the diff. It cost hours once already: a genuine operator
+        # bug was suspected of being version drift, and ruling that out meant
+        # digging the node image out of three separate run logs to prove all
+        # three had been identical.
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           cluster_name: signatures
           config: kind-config.yaml
+          node_image: kindest/node:v1.35.0
 
       # kind's config has the kubelets ask the cluster CA for serving
       # certificates; nothing grants them without this, and a kubelet still

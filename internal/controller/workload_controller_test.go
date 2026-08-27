@@ -29,8 +29,10 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -260,6 +262,104 @@ var _ = Describe("Workload Controller", func() {
 		Expect(dep.Annotations).NotTo(HaveKey(rolloutAnnotation),
 			"an annotation removed from the Workload can never be retracted")
 		Expect(dep.Annotations).To(HaveKeyWithValue(revisionAnnotation, "1"))
+	})
+
+	// The write path's half of the ownership rule, and the one that was missing.
+	// A tenant who may create Workloads and nothing else — no create or patch on
+	// services, no get on secrets — names one after an object somebody else made
+	// by hand, and the reconcile rewrites it, adopts it, and takes it down with
+	// the Workload. It was demonstrated against an administrator's Service: the
+	// selector moved to the attacker's pods, the labels were erased, and
+	// deleting the Workload deleted the Service.
+	//
+	// The assertions are written as the victim would state them. Every field
+	// checked here is one the attack was observed to change.
+	It("leaves an object it does not own exactly as it found it", func() {
+		// Quoted from the recorded attack rather than invented.
+		victimSelector := map[string]string{"app": "payments-backend"}
+		foreign := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: namespace,
+				Labels: map[string]string{"owner": "platform-admin", "tier": "critical"},
+			},
+			Spec: corev1.ServiceSpec{
+				Selector: victimSelector,
+				Ports:    []corev1.ServicePort{{Port: 80, TargetPort: intstr.FromInt32(9000)}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+		defer func() { _ = k8sClient.Delete(ctx, foreign) }()
+
+		create(platformv1alpha1.WorkloadSpec{Image: testImage, Port: 3000})
+
+		By("reconciling, which must not succeed quietly")
+		_, err := reconciler().Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).To(HaveOccurred(),
+			"the reconcile adopted an object belonging to somebody else and said nothing")
+
+		By("the victim being untouched in every way the attack changed it")
+		got := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, key, got)).To(Succeed())
+		Expect(got.Spec.Selector).To(Equal(victimSelector),
+			"the selector was rewritten, which sends this service's traffic to the workload's pods")
+		Expect(got.Labels).To(HaveKeyWithValue("owner", "platform-admin"),
+			"the owner's labels were erased")
+		Expect(got.Labels).To(HaveKeyWithValue("tier", "critical"))
+		Expect(got.OwnerReferences).To(BeEmpty(),
+			"an owner reference was stamped on it, so deleting the workload now deletes this service too")
+
+		By("the workload saying why, in terms the person who named it can act on")
+		app := &platformv1alpha1.Workload{}
+		Expect(k8sClient.Get(ctx, key, app)).To(Succeed())
+		cond := meta.FindStatusCondition(app.Status.Conditions, "Ready")
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(Equal("Conflict"),
+			"reported as a platform failure rather than as the name collision it is")
+		Expect(cond.Message).To(ContainSubstring("Service"))
+		Expect(cond.Message).To(ContainSubstring(name))
+	})
+
+	// The same guard must not refuse the objects this Workload made itself,
+	// which is the way a check like this usually breaks: written against the
+	// attack, never run against the ordinary second reconcile.
+	It("keeps reconciling the objects it does own", func() {
+		create(platformv1alpha1.WorkloadSpec{Image: testImage, Port: 3000})
+		reconcileNow()
+		reconcileNow()
+
+		svc := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, key, svc)).To(Succeed())
+		Expect(svc.OwnerReferences).To(HaveLen(1))
+
+		app := &platformv1alpha1.Workload{}
+		Expect(k8sClient.Get(ctx, key, app)).To(Succeed())
+		Expect(meta.FindStatusCondition(app.Status.Conditions, "Ready").Reason).NotTo(Equal("Conflict"))
+	})
+
+	// The helpers have their own unit tests, and those pass whether or not the
+	// mutate actually calls them. This is the spec that binds the call site: it
+	// seeds a label no rendered object carries and checks it is still there
+	// after a pass, which is only true if the merge is wired in.
+	It("keeps labels on its own objects that it did not write", func() {
+		create(platformv1alpha1.WorkloadSpec{Image: testImage, Port: 3000})
+		reconcileNow()
+
+		By("standing in for Argo CD and for whoever labels things by cost centre")
+		svc := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, key, svc)).To(Succeed())
+		svc.Labels["argocd.argoproj.io/instance"] = "storefront"
+		svc.Labels["custom.example.com/cost-centre"] = "eng-42"
+		Expect(k8sClient.Update(ctx, svc)).To(Succeed())
+
+		reconcileNow()
+
+		Expect(k8sClient.Get(ctx, key, svc)).To(Succeed())
+		Expect(svc.Labels).To(HaveKeyWithValue("argocd.argoproj.io/instance", "storefront"),
+			"Argo CD reads its own tracking label to decide what it owns, and this deleted it")
+		Expect(svc.Labels).To(HaveKeyWithValue("custom.example.com/cost-centre", "eng-42"))
+		Expect(svc.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "damga-platform"),
+			"the operator stopped writing its own labels")
 	})
 
 	It("refuses to delete an object it does not own", func() {

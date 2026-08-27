@@ -44,6 +44,17 @@ const (
 	runAsGID  int64 = 1000
 	graceSecs int64 = 30
 
+	// The single container in a rendered pod. Named here rather than
+	// inline because CI's diagnostics and the hardening assertions both
+	// reach for containers[0] by this name.
+	containerName = "app"
+
+	// The port the Service and the Ingress agree to call the application
+	// port, and the label whose second writer is Argo CD. Both are named
+	// because more than one place has to spell them the same way.
+	portName      = "http"
+	instanceLabel = "app.kubernetes.io/instance"
+
 	// preStop buys the endpoint removal a head start. Without it, a pod is
 	// removed from the Service and its process is killed at the same moment,
 	// and whichever loses that race drops requests that were already in flight.
@@ -75,15 +86,15 @@ const (
 func labelsFor(app *platformv1alpha1.Workload) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       app.Name,
-		"app.kubernetes.io/instance":   app.Name,
+		instanceLabel:                  app.Name,
 		"app.kubernetes.io/managed-by": "damga-platform",
 	}
 }
 
 func selectorFor(app *platformv1alpha1.Workload) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/name":     app.Name,
-		"app.kubernetes.io/instance": app.Name,
+		"app.kubernetes.io/name": app.Name,
+		instanceLabel:            app.Name,
 	}
 }
 
@@ -151,6 +162,96 @@ func reconcileAnnotations(existing, desired map[string]string) map[string]string
 		}
 		existing[k] = v
 	}
+	return existing
+}
+
+// reconcileLabels writes the labels this operator sets and leaves every other
+// label on the object alone.
+//
+// A merge and not an assignment for the same reason as the annotations, with a
+// sharper edge: app.kubernetes.io/instance is one of the keys written here, and
+// it is also Argo CD's default tracking label. The chart renders the same kinds
+// into the same namespace as the operator, so a Workload that shares a name with
+// a release puts two writers on one object, each rewriting that label with its
+// own idea of what the instance is — and Argo CD reads its own tracking label to
+// decide what it owns.
+//
+// No delete pass, unlike the annotations. labelsFor returns a fixed set, so
+// there is never a key this operator wrote and has since stopped wanting;
+// adding one that varies would mean this needs the same retraction the
+// annotations have. It writes nothing when nothing differs, which is what keeps
+// the reconcile from producing an Update on every pass.
+func reconcileLabels(existing, desired map[string]string) map[string]string {
+	for k, v := range desired {
+		if existing == nil {
+			existing = make(map[string]string, len(desired))
+		}
+		existing[k] = v
+	}
+	return existing
+}
+
+// reconcileServicePorts writes the ports this operator renders while keeping the
+// node port the API server allocated for each one.
+//
+// nodePort is not a field this platform has an opinion about — it is not
+// reachable from the Workload spec and the rendered value is always zero, which
+// means "allocate me one". Writing that zero back over a Service that has one
+// releases it and the next allocation is a different number, so a Service an
+// administrator moved to NodePort changes its port on every reconcile while
+// keeping the type that made it matter.
+//
+// Matched by port number, which is what a nodePort is attached to. A port this
+// operator no longer renders is dropped, because the rendered list is the whole
+// truth about which ports exist.
+func reconcileServicePorts(existing, desired []corev1.ServicePort) []corev1.ServicePort {
+	allocated := make(map[int32]int32, len(existing))
+	for _, p := range existing {
+		if p.NodePort != 0 {
+			allocated[p.Port] = p.NodePort
+		}
+	}
+	out := make([]corev1.ServicePort, 0, len(desired))
+	for _, p := range desired {
+		if p.NodePort == 0 {
+			p.NodePort = allocated[p.Port]
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// reconcileHPABehavior writes the stabilization windows this operator sets and
+// leaves the scaling policies beside them alone.
+//
+// Behavior is a struct this platform only half fills in: it renders a
+// StabilizationWindowSeconds for each direction and nothing else, so the API
+// server defaults the policies and selectPolicy. Assigning the whole Behavior
+// deleted those defaults on every pass, and the server put them straight back —
+// on an object the autoscaler controller is also writing to. Nothing had been
+// observed to break yet, which is the only reason this reads as tidiness rather
+// than as the outage it is one busy cluster away from being.
+func reconcileHPABehavior(
+	existing, desired *autoscalingv2.HorizontalPodAutoscalerBehavior,
+) *autoscalingv2.HorizontalPodAutoscalerBehavior {
+	if desired == nil {
+		return existing
+	}
+	if existing == nil {
+		return desired
+	}
+	setWindow := func(e, d *autoscalingv2.HPAScalingRules) *autoscalingv2.HPAScalingRules {
+		if d == nil {
+			return e
+		}
+		if e == nil {
+			return d
+		}
+		e.StabilizationWindowSeconds = d.StabilizationWindowSeconds
+		return e
+	}
+	existing.ScaleUp = setWindow(existing.ScaleUp, desired.ScaleUp)
+	existing.ScaleDown = setWindow(existing.ScaleDown, desired.ScaleDown)
 	return existing
 }
 
@@ -263,10 +364,10 @@ func desiredDeployment(app *platformv1alpha1.Workload) *appsv1.Deployment {
 						LabelSelector:     &metav1.LabelSelector{MatchLabels: selectorFor(app)},
 					}},
 					Containers: []corev1.Container{{
-						Name:  "app",
+						Name:  containerName,
 						Image: app.Spec.Image,
 						Ports: []corev1.ContainerPort{{
-							Name:          "http",
+							Name:          portName,
 							ContainerPort: app.Spec.Port,
 						}},
 						Env:     env,
@@ -341,9 +442,9 @@ func desiredService(app *platformv1alpha1.Workload) *corev1.Service {
 		Spec: corev1.ServiceSpec{
 			Selector: selectorFor(app),
 			Ports: []corev1.ServicePort{{
-				Name:       "http",
+				Name:       portName,
 				Port:       80,
-				TargetPort: intstr.FromString("http"),
+				TargetPort: intstr.FromString(portName),
 				Protocol:   corev1.ProtocolTCP,
 			}},
 		},
@@ -381,12 +482,44 @@ func desiredNetworkPolicy(app *platformv1alpha1.Workload) *networkingv1.NetworkP
 					// policy silently breaks an workload: name resolution
 					// fails and every outbound call times out with no obvious
 					// cause.
+					//
+					// Addressed to the cluster's resolver and nowhere else. With
+					// no "to" this said port 53 to any host on the internet,
+					// which is a data exfiltration channel wearing the one
+					// protocol nobody blocks: a compromised workload encodes
+					// what it stole into names and reads the answers back. The
+					// chart's own policy has always scoped it this way; the
+					// operator's copy of the rule lost the destination.
+					To: []networkingv1.NetworkPolicyPeer{{
+						NamespaceSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"kubernetes.io/metadata.name": "kube-system"},
+						},
+						PodSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"k8s-app": "kube-dns"},
+						},
+					}},
 					Ports: []networkingv1.NetworkPolicyPort{
 						{Protocol: &udp, Port: &dnsPort},
 						{Protocol: &tcp, Port: &dnsPort},
 					},
 				},
 				{
+					// Everything else, minus the cloud metadata service.
+					//
+					// This rule is IPv4 only, and that is load-bearing rather
+					// than an oversight: an ipBlock matches one family, so with
+					// no ::/0 rule beside it egress over IPv6 is denied outright
+					// — including to the IPv6 metadata endpoints that this
+					// except list does not name. Deny-by-omission is doing real
+					// work here, and it is one line away from being undone.
+					//
+					// So whoever makes this platform dual-stack: adding a ::/0
+					// egress rule without an Except carrying the IPv6 metadata
+					// ranges (fd00:ec2::254/128 on AWS, and fe80::/10 for
+					// link-local generally) reopens SSRF-to-cloud-credentials on
+					// the day it lands, with nothing in the diff to say so.
+					// TestEgressHasNoIPv6Hole fails if that rule appears without
+					// them.
 					To: []networkingv1.NetworkPolicyPeer{{
 						IPBlock: &networkingv1.IPBlock{
 							CIDR:   "0.0.0.0/0",

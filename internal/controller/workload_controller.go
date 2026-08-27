@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -31,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -103,7 +105,7 @@ func (r *WorkloadReconciler) reconcileOwned(ctx context.Context, app *platformv1
 		e := existing.(*corev1.ServiceAccount)
 		d := desired.(*corev1.ServiceAccount)
 		e.AutomountServiceAccountToken = d.AutomountServiceAccountToken
-		e.Labels = d.Labels
+		e.Labels = reconcileLabels(e.Labels, d.Labels)
 	}); err != nil {
 		return fmt.Errorf("service account: %w", err)
 	}
@@ -119,7 +121,7 @@ func (r *WorkloadReconciler) reconcileOwned(ctx context.Context, app *platformv1
 		e.Spec.Selector = d.Spec.Selector
 		e.Spec.Strategy = d.Spec.Strategy
 		e.Spec.Template = d.Spec.Template
-		e.Labels = d.Labels
+		e.Labels = reconcileLabels(e.Labels, d.Labels)
 		// Annotations too, and not only on create. The rollout id changes on
 		// every deploy by definition, so an existing Deployment that keeps its
 		// first one is an observer permanently attaching new deploys to the
@@ -138,8 +140,15 @@ func (r *WorkloadReconciler) reconcileOwned(ctx context.Context, app *platformv1
 		e := existing.(*corev1.Service)
 		d := desired.(*corev1.Service)
 		e.Spec.Selector = d.Spec.Selector
-		e.Spec.Ports = d.Spec.Ports
-		e.Labels = d.Labels
+		// .spec.type is deliberately not written, so an administrator can move
+		// this Service to NodePort or LoadBalancer and keep it. Assigning the
+		// ports then undid half of that decision: a rendered port carries
+		// nodePort 0, so every pass handed the allocated node port back and the
+		// API server issued a different one — the type survived and the number
+		// it depends on did not. Preserving a field while overwriting what hangs
+		// off it is worse than owning neither.
+		e.Spec.Ports = reconcileServicePorts(e.Spec.Ports, d.Spec.Ports)
+		e.Labels = reconcileLabels(e.Labels, d.Labels)
 	}); err != nil {
 		return fmt.Errorf("service: %w", err)
 	}
@@ -148,7 +157,7 @@ func (r *WorkloadReconciler) reconcileOwned(ctx context.Context, app *platformv1
 		e := existing.(*networkingv1.NetworkPolicy)
 		d := desired.(*networkingv1.NetworkPolicy)
 		e.Spec = d.Spec
-		e.Labels = d.Labels
+		e.Labels = reconcileLabels(e.Labels, d.Labels)
 	}); err != nil {
 		return fmt.Errorf("network policy: %w", err)
 	}
@@ -158,7 +167,7 @@ func (r *WorkloadReconciler) reconcileOwned(ctx context.Context, app *platformv1
 		d := desired.(*policyv1.PodDisruptionBudget)
 		e.Spec.MinAvailable = d.Spec.MinAvailable
 		e.Spec.Selector = d.Spec.Selector
-		e.Labels = d.Labels
+		e.Labels = reconcileLabels(e.Labels, d.Labels)
 	}); err != nil {
 		return fmt.Errorf("pod disruption budget: %w", err)
 	}
@@ -169,8 +178,19 @@ func (r *WorkloadReconciler) reconcileOwned(ctx context.Context, app *platformv1
 		if err := r.apply(ctx, app, hpa, func(existing, desired client.Object) {
 			e := existing.(*autoscalingv2.HorizontalPodAutoscaler)
 			d := desired.(*autoscalingv2.HorizontalPodAutoscaler)
-			e.Spec = d.Spec
-			e.Labels = d.Labels
+			// Field by field rather than the whole spec, because Behavior is
+			// only partly ours. This renders the two stabilization windows and
+			// nothing else, so the API server defaults the scaling policies and
+			// selectPolicy beside them — and assigning the spec deleted those
+			// defaults every pass, on an object the autoscaler controller is
+			// writing to at the same time. Two controllers rewriting one object
+			// is the shape of the outage this operator already had once.
+			e.Spec.ScaleTargetRef = d.Spec.ScaleTargetRef
+			e.Spec.MinReplicas = d.Spec.MinReplicas
+			e.Spec.MaxReplicas = d.Spec.MaxReplicas
+			e.Spec.Metrics = d.Spec.Metrics
+			e.Spec.Behavior = reconcileHPABehavior(e.Spec.Behavior, d.Spec.Behavior)
+			e.Labels = reconcileLabels(e.Labels, d.Labels)
 		}); err != nil {
 			return fmt.Errorf("autoscaler: %w", err)
 		}
@@ -183,8 +203,15 @@ func (r *WorkloadReconciler) reconcileOwned(ctx context.Context, app *platformv1
 			e := existing.(*networkingv1.Ingress)
 			d := desired.(*networkingv1.Ingress)
 			e.Spec = d.Spec
-			e.Labels = d.Labels
-			e.Annotations = d.Annotations
+			e.Labels = reconcileLabels(e.Labels, d.Labels)
+			// Merged, not assigned. The three keys rendered here are the
+			// only ones this operator has an opinion about; a proxy-body-size,
+			// a rate limit, an auth-url or a cert-manager override that an
+			// administrator added is not expressible in the Workload spec, so
+			// assigning the map deleted it on the next pass with nothing said.
+			// reconcileAnnotations fits unchanged: with no damga.co/ key in the
+			// desired map its delete pass is inert and it degrades to a merge.
+			e.Annotations = reconcileAnnotations(e.Annotations, d.Annotations)
 		}); err != nil {
 			return fmt.Errorf("ingress: %w", err)
 		}
@@ -211,10 +238,63 @@ func (r *WorkloadReconciler) apply(
 	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, existing, func() error {
+		// Whether this Workload is allowed to touch what it just found, asked
+		// before anything is written. SetControllerReference below is not that
+		// check: it refuses an object owned by another controller and adopts an
+		// unowned one without a word, which is the whole attack. A tenant who
+		// may create Workloads and nothing else names one after an object
+		// somebody else made by hand — and this controller rewrites its spec,
+		// stamps an owner reference on it, and deletes it along with the
+		// Workload. It was demonstrated end to end against an administrator's
+		// Service: the selector moved to the attacker's pods, the labels were
+		// erased, and deleting the Workload took the Service with it. An Ingress
+		// goes the same way, hostname and TLS secret included.
+		//
+		// So: an object that already exists and is not controlled by this
+		// Workload is left exactly as it was found. Not deleted, not adopted,
+		// not read from. deleteIfPresent has always done this before removing
+		// something; the asymmetry was that the write path never did.
+		//
+		// A UID is the test for "this came from the server". CreateOrUpdate
+		// calls Get into this object first, so a hit carries the stored UID and
+		// a miss leaves the locally built copy, which has none — and creation
+		// has to keep working.
+		if existing.GetUID() != "" && !metav1.IsControlledBy(existing, app) {
+			return &conflictError{kind: r.kindOf(existing), name: existing.GetName()}
+		}
 		mutate(existing, desired)
 		return controllerutil.SetControllerReference(app, existing, r.Scheme)
 	})
 	return err
+}
+
+// conflictError says the Workload asked for an object that already exists and
+// belongs to somebody else.
+//
+// It is a distinct type rather than a plain error because the status has to tell
+// the two apart: a render that failed is this platform's bug, and a name that
+// collided is something only the person who chose the name can resolve. Wrapped
+// through reconcileOwned with %w, so errors.As finds it.
+type conflictError struct {
+	kind string
+	name string
+}
+
+func (e *conflictError) Error() string {
+	return fmt.Sprintf(
+		"%s %q already exists and is not owned by this workload; "+
+			"rename the workload or remove the object that is in the way",
+		e.kind, e.name)
+}
+
+// kindOf names an object the way a person would. The Kind on a typed object's
+// TypeMeta is empty in practice — the scheme is what knows.
+func (r *WorkloadReconciler) kindOf(obj client.Object) string {
+	gvk, err := apiutil.GVKForObject(obj, r.Scheme)
+	if err != nil {
+		return fmt.Sprintf("%T", obj)
+	}
+	return gvk.Kind
 }
 
 // deleteIfPresent removes an object this Workload no longer wants — but only if
@@ -269,7 +349,16 @@ func (r *WorkloadReconciler) updateStatus(
 		ObservedGeneration: app.Generation,
 		LastTransitionTime: metav1.Now(),
 	}
+	var conflict *conflictError
 	switch {
+	// Before RenderFailed, because a name collision is not a failure of this
+	// platform and saying so would send the wrong person looking. It is the one
+	// reason on this list that the tenant can act on themselves, and the message
+	// names the object so they can.
+	case errors.As(reconcileErr, &conflict):
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = "Conflict"
+		ready.Message = conflict.Error()
 	case reconcileErr != nil:
 		ready.Status = metav1.ConditionFalse
 		ready.Reason = "RenderFailed"

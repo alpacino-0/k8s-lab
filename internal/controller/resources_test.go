@@ -18,10 +18,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package controller
 
 import (
+	"strings"
 	"testing"
 
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
 	platformv1alpha1 "github.com/damgahq/damga/api/v1alpha1"
@@ -174,11 +177,20 @@ func TestNetworkPolicyDeniesByDefaultAndBlocksMetadata(t *testing.T) {
 		t.Error("ingress is not restricted to the ingress controller's namespace")
 	}
 
-	var dnsAllowed, metadataBlocked bool
+	var dnsAllowed, dnsScoped, metadataBlocked bool
 	for _, rule := range np.Spec.Egress {
 		for _, p := range rule.Ports {
 			if p.Port != nil && p.Port.IntValue() == 53 {
 				dnsAllowed = true
+				// Allowed is not the same as safe. This rule once had no
+				// destination at all, which meant port 53 to any host on the
+				// internet — a workload that gets compromised encodes what it
+				// took into hostnames and reads the replies back out.
+				for _, to := range rule.To {
+					if to.PodSelector != nil && to.PodSelector.MatchLabels["k8s-app"] == "kube-dns" {
+						dnsScoped = true
+					}
+				}
 			}
 		}
 		for _, to := range rule.To {
@@ -195,9 +207,144 @@ func TestNetworkPolicyDeniesByDefaultAndBlocksMetadata(t *testing.T) {
 	if !dnsAllowed {
 		t.Error("DNS egress is not allowed, so every outbound call will time out")
 	}
+	if !dnsScoped {
+		t.Error("DNS egress has no destination, so port 53 is open to every host on the internet " +
+			"and a compromised workload can tunnel data out over it")
+	}
 	if !metadataBlocked {
 		t.Errorf("%s is reachable, so a request-forgery bug reaches cloud credentials", metadataCIDR)
 	}
+}
+
+// The metadata block is an IPv4 ipBlock, so it says nothing about IPv6 — and it
+// does not have to, because no rule permits IPv6 egress and an ipBlock matches
+// one family. The IPv6 metadata endpoint is unreachable today by omission.
+//
+// Omission is a bad way to hold a security property, because nothing announces
+// when it stops holding. The day somebody makes this platform dual-stack they
+// will add a ::/0 egress rule, it will look like the obvious counterpart of the
+// rule already there, and it will reopen SSRF-to-cloud-credentials with nothing
+// in the diff to say so. This test is the thing that says so.
+func TestEgressHasNoIPv6Hole(t *testing.T) {
+	// fd00:ec2::254 is where AWS answers; fe80::/10 is link-local generally.
+	// An Except entry has to cover the address for the rule to be safe.
+	const awsV6Metadata = "fd00:ec2::254"
+
+	for _, rule := range desiredNetworkPolicy(app()).Spec.Egress {
+		for _, to := range rule.To {
+			if to.IPBlock == nil || !strings.Contains(to.IPBlock.CIDR, ":") {
+				continue
+			}
+			var covered bool
+			for _, ex := range to.IPBlock.Except {
+				if strings.Contains(ex, ":") {
+					covered = true
+				}
+			}
+			if !covered {
+				t.Errorf("egress rule %q permits IPv6 with no metadata address excepted, "+
+					"so a request-forgery bug now reaches %s and returns cloud credentials — "+
+					"add the IPv6 metadata ranges to Except",
+					to.IPBlock.CIDR, awsV6Metadata)
+			}
+		}
+	}
+}
+
+// Three fields, one rule: write what this operator renders, leave what it does
+// not. Each case below is a thing that was observed to be destroyed, or that
+// would have been on the first cluster where it mattered.
+func TestReconcileWritesOnlyWhatThisOperatorOwns(t *testing.T) {
+	t.Run("labels keep what another writer put there", func(t *testing.T) {
+		// app.kubernetes.io/instance is also Argo CD's tracking label, and the
+		// chart renders these same kinds into this same namespace.
+		existing := map[string]string{
+			instanceLabel:                     "argo-release",
+			"argocd.argoproj.io/instance":     "shop",
+			"app.kubernetes.io/part-of":       "storefront",
+			"app.kubernetes.io/managed-by":    "Helm",
+			"pod-template-hash":               "d45697f5c",
+			"kubernetes.io/metadata.name-ish": "noise",
+			"custom.example.com/cost-centre":  "eng-42",
+			"app.kubernetes.io/version-ish":   "1.2.3",
+		}
+		got := reconcileLabels(existing, labelsFor(app()))
+
+		if got["app.kubernetes.io/managed-by"] != "damga-platform" {
+			t.Errorf("managed-by = %q, want the operator's own value", got["app.kubernetes.io/managed-by"])
+		}
+		if got["app.kubernetes.io/instance"] != "blog" {
+			t.Errorf("instance = %q, want the workload name", got["app.kubernetes.io/instance"])
+		}
+		for _, k := range []string{
+			"argocd.argoproj.io/instance", "app.kubernetes.io/part-of",
+			"pod-template-hash", "custom.example.com/cost-centre",
+		} {
+			if _, ok := got[k]; !ok {
+				t.Errorf("label %q was deleted; it belongs to somebody else and nothing here "+
+					"can put it back", k)
+			}
+		}
+	})
+
+	t.Run("a nil label map is not grown into an empty one", func(t *testing.T) {
+		if got := reconcileLabels(nil, nil); got != nil {
+			t.Errorf("labels = %v, want nil — an empty map is a diff on every pass", got)
+		}
+	})
+
+	t.Run("an allocated node port survives", func(t *testing.T) {
+		// What an administrator gets after flipping the Service to NodePort.
+		existing := []corev1.ServicePort{{Name: portName, Port: 80, NodePort: 31514}}
+		desired := []corev1.ServicePort{{Name: portName, Port: 80, TargetPort: intstr.FromInt32(3000)}}
+
+		got := reconcileServicePorts(existing, desired)
+		if len(got) != 1 {
+			t.Fatalf("ports = %v, want one", got)
+		}
+		if got[0].NodePort != 31514 {
+			t.Errorf("nodePort = %d, want 31514 kept — writing 0 back releases it and the "+
+				"next allocation is a different number, on every reconcile", got[0].NodePort)
+		}
+		if got[0].TargetPort.IntValue() != 3000 {
+			t.Errorf("targetPort = %v, want the rendered value", got[0].TargetPort)
+		}
+	})
+
+	t.Run("a port that is no longer rendered goes away", func(t *testing.T) {
+		existing := []corev1.ServicePort{{Port: 80, NodePort: 31514}, {Port: 9090, NodePort: 32000}}
+		got := reconcileServicePorts(existing, []corev1.ServicePort{{Port: 80}})
+		if len(got) != 1 || got[0].Port != 80 {
+			t.Errorf("ports = %v, want only the rendered one — the rendered list is the whole "+
+				"truth about which ports exist", got)
+		}
+	})
+
+	t.Run("autoscaler policies the API server defaulted are left in place", func(t *testing.T) {
+		pods := autoscalingv2.PodsScalingPolicy
+		existing := &autoscalingv2.HorizontalPodAutoscalerBehavior{
+			ScaleDown: &autoscalingv2.HPAScalingRules{
+				StabilizationWindowSeconds: ptr.To(int32(9999)),
+				SelectPolicy:               ptr.To(autoscalingv2.MaxChangePolicySelect),
+				Policies: []autoscalingv2.HPAScalingPolicy{
+					{Type: pods, Value: 4, PeriodSeconds: 60},
+				},
+			},
+		}
+		desired := desiredHPA(app(func(a *platformv1alpha1.Workload) {
+			a.Spec.Autoscale = &platformv1alpha1.Autoscale{MinReplicas: 2, MaxReplicas: 8, TargetCPUPercent: 60}
+		})).Spec.Behavior
+
+		got := reconcileHPABehavior(existing, desired)
+		if got.ScaleDown.StabilizationWindowSeconds == nil || *got.ScaleDown.StabilizationWindowSeconds == 9999 {
+			t.Error("the stabilization window is this operator's to set and it was not written")
+		}
+		if len(got.ScaleDown.Policies) != 1 || got.ScaleDown.SelectPolicy == nil {
+			t.Error("the scaling policies were deleted; the API server defaults them and puts " +
+				"them straight back, so every pass writes to an object the autoscaler " +
+				"controller is writing to as well")
+		}
+	})
 }
 
 func TestIngressOnlyExistsWithADomainAndAlwaysForcesTLS(t *testing.T) {
