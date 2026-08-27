@@ -754,3 +754,80 @@ func mutateTenant(ctx context.Context, s identity.Store, change func(*identity.T
 	_, err = s.UpdateTenant(ctx, current)
 	return err
 }
+
+// ---------------------------------------------------------------- failures
+
+// failingTenants is an identity store whose tenant lookup is broken and whose
+// everything else works, which is what a database going away mid-request looks
+// like from here.
+type failingTenants struct {
+	identity.Store
+	fail bool
+}
+
+func (s *failingTenants) Tenant(ctx context.Context, id string) (identity.Tenant, error) {
+	if s.fail {
+		return identity.Tenant{}, errors.New("connection reset by peer")
+	}
+	return s.Store.Tenant(ctx, id)
+}
+
+// A store that is failing must not be reported as an account that belongs
+// nowhere.
+//
+// /me skipped any membership whose tenant it could not read, which is right for
+// a row pointing at a deleted tenant and wrong for a store that is down: the
+// answer becomes 200 with an empty list, the panel says you are a member of
+// nothing, and the reader goes looking at permissions for a fault that is in
+// the database.
+func TestAFailingStoreIsNotAnEmptyMembershipList(t *testing.T) {
+	idStore := &failingTenants{Store: identityWith(t, identity.RoleOwner)}
+	base := start(t, server.Options{Evidence: memory.New(0), Identity: idStore})
+	session := login(t, base)
+
+	status, body := get(t, base+"/api/v1/me", cookieHeader(session))
+	if status != http.StatusOK {
+		t.Fatalf("me while healthy = %d, want 200", status)
+	}
+	if !strings.Contains(body, testTenant) {
+		t.Fatalf("a healthy /me does not list the tenant: %s", body)
+	}
+
+	idStore.fail = true
+	status, body = get(t, base+"/api/v1/me", cookieHeader(session))
+	if status != http.StatusInternalServerError {
+		t.Errorf("me with a broken store = %d %q, want 500", status, body)
+	}
+	if strings.Contains(body, `"memberships":[]`) {
+		t.Error("a broken store answered with an empty membership list")
+	}
+}
+
+// A cursor the caller made up is the caller's mistake.
+//
+// It reached the store, failed to parse, and came back as a 500 — which tells
+// the client the server is broken and it should retry, and neither is true.
+func TestAMadeUpPageCursorIsTheCallersMistake(t *testing.T) {
+	store := memory.New(0)
+	ref := evidence.Ref{TenantID: testTenant, App: testApp, Env: testEnv}
+	seed(t, store, ref)
+	base := start(t, server.Options{
+		Evidence: store, Identity: identityWith(t, identity.RoleOwner),
+	})
+	session := login(t, base)
+	prefix := fmt.Sprintf("%s/api/v1/tenants/%s/apps/%s/envs/%s/history",
+		base, ref.TenantID, ref.App, ref.Env)
+
+	if status, body := get(t, prefix+"?after=not-a-cursor", cookieHeader(session)); status != http.StatusBadRequest {
+		t.Errorf("a made-up cursor = %d %q, want 400", status, body)
+	}
+	// And a limit that is not a number, which is the same class of mistake.
+	if status, _ := get(t, prefix+"?limit=lots", cookieHeader(session)); status != http.StatusBadRequest {
+		t.Errorf("a non-numeric limit = %d, want 400", status)
+	}
+	// The page itself still works, so the two checks above cannot be passing
+	// by refusing everything.
+	if status, _ := get(t, prefix, cookieHeader(session)); status != http.StatusOK {
+		t.Errorf("history = %d, want 200", status)
+	}
+}

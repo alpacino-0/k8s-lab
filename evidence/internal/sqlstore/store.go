@@ -405,7 +405,7 @@ func (s *Store) History(ctx context.Context, q evidence.Query) (evidence.Page, e
 	if q.After != "" {
 		cursor, err := strconv.ParseInt(string(q.After), 10, 64)
 		if err != nil {
-			return evidence.Page{}, fmt.Errorf("%s: malformed cursor %q: %w", s.d.Name(), q.After, err)
+			return evidence.Page{}, fmt.Errorf("%w: %s cannot read cursor %q", evidence.ErrInvalid, s.d.Name(), q.After)
 		}
 		if asc {
 			where, args = append(where, "seq > ?"), append(args, cursor)

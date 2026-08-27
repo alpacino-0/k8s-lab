@@ -19,6 +19,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -128,11 +129,19 @@ func (o Options) me(idStore identity.Store, sess *auth.Sessions) http.Handler {
 		out := make([]membership, 0, len(rows))
 		for _, m := range rows {
 			t, err := idStore.Tenant(r.Context(), m.TenantID)
-			if err != nil {
+			switch {
+			case errors.Is(err, identity.ErrNotFound):
 				// A membership pointing at a tenant that is gone. Skipped
 				// rather than failed: one broken row must not make the panel
 				// unusable for every other tenant this person belongs to.
 				continue
+			case err != nil:
+				// Anything else is the store failing, and skipping it would
+				// answer 200 with an empty list — "you are a member of
+				// nothing", which reads as a permissions problem and sends
+				// the reader somewhere the fault is not.
+				problem(w, http.StatusInternalServerError, "the identity store is unavailable")
+				return
 			}
 			out = append(out, membership{
 				TenantID: t.ID, TenantSlug: t.Slug, TenantName: t.DisplayName,
@@ -179,7 +188,14 @@ func history(g guard, store evidence.Store) http.Handler {
 			After: evidence.Cursor(r.URL.Query().Get("after")),
 			Order: evidence.OrderNewest,
 		})
-		if err != nil {
+		switch {
+		case errors.Is(err, evidence.ErrInvalid):
+			// A cursor the store cannot resolve. The caller sent it, so this
+			// is a 400 — answering 500 tells them the server is broken and
+			// they should retry, and it is not and they should not.
+			problem(w, http.StatusBadRequest, "that page cursor is not one this log issued")
+			return
+		case err != nil:
 			problem(w, http.StatusInternalServerError, "reading the evidence store failed")
 			return
 		}

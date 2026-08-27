@@ -217,6 +217,13 @@ func (s *Store) History(_ context.Context, q evidence.Query) (evidence.Page, err
 		}
 		page.Records = append(page.Records, *r)
 	}
+	// A cursor that was never reached names a record this Ref does not have.
+	// Returning an empty page for it would be indistinguishable from the end
+	// of the log, so a client paging with a mangled cursor would stop early
+	// and believe it had read everything.
+	if !started {
+		return evidence.Page{}, fmt.Errorf("%w: no record for cursor %q", evidence.ErrInvalid, q.After)
+	}
 	return page, nil
 }
 

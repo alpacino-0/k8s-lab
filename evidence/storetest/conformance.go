@@ -81,6 +81,7 @@ func Run(t *testing.T, newStore Factory) {
 		{"CurrentPrefersRunning", testCurrentPrefersRunning},
 		{"FindBySourceResolvesCommit", testFindBySourceResolvesCommit},
 		{"HistoryPagesWithoutOffset", testHistoryPagesWithoutOffset},
+		{"AnUnusableCursorIsReportedNotEmptied", testAnUnusableCursorIsReportedNotEmptied},
 		{"RefsAreScopedToOneTenant", testRefsAreScopedToOneTenant},
 		{"PruneNeverRemovesCurrent", testPruneNeverRemovesCurrent},
 		{"ExportRoundTripsAndVerifies", testExportRoundTripsAndVerifies},
@@ -892,5 +893,61 @@ func testRefsAreScopedToOneTenant(t *testing.T, newStore Factory) {
 	// And no tenant at all is refused rather than treated as every tenant.
 	if _, err := s.Refs(ctx, ""); !errors.Is(err, evidence.ErrInvalid) {
 		t.Errorf("Refs with no tenant returned %v, want ErrInvalid", err)
+	}
+}
+
+// A cursor the store could never have issued has to be an error, not an empty
+// page.
+//
+// The two engines disagreed. The SQL stores failed to parse it and returned a
+// plain error, which the API turned into a 500 — "the server is broken, retry"
+// for a mistake the caller made. The in-memory store never matched it and
+// returned an empty page, which is indistinguishable from the end of the log:
+// a client paging with a mangled cursor stops early and believes it has read
+// everything. On an audit log, silently truncated pagination is the worse of
+// the two.
+//
+// What is NOT asserted here, and why: a well-formed cursor pointing past the
+// end. The two stores cannot agree about that without redefining what a cursor
+// is — the SQL stores' cursor is a Seq, so "999999" is a perfectly good cursor
+// with nothing after it and an empty page is the correct answer, while the
+// in-memory store's cursor is a record id, so the same string names nothing.
+// Making them agree means either checking that the cursor still exists, which
+// breaks a legitimate page fetched across a prune, or loosening the in-memory
+// store until it stops catching the case above. Neither is worth it, and the
+// remaining difference is only reachable by fabricating a cursor rather than
+// passing back the one the store handed over.
+func testAnUnusableCursorIsReportedNotEmptied(t *testing.T, newStore Factory) {
+	s := newStore(t, 0)
+	ctx := context.Background()
+	r := ref("api", prod)
+	for _, sha := range []string{"aaa", "bbb", "ccc"} {
+		mustAppend(t, s, rec("commit:"+sha, r, sha))
+	}
+
+	for _, cursor := range []evidence.Cursor{"not-a-cursor", "', DROP", "  "} {
+		page, err := s.History(ctx, evidence.Query{Ref: r, After: cursor})
+		if !errors.Is(err, evidence.ErrInvalid) {
+			t.Errorf("History after %q returned %d records and err=%v, want ErrInvalid",
+				cursor, len(page.Records), err)
+		}
+	}
+
+	// No cursor still means the beginning, and a cursor the store issued still
+	// works — otherwise the check above could be satisfied by refusing
+	// everything.
+	first, err := s.History(ctx, evidence.Query{Ref: r, Limit: 2})
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if len(first.Records) != 2 || first.Next == "" {
+		t.Fatalf("first page has %d records, next=%q", len(first.Records), first.Next)
+	}
+	second, err := s.History(ctx, evidence.Query{Ref: r, Limit: 2, After: first.Next})
+	if err != nil {
+		t.Fatalf("History after the store's own cursor: %v", err)
+	}
+	if len(second.Records) != 1 {
+		t.Errorf("second page has %d records, want 1", len(second.Records))
 	}
 }
