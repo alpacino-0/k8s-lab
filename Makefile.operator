@@ -7,7 +7,23 @@ IMG ?= controller:latest
 # `go build ./...` compiled, controller-gen scanned and .dockerignore would
 # have copied into the operator image's build context. Nothing downstream
 # would have failed, which is the reason to name the tree instead.
-GO_PKGS ?= ./api/... ./auth/... ./authz/... ./cmd/... ./evidence/... ./identity/... ./internal/... ./server/... ./test/...
+# Every package, and not a list.
+#
+# This was a hand-written list of directories, inherited from the kubebuilder
+# scaffold, and it did what hand-written lists do. `placement` was added on
+# 2026-08-27 and `forge` on 2026-08-28, and neither was ever added here — so
+# both shipped with green CI while their tests, including two PostgreSQL
+# conformance suites that only run in CI, had never once been executed there.
+# Nothing failed, because nothing ran.
+#
+# It was invisible for a specific reason worth naming: `golangci-lint run`
+# covers the whole module regardless of this variable, so lint was reporting on
+# packages the test step could not see. A lint failure in `forge` and a passing
+# test run for `forge` looked like the same package being handled.
+#
+# ./... has no such gap and needs no maintenance. The e2e tag is still excluded
+# below, which is the only exclusion that was ever doing work.
+GO_PKGS ?= ./...
 # manifests must see both: the CRD comes from api/, and all nine
 # +kubebuilder:rbac markers are on the controller. Scoping it to api/ alone
 # regenerates a role granting nothing, and the operator then fails at runtime
