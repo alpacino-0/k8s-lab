@@ -87,6 +87,22 @@ spec:
               STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
               OUT="/backup/${POSTGRES_DB}-install-$(date +%Y%m%d-%H%M%S).sql.gz"
 
+              # What the source holds, so the restore can be compared with it
+              # rather than with a threshold. A count on its own answers the
+              # wrong question: zero rows is correct for a database nothing has
+              # written to yet, and catastrophic for one that is full.
+              count_rows() {
+                _rows=0
+                for _t in $(eval "$1 -At -c \"SELECT schemaname||'.'||tablename FROM pg_tables
+                    WHERE schemaname NOT IN ('pg_catalog','information_schema')\""); do
+                  _n=$(eval "$1 -At -c \"SELECT count(*) FROM $_t\"")
+                  _rows=$((_rows + _n))
+                done
+                echo "$_rows"
+              }
+              SRC="psql -h $DB_HOST -U $POSTGRES_USER -d $POSTGRES_DB -v ON_ERROR_STOP=1 -q"
+              SRC_ROWS=$(count_rows "$SRC")
+
               pg_dump -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
                 --no-owner --no-privileges | gzip > "$OUT"
 
@@ -118,17 +134,33 @@ spec:
                 "SELECT schemaname||'.'||tablename FROM pg_tables
                   WHERE schemaname NOT IN ('pg_catalog','information_schema')")
               [ -n "$TABLES" ] || { echo "the restore produced no tables"; exit 1; }
+              TABLE_COUNT=$(printf '%s\n' $TABLES | wc -l | tr -d ' ')
+              ROWS=$(count_rows "$PSQL -d rehearsal")
 
-              ROWS=0
-              TABLE_COUNT=0
-              for t in $TABLES; do
-                n=$($PSQL -At -d rehearsal -c "SELECT count(*) FROM $t")
-                ROWS=$((ROWS + n))
-                TABLE_COUNT=$((TABLE_COUNT + 1))
-              done
+              # The comparison, and the reason the source was counted at all.
+              # A dump truncated after the schema restores cleanly, produces
+              # tables, and holds nothing — so a check that only asked "did rows
+              # come back" would have to pick a threshold, and any threshold is
+              # wrong for a database that is legitimately empty. Against the
+              # source there is no threshold to pick: everything that was there
+              # has to come back.
+              if [ "$SRC_ROWS" -gt 0 ] && [ "$ROWS" -eq 0 ]; then
+                echo "the source holds $SRC_ROWS rows and the restore holds none:"
+                echo "the archive is readable and carries no data"
+                exit 1
+              fi
+              DRIFT=""
+              if [ "$ROWS" -ne "$SRC_ROWS" ]; then
+                # Not a failure. pg_dump takes a consistent snapshot and the
+                # source was counted separately, so anything written in between
+                # shows up here — on a live database that is ordinary. It is
+                # reported rather than swallowed, because a large gap is worth
+                # somebody's attention even when this job cannot say it is wrong.
+                DRIFT=" (source held $SRC_ROWS at count time)"
+              fi
 
               FINISHED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-              echo "restored $OUT into a private instance: $TABLE_COUNT tables, $ROWS rows"
+              echo "restored $OUT into a private instance: $TABLE_COUNT tables, $ROWS rows$DRIFT"
 
               # Written beside the backup, on the volume that outlives this pod,
               # because the sentence this exists to support — "the backup was
@@ -136,7 +168,8 @@ spec:
               # by something that was not here when it happened.
               cat > /backup/last-restore.json <<JSON
               {"startedAt":"$STARTED","finishedAt":"$FINISHED","archive":"$OUT",
-               "archiveBytes":$SIZE,"tables":$TABLE_COUNT,"rows":$ROWS,"restored":true}
+               "archiveBytes":$SIZE,"tables":$TABLE_COUNT,"rows":$ROWS,
+               "sourceRows":$SRC_ROWS,"restored":true}
               JSON
               echo "wrote /backup/last-restore.json"
           resources:
