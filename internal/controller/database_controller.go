@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,7 +44,8 @@ type DatabaseReconciler struct {
 // +kubebuilder:rbac:groups=platform.damga.co,resources=databases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=platform.damga.co,resources=databases/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=secrets;persistentvolumeclaims,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
 
 func (r *DatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var db platformv1alpha1.Database
@@ -79,6 +81,19 @@ func normaliseDatabase(db *platformv1alpha1.Database) {
 	db.Spec.Resources.CPURequest = quantityOrDefault(db.Spec.Resources.CPURequest, "100m")
 	db.Spec.Resources.MemoryRequest = quantityOrDefault(db.Spec.Resources.MemoryRequest, "256Mi")
 	db.Spec.Resources.MemoryLimit = quantityOrDefault(db.Spec.Resources.MemoryLimit, "512Mi")
+
+	// The backup's own defaults, for the same reason: an object built in Go
+	// never passes through the API server, and an empty schedule renders a
+	// CronJob the API server then rejects — which reads as the controller being
+	// broken rather than as a field nobody filled in.
+	if db.Spec.Backup != nil {
+		if db.Spec.Backup.Schedule == "" {
+			db.Spec.Backup.Schedule = "0 2 * * *"
+		}
+		if db.Spec.Backup.RetainDays == 0 {
+			db.Spec.Backup.RetainDays = 7
+		}
+	}
 }
 
 func (r *DatabaseReconciler) reconcileDatabase(ctx context.Context, db *platformv1alpha1.Database) error {
@@ -136,7 +151,70 @@ func (r *DatabaseReconciler) reconcileDatabase(ctx context.Context, db *platform
 	}); err != nil {
 		return fmt.Errorf("statefulset: %w", err)
 	}
+
+	// Backups are conditional, so both directions are handled. Only ever
+	// creating them would leave a schedule running against a database whose
+	// owner turned backups off — and the archives it keeps writing are the
+	// thing they asked to stop paying for.
+	if db.Spec.Backup == nil {
+		if err := r.deleteDatabaseChild(ctx, db, &batchv1.CronJob{}, backupName(db)); err != nil {
+			return fmt.Errorf("removing the backup schedule: %w", err)
+		}
+		// The claim is deliberately left. Deleting a schedule is not asking for
+		// the archives to be destroyed, and this platform does not delete data
+		// as a side effect of a spec change.
+		return nil
+	}
+
+	// Created if absent and never owned, which is the opposite of everything
+	// else here and is the point.
+	//
+	// An owner reference would have the garbage collector delete the archives
+	// when the Database is deleted — the same cascade that made this a separate
+	// kind in the first place, reappearing one level down. A StatefulSet's data
+	// volume survives deletion because Kubernetes deliberately leaves
+	// volumeClaimTemplates behind; this claim is created directly, so nothing
+	// would leave it behind unless it is unowned.
+	//
+	// The consequence is that a claim already sitting there is used as it is. In
+	// a tenant's own namespace that is what somebody recreating a Database wants
+	// — their archives, still there — and it is the reason the namespace
+	// boundary is doing real work rather than decorating this.
+	claim := desiredBackupClaim(db)
+	err = r.Get(ctx, client.ObjectKeyFromObject(claim), &corev1.PersistentVolumeClaim{})
+	switch {
+	case apierrors.IsNotFound(err):
+		if err := r.Create(ctx, claim); err != nil {
+			return fmt.Errorf("backup volume: %w", err)
+		}
+	case err != nil:
+		return fmt.Errorf("backup volume: %w", err)
+	}
+
+	if err := r.applyDatabase(ctx, db, desiredBackupCronJob(db), func(e, d client.Object) {
+		ec, dc := e.(*batchv1.CronJob), d.(*batchv1.CronJob)
+		ec.Spec = dc.Spec
+		ec.Labels = reconcileLabels(ec.Labels, dc.Labels)
+	}); err != nil {
+		return fmt.Errorf("backup schedule: %w", err)
+	}
 	return nil
+}
+
+// deleteDatabaseChild removes an object this Database made, and only one it
+// made. The ownership check is the same question applyDatabase asks: deleting
+// by name alone would destroy something that merely shares a name.
+func (r *DatabaseReconciler) deleteDatabaseChild(
+	ctx context.Context, db *platformv1alpha1.Database, obj client.Object, name string,
+) error {
+	key := client.ObjectKey{Name: name, Namespace: db.Namespace}
+	if err := r.Get(ctx, key, obj); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(obj, db) {
+		return nil
+	}
+	return client.IgnoreNotFound(r.Delete(ctx, obj))
 }
 
 // applyDatabase is the Workload reconciler's apply, with the same ownership
@@ -219,6 +297,7 @@ func (r *DatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).
+		Owns(&batchv1.CronJob{}).
 		Named("database").
 		Complete(r)
 }

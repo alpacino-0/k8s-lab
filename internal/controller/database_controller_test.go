@@ -25,7 +25,9 @@ import (
 	. "github.com/onsi/gomega"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -226,3 +228,125 @@ var _ = Describe("Database Controller", func() {
 		Expect(db.Status.Host).NotTo(BeEmpty())
 	})
 })
+
+var _ = Describe("Database backups", func() {
+	const (
+		dbName    = "shop-db"
+		namespace = "default"
+	)
+	ctx := context.Background()
+	key := types.NamespacedName{Name: dbName, Namespace: namespace}
+	backupKey := types.NamespacedName{Name: dbName + "-backup", Namespace: namespace}
+
+	reconcile1 := func() {
+		GinkgoHelper()
+		_, err := (&DatabaseReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}).
+			Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+	}
+	withBackup := func(backup *platformv1alpha1.DatabaseBackup) {
+		GinkgoHelper()
+		Expect(k8sClient.Create(ctx, &platformv1alpha1.Database{
+			ObjectMeta: metav1.ObjectMeta{Name: dbName, Namespace: namespace},
+			Spec: platformv1alpha1.DatabaseSpec{
+				Image: testPostgresImage, Storage: resource.MustParse("1Gi"), Backup: backup,
+			},
+		})).To(Succeed())
+	}
+
+	AfterEach(func() {
+		db := &platformv1alpha1.Database{}
+		if err := k8sClient.Get(ctx, key, db); err == nil {
+			Expect(k8sClient.Delete(ctx, db)).To(Succeed())
+		}
+		for _, obj := range []client.Object{
+			&appsv1.StatefulSet{}, &corev1.Service{}, &corev1.Secret{},
+		} {
+			obj.SetName(dbName)
+			obj.SetNamespace(namespace)
+			_ = k8sClient.Delete(ctx, obj)
+		}
+		for _, obj := range []client.Object{&batchv1.CronJob{}, &corev1.PersistentVolumeClaim{}} {
+			obj.SetName(dbName + "-backup")
+			obj.SetNamespace(namespace)
+			_ = k8sClient.Delete(ctx, obj)
+		}
+	})
+
+	It("renders a schedule and a volume of its own", func() {
+		withBackup(&platformv1alpha1.DatabaseBackup{Storage: resource.MustParse("2Gi")})
+		reconcile1()
+
+		cron := &batchv1.CronJob{}
+		Expect(k8sClient.Get(ctx, backupKey, cron)).To(Succeed())
+		Expect(cron.Spec.Schedule).To(Equal("0 2 * * *"))
+		Expect(cron.Spec.ConcurrencyPolicy).To(Equal(batchv1.ForbidConcurrent),
+			"two dumps at once is how a backup window becomes a half-written archive")
+
+		// The channel between this job and the operator. The job holds no
+		// service-account token by design, so the termination log is the only
+		// way its answer gets out.
+		container := cron.Spec.JobTemplate.Spec.Template.Spec.Containers[0]
+		Expect(container.TerminationMessagePath).To(Equal(RestoreResultPath))
+		Expect(container.TerminationMessagePolicy).To(Equal(corev1.TerminationMessageReadFile),
+			"the message has to be the file the container wrote, not the tail of its log")
+		Expect(cron.Spec.JobTemplate.Spec.Template.Spec.AutomountServiceAccountToken).
+			To(Equal(ptrBool(false)))
+
+		claim := &corev1.PersistentVolumeClaim{}
+		Expect(k8sClient.Get(ctx, backupKey, claim)).To(Succeed())
+		Expect(claim.Spec.Resources.Requests.Storage().String()).To(Equal("2Gi"),
+			"the archives share the data volume, so filling it with backups stops "+
+				"the database accepting writes")
+		// Unowned on purpose. An owner reference would have the garbage
+		// collector delete the archives with the Database — the same cascade
+		// that made this a separate kind, one level down.
+		Expect(claim.OwnerReferences).To(BeEmpty(),
+			"deleting the Database would destroy every backup it ever took")
+	})
+
+	// Turning backups off has to stop them. Only ever creating conditional
+	// objects leaves a schedule running against a database whose owner asked
+	// for it to stop, still writing the archives they stopped paying for.
+	It("stops the schedule when backups are turned off", func() {
+		withBackup(&platformv1alpha1.DatabaseBackup{Storage: resource.MustParse("1Gi")})
+		reconcile1()
+		Expect(k8sClient.Get(ctx, backupKey, &batchv1.CronJob{})).To(Succeed())
+
+		db := &platformv1alpha1.Database{}
+		Expect(k8sClient.Get(ctx, key, db)).To(Succeed())
+		db.Spec.Backup = nil
+		Expect(k8sClient.Update(ctx, db)).To(Succeed())
+		reconcile1()
+
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, backupKey, &batchv1.CronJob{}))).
+			To(BeTrue(), "the schedule kept running after backups were turned off")
+
+		// And the archives are still there. Turning off a schedule is not
+		// asking for what it already wrote to be destroyed, and this platform
+		// does not delete data as a side effect of a spec change.
+		Expect(k8sClient.Get(ctx, backupKey, &corev1.PersistentVolumeClaim{})).To(Succeed(),
+			"the archives were deleted along with the schedule")
+	})
+
+	It("can back up without rehearsing, and says which it is doing", func() {
+		no := false
+		withBackup(&platformv1alpha1.DatabaseBackup{
+			Storage: resource.MustParse("1Gi"), Rehearse: &no,
+		})
+		reconcile1()
+
+		cron := &batchv1.CronJob{}
+		Expect(k8sClient.Get(ctx, backupKey, cron)).To(Succeed())
+		var rehearse string
+		for _, e := range cron.Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env {
+			if e.Name == "REHEARSE" {
+				rehearse = e.Value
+			}
+		}
+		Expect(rehearse).To(Equal("false"),
+			"a tenant who turned the rehearsal off would still pay for it")
+	})
+})
+
+func ptrBool(b bool) *bool { return &b }

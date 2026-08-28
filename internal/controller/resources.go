@@ -66,6 +66,10 @@ const (
 	// Dropped from every container this platform renders.
 	capabilityAll = "ALL"
 
+	// Where the tmp volume is mounted. A read-only root filesystem leaves
+	// nowhere else to write, and most runtimes write something.
+	tmpPath = "/tmp"
+
 	// preStop buys the endpoint removal a head start. Without it, a pod is
 	// removed from the Service and its process is killed at the same moment,
 	// and whichever loses that race drops requests that were already in flight.
@@ -419,7 +423,7 @@ func desiredDeployment(app *platformv1alpha1.Workload) *appsv1.Deployment {
 						// A read-only root filesystem breaks anything that writes
 						// a temp file, which is most runtimes. This gives them
 						// somewhere to write that does not survive the pod.
-						VolumeMounts: []corev1.VolumeMount{{Name: "tmp", MountPath: "/tmp"}},
+						VolumeMounts: []corev1.VolumeMount{{Name: "tmp", MountPath: tmpPath}},
 					}},
 					Volumes: []corev1.Volume{{
 						Name:         "tmp",

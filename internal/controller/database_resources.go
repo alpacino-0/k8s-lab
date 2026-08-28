@@ -228,7 +228,7 @@ func desiredDatabaseStatefulSet(db *platformv1alpha1.Database) *appsv1.StatefulS
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "data", MountPath: "/var/lib/postgresql/data"},
 							{Name: "run", MountPath: "/var/run/postgresql"},
-							{Name: tmpVolume, MountPath: "/tmp"},
+							{Name: tmpVolume, MountPath: tmpPath},
 						},
 						// pg_isready and not a TCP probe. A socket that accepts
 						// connections while the server is still replaying WAL is
