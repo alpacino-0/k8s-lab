@@ -1,9 +1,24 @@
 {{- if and .Values.postgres.enabled .Values.postgres.backup.enabled .Values.postgres.backup.verifyOnInstall }}
 # Takes one backup immediately after install/upgrade instead of waiting for the
-# nightly schedule. Two reasons:
+# nightly schedule, and then restores it. Two reasons for the timing:
 #   1. An untested backup is not a backup — this proves the path works on day one.
 #   2. It binds the backup PVC, which a WaitForFirstConsumer StorageClass would
 #      otherwise leave Pending until 02:00.
+#
+# "Restores it" is the half that was missing. gzip -t proves an archive is
+# readable, which is a claim about the file and not about the backup: a dump
+# truncated after the schema, or written by a pg_dump that failed halfway with
+# its exit status swallowed by the pipe, is perfectly readable and restores to
+# nothing. Everyone says they take backups. The claim worth making is that the
+# backup was restored and the rows were counted, and it is only worth making if
+# something actually did it.
+#
+# The restore runs against a private PostgreSQL this job starts in its own
+# container, on a unix socket, in an emptyDir that dies with the pod. Not a
+# throwaway database on the live server, which was the simpler option and is the
+# wrong one: a rehearsal that runs on a schedule must not be able to damage the
+# thing it is rehearsing for, and CREATE DATABASE on the instance serving
+# traffic is one bad interpolation away from doing exactly that.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -57,14 +72,73 @@ spec:
             - -c
             - |
               set -eu
+              # Without this the exit status of "pg_dump | gzip" is gzip's, and
+              # gzip is delighted to compress the partial output of a pg_dump
+              # that died — which is how a truncated dump becomes a backup that
+              # passes every check anything makes on the file. It matters again
+              # below, where gunzip feeds psql.
+              #
+              # If the shell does not support it, this line fails under set -e
+              # and the job stops on its first run. That is the right way to
+              # find out: loudly, and before anything has been called verified.
+              set -o pipefail
               until pg_isready -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q; do sleep 2; done
+
+              STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
               OUT="/backup/${POSTGRES_DB}-install-$(date +%Y%m%d-%H%M%S).sql.gz"
+
               pg_dump -h "$DB_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
                 --no-owner --no-privileges | gzip > "$OUT"
+
               gzip -t "$OUT"                       # the archive must be readable
               SIZE=$(wc -c < "$OUT")
               [ "$SIZE" -gt 100 ] || { echo "backup suspiciously small: $SIZE bytes"; exit 1; }
-              echo "verified backup $OUT ($SIZE bytes)"
+
+              # A PostgreSQL of its own, on a socket, in a directory that dies
+              # with this pod. Nothing here can reach the live server.
+              export PGDATA=/rehearsal/data
+              initdb --username=rehearsal --auth=trust >/dev/null
+              pg_ctl -o "-k /tmp -c listen_addresses=''" -w -l /tmp/pg.log start >/dev/null
+              trap 'pg_ctl -w stop >/dev/null 2>&1 || true' EXIT
+
+              PSQL="psql -h /tmp -U rehearsal -v ON_ERROR_STOP=1 -q"
+              $PSQL -d postgres -c "CREATE DATABASE rehearsal" >/dev/null
+
+              # ON_ERROR_STOP is the whole reason this is a proof. Without it
+              # psql exits zero after every single statement in the file has
+              # failed, and the rehearsal becomes a slower way of asserting that
+              # the archive decompresses.
+              gunzip -c "$OUT" | $PSQL -d rehearsal >/dev/null
+
+              # Counted, not estimated. n_live_tup is a planner statistic that
+              # reads zero until something runs ANALYZE, so a restore of a
+              # million rows reports nothing and the number on the page would be
+              # a measurement of when the last vacuum ran.
+              TABLES=$($PSQL -At -d rehearsal -c \
+                "SELECT schemaname||'.'||tablename FROM pg_tables
+                  WHERE schemaname NOT IN ('pg_catalog','information_schema')")
+              [ -n "$TABLES" ] || { echo "the restore produced no tables"; exit 1; }
+
+              ROWS=0
+              TABLE_COUNT=0
+              for t in $TABLES; do
+                n=$($PSQL -At -d rehearsal -c "SELECT count(*) FROM $t")
+                ROWS=$((ROWS + n))
+                TABLE_COUNT=$((TABLE_COUNT + 1))
+              done
+
+              FINISHED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+              echo "restored $OUT into a private instance: $TABLE_COUNT tables, $ROWS rows"
+
+              # Written beside the backup, on the volume that outlives this pod,
+              # because the sentence this exists to support — "the backup was
+              # last restored N hours ago, M rows verified" — has to be readable
+              # by something that was not here when it happened.
+              cat > /backup/last-restore.json <<JSON
+              {"startedAt":"$STARTED","finishedAt":"$FINISHED","archive":"$OUT",
+               "archiveBytes":$SIZE,"tables":$TABLE_COUNT,"rows":$ROWS,"restored":true}
+              JSON
+              echo "wrote /backup/last-restore.json"
           resources:
             {{- toYaml .Values.jobResources | nindent 12 }}
           volumeMounts:
@@ -72,10 +146,18 @@ spec:
               mountPath: /backup
             - name: tmp
               mountPath: /tmp
+            - name: rehearsal
+              mountPath: /rehearsal
       volumes:
         - name: backup
           persistentVolumeClaim:
             claimName: {{ include "postgres.fullname" . }}-backup
         - name: tmp
+          emptyDir: {}
+        # The restore target. emptyDir and not the backup PVC: a rehearsal that
+        # writes its scratch instance next to the archives it is verifying can
+        # fill the volume those archives live on, which turns a failed rehearsal
+        # into a failed backup.
+        - name: rehearsal
           emptyDir: {}
 {{- end }}

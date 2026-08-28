@@ -68,6 +68,13 @@ spec:
                 - -c
                 - |
                   set -eu
+                  # The exit status of "pg_dump | gzip" is gzip's, and gzip
+                  # succeeds on the partial output of a pg_dump that died. The
+                  # archive is then readable, gzip -t below passes, and the
+                  # nightly backup is silently truncated — a check on the file
+                  # rather than on the backup. The restore rehearsal in
+                  # backup-verify-job.yaml is the other half of that lesson.
+                  set -o pipefail
                   STAMP=$(date +%Y%m%d-%H%M%S)
                   OUT="/backup/${POSTGRES_DB}-${STAMP}.sql.gz"
                   echo "dumping to $OUT"

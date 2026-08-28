@@ -295,6 +295,31 @@ jobs:
           kubectl -n damga rollout status statefulset/app-postgres --timeout=300s
           kubectl -n damga rollout status deployment/app-damga-app --timeout=300s
 
+      # The chart's hook job already fails the install if the rehearsal fails,
+      # so this is not asserting that it ran. It is asserting what it found: a
+      # restore that produces an empty database is a restore, and "the backup
+      # was restored" is a sentence nobody should be able to say about one.
+      #
+      # Read from the job's log rather than the JSON it writes, because the JSON
+      # lives on the backup volume and reading it would need another pod — and a
+      # check that needs its own infrastructure is a check that gets removed the
+      # first time that infrastructure is inconvenient.
+      - name: The backup was restored, and the rows were counted
+        run: |
+          log=$(kubectl -n damga logs job/app-postgres-backup-verify --tail=-1)
+          echo "$log"
+          line=$(printf '%s\n' "$log" | grep '^restored ' || true)
+          [ -n "$line" ] || { echo "::error::nothing restored the backup"; exit 1; }
+
+          rows=$(printf '%s' "$line" | sed -n 's/.*, \([0-9][0-9]*\) rows$/\1/p')
+          tables=$(printf '%s' "$line" | sed -n 's/.*: \([0-9][0-9]*\) tables.*/\1/p')
+          echo "restored $tables tables, $rows rows"
+          [ "${tables:-0}" -gt 0 ] || { echo "::error::the restore produced no tables"; exit 1; }
+          # The demo app's schema is created by the migration job, which runs
+          # before this one — so a restore that finds no rows found a database
+          # the dump never captured.
+          [ "${rows:-0}" -gt 0 ] || { echo "::error::the restore produced no rows"; exit 1; }
+
       - name: The shared limit must bind across replicas
         run: |
           # With per-replica counters, N replicas give a client N times its
