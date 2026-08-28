@@ -257,11 +257,13 @@ jobs:
       - name: Approve kubelet serving certificates
         run: ./scripts/approve-kubelet-certs.sh
 
-      - name: Apply cluster policies
-        run: |
-          kubectl apply -f policies/namespace.yaml
-          kubectl apply -f policies/admission-policies.yaml -f policies/admission-bindings.yaml
-          kubectl apply -f policies/tenant-quota.yaml
+      # The directory rather than a list of files, because the list was wrong
+      # once already: the admission policies were deleted and this step went on
+      # naming them, which failed here and nowhere else — no local gate stands
+      # up a cluster. kubectl reads only .yaml, .yml and .json from a directory,
+      # so the README beside them is ignored.
+      - name: Apply the namespace and the tenant fence
+        run: kubectl apply -f policies/
 
       # The zero-downtime check below measures through the ingress controller,
       # the same path a real user takes. `kubectl port-forward` is bound to one
@@ -447,7 +449,7 @@ jobs:
           kubectl -n damga-platform-system rollout status \
             deployment/damga-platform-controller-manager --timeout=180s
 
-      - name: A Workload must reach Ready through the admission policies
+      - name: A Workload must reach Ready
         run: |
           # Unquoted delimiter on purpose: ${IMAGE_TAG} has to expand. With
           # <<'EOF' it reached the API server as a literal and the pods came up
@@ -491,6 +493,53 @@ jobs:
           [ "$(get '{.spec.containers[0].securityContext.capabilities.drop[0]}')" = ALL ] || { echo "capabilities kept"; exit 1; }
           [ "$(kubectl -n damga exec "$pod" -- id -u)" != 0 ] || { echo "effective uid is 0"; exit 1; }
           echo "the operator's output satisfies the cluster's own policies"
+
+      # The one thing envtest cannot answer about volumes. It has an API
+      # server and no scheduler, so a claim binds nowhere and a pod never runs
+      # — and the failure this guards against is precisely a pod that will not
+      # start: ReadWriteOnce plus a rolling update deadlocks, the new pod waits
+      # for a volume the old one holds, and the old one keeps serving while the
+      # deploy fails. Recreate is the fix and this is where it is proved.
+      - name: A Workload with a volume must bind it and roll
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: platform.damga.co/v1alpha1
+          kind: Workload
+          metadata:
+            name: ci-stateful
+            namespace: damga
+          spec:
+            image: damga-app:${IMAGE_TAG}
+            port: 3000
+            volumes:
+              - name: data
+                path: /var/lib/app
+                size: 128Mi
+          EOF
+          if ! kubectl -n damga wait --for=condition=Ready workload/ci-stateful --timeout=180s; then
+            kubectl -n damga get pvc,pod -l app.kubernetes.io/instance=ci-stateful -o wide
+            kubectl -n damga describe pvc ci-stateful-data | tail -20
+            exit 1
+          fi
+          [ "$(kubectl -n damga get deploy ci-stateful -o jsonpath='{.spec.strategy.type}')" = Recreate ] \
+            || { echo "a workload with a volume is still rolling"; exit 1; }
+          [ "$(kubectl -n damga get pvc ci-stateful-data -o jsonpath='{.status.phase}')" = Bound ] \
+            || { echo "the claim never bound"; exit 1; }
+
+          # A second rollout over the same claim. The deadlock this guards
+          # against only appears on the *update*, so creating it once proves
+          # nothing about it.
+          kubectl -n damga patch workload ci-stateful --type=merge \
+            -p '{"spec":{"env":[{"name":"ROLLED","value":"1"}]}}'
+          kubectl -n damga rollout status deploy/ci-stateful --timeout=180s
+
+          # Deleting the workload must not delete the data. An owner reference
+          # here would take a tenant's volume on the next redeploy.
+          kubectl -n damga delete workload ci-stateful
+          sleep 5
+          [ "$(kubectl -n damga get pvc ci-stateful-data -o jsonpath='{.status.phase}')" = Bound ] \
+            || { echo "deleting the workload deleted its data"; exit 1; }
+          kubectl -n damga delete pvc ci-stateful-data
 
       - name: Deleting the Workload must leave nothing behind
         run: |
