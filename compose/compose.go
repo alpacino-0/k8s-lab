@@ -18,10 +18,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // Package compose turns a Docker Compose service definition into the resources
 // this platform runs.
 //
-// It exists twice over. A user migrating from Coolify or Dokploy arrives with a
-// compose file and should not have to learn what a Deployment is to bring it;
-// and the catalogue — the one-click n8n, Ghost, Plausible — is a directory of
-// compose files. Both are the same conversion, so it is written once.
+// It exists for the catalogue: the one-click n8n, Ghost or Plausible is a
+// compose file, and turning one into a Workload is what makes the click do
+// anything.
+//
+// Pasting an arbitrary compose file through it works, and that is a side effect
+// rather than a feature. Importing somebody's existing installation would mean
+// reading their platform's database, enumerating their applications and mapping
+// their domains — none of which is here, and none of which this package should
+// be read as promising.
 //
 // # What it refuses to do
 //
