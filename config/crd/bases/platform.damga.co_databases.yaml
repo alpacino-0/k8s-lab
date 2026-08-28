@@ -1,0 +1,357 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: databases.platform.damga.co
+spec:
+  group: platform.damga.co
+  names:
+    kind: Database
+    listKind: DatabaseList
+    plural: databases
+    shortNames:
+    - db
+    singular: database
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.host
+      name: Host
+      type: string
+    - jsonPath: .status.lastRestore.finishedAt
+      name: Restored
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Database is a PostgreSQL server this platform runs for one app environment.
+
+          # Why it is not a field on Workload
+
+          The obvious shape is spec.database on the Workload, and it is the shape that
+          loses data. Everything a Workload renders carries an owner reference to it,
+          which is what makes `kubectl delete workload` clean up — and a StatefulSet's
+          PersistentVolumeClaims would go the same way. Deleting an app would delete
+          its database, permanently, through a cascade nobody typed.
+
+          The lifecycles are genuinely different, which is the real reason rather than
+          the consequence. An app is redeployed many times a day and its database
+          outlives every one of those deploys; an app can be deleted and recreated
+          against data that has to still be there. Two objects with different
+          lifetimes do not belong in one.
+
+          # What connects them
+
+          The Workload names a Database by name in its own namespace, and nothing more
+          — no owner reference in either direction. The Database publishes its
+          credentials as a Secret, which the Workload already knows how to consume
+          through envFrom. That is the whole coupling: a name and a Secret.
+
+          Deliberately not a cross-namespace reference. A Secret readable from another
+          namespace is a tenant boundary with a hole in it, and the namespace-per-tenant
+          arrangement is what makes the reference safe without another check.
+
+          # Why the platform runs it at all
+
+          One replica, no failover, no connection pooler. That is a real limit and it
+          is stated rather than implied: this is the database a small team gets for
+          free without operating one, and it is not a managed service. An install that
+          needs high availability points its apps at something else, which the same
+          envFrom seam already allows.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: DatabaseSpec is what the tenant asks for.
+            properties:
+              backup:
+                description: |-
+                  Backup is what is taken, how often, and how long it is kept. Absent means
+                  no backups, which is a choice a tenant is allowed to make and not a
+                  default they can arrive at by not reading.
+                properties:
+                  rehearse:
+                    default: true
+                    description: |-
+                      Rehearse restores each backup into a throwaway instance and counts the
+                      rows, instead of only checking that the archive is readable.
+
+                      On by default, and that is the product's whole claim about backups: an
+                      archive that decompresses is a file, and a dump truncated after the
+                      schema is a readable file holding nothing. Turning it off is allowed —
+                      it costs CPU and time on a large database — and the evidence surface says
+                      which of the two claims an install is entitled to make.
+                    type: boolean
+                  retainDays:
+                    default: 7
+                    description: RetainDays is how long an archive is kept.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  schedule:
+                    default: 0 2 * * *
+                    description: Schedule is a cron expression in the cluster's timezone.
+                    type: string
+                  storage:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      Storage is the size of the volume the archives live on. It is separate
+                      from the data volume so that filling it with backups cannot stop the
+                      database from accepting writes.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                    x-kubernetes-validations:
+                    - message: storage must be greater than zero
+                      rule: quantity(self).isGreaterThan(quantity('0'))
+                required:
+                - storage
+                type: object
+              database:
+                default: app
+                description: Database is the database name inside the server.
+                pattern: ^[a-z][a-z0-9_]*$
+                type: string
+              image:
+                description: |-
+                  Image is the PostgreSQL image to run.
+
+                  Pinned by the tenant rather than chosen by the platform, and refused if
+                  it floats: PostgreSQL will not start on a data directory written by a
+                  newer major version, so an image that moves is an outage on the next pod
+                  restart, at a moment nothing connects to the change that caused it.
+                minLength: 1
+                type: string
+                x-kubernetes-validations:
+                - message: image must carry an explicit tag or digest
+                  rule: self.contains('@') || self.split('/')[int(self.split('/').size())
+                    - 1].contains(':')
+                - message: image must not use the :latest tag
+                  rule: '!self.endsWith('':latest'')'
+              resources:
+                description: |-
+                  Resources is what the container asks for and what it may not exceed. Both are
+                  required: a pod with no request is scheduled blind and a pod with no memory
+                  limit can take a node down with it. The admission policy rejects workloads
+                  that omit either, so there is no point in letting a Workload omit them.
+
+                  Raising only the request past the default limit is an easy mistake to make and
+                  produces a Deployment the API server refuses, so it is caught at admission
+                  where the message can name the field.
+                properties:
+                  cpuRequest:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    default: 100m
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  memoryLimit:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    default: 512Mi
+                    description: |-
+                      There is deliberately no CPU limit. CPU is compressible — throttling a
+                      container is better than the latency cliff a limit produces — while memory
+                      is not, so exceeding it has to mean eviction.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  memoryRequest:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    default: 128Mi
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                type: object
+                x-kubernetes-validations:
+                - message: memoryLimit must be greater than or equal to memoryRequest
+                  rule: quantity(self.memoryLimit).compareTo(quantity(self.memoryRequest))
+                    >= 0
+              storage:
+                anyOf:
+                - type: integer
+                - type: string
+                description: |-
+                  Storage is how much disk the data directory gets.
+
+                  No default, on purpose. Every other size in this API has one because
+                  getting it wrong costs a restart; this one cannot be changed downwards at
+                  all and is expensive to change upwards, so it is the tenant's answer and
+                  not the platform's guess.
+
+                  Required is not enough on its own, which a test found rather than a
+                  review: a zero Quantity serialises as "0", so the field is present, the
+                  required list is satisfied, and the platform goes on to ask for a
+                  zero-byte volume. Absent and zero are both "no answer" here and both have
+                  to be refused.
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+                x-kubernetes-validations:
+                - message: storage must be greater than zero
+                  rule: quantity(self).isGreaterThan(quantity('0'))
+              storageClass:
+                description: |-
+                  StorageClass selects the volume type. Empty means the cluster default,
+                  which is what a single-node install has.
+                type: string
+              username:
+                default: app
+                description: Username is the role the application connects as.
+                pattern: ^[a-z][a-z0-9_]*$
+                type: string
+            required:
+            - image
+            - storage
+            type: object
+          status:
+            description: DatabaseStatus reports what the platform observed.
+            properties:
+              conditions:
+                description: |-
+                  Conditions follows the standard convention: Ready says whether the server
+                  is accepting connections.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              host:
+                description: Host is where the server answers inside the cluster.
+                type: string
+              lastRestore:
+                description: |-
+                  LastRestore is the most recent rehearsal, and it is the reason this type
+                  carries a status at all beyond Ready.
+
+                  "The backup was last restored three hours ago, 1,284 rows verified" is a
+                  sentence about the past, and a page that has to say it cannot compute it
+                  from anything live. Somebody has to have written down that it happened.
+                properties:
+                  archive:
+                    description: Archive is the file that was restored.
+                    type: string
+                  finishedAt:
+                    description: FinishedAt is when the rehearsal completed.
+                    format: date-time
+                    type: string
+                  rows:
+                    description: |-
+                      Rows and Tables are what came back out of it.
+
+                      Rows is a count and not an estimate, and zero is a legitimate answer for
+                      a database nothing has written to. It is compared against the source
+                      rather than against a threshold, because any threshold is wrong for one
+                      of those two cases.
+                    format: int64
+                    type: integer
+                  sourceRows:
+                    description: |-
+                      SourceRows is what the live database held when the archive was taken, so
+                      a reader can see that everything came back rather than merely that
+                      something did.
+                    format: int64
+                    type: integer
+                  tables:
+                    format: int32
+                    type: integer
+                required:
+                - finishedAt
+                - rows
+                - sourceRows
+                - tables
+                type: object
+              observedGeneration:
+                format: int64
+                type: integer
+              secretName:
+                description: |-
+                  SecretName is where the credentials are, for a Workload to name in
+                  envFrom. Reported rather than assumed, so the name can change without
+                  every consumer having to know the rule that produced it.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
