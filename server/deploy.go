@@ -28,6 +28,7 @@ import (
 	platformv1alpha1 "github.com/damgahq/damga/api/v1alpha1"
 	"github.com/damgahq/damga/authz"
 	"github.com/damgahq/damga/evidence"
+	"github.com/damgahq/damga/forge"
 	"github.com/damgahq/damga/internal/gitwrite"
 	"github.com/damgahq/damga/internal/manifest"
 	"github.com/damgahq/damga/placement"
@@ -58,10 +59,13 @@ type deployRequest struct {
 // point the only thing that is true is that a commit was pushed.
 // deployRoute is the table-shaped entry point; deploy is what it is.
 func deployRoute(g guard, st stores) http.Handler {
-	return deploy(g, st.writer, st.placement, st.gitAuth)
+	return deploy(g, st.writer, st.placement, st.forge, st.gitAuth)
 }
 
-func deploy(g guard, w *gitwrite.Writer, places placement.Store, auth GitAuth) http.Handler {
+func deploy(
+	g guard, w *gitwrite.Writer, places placement.Store,
+	connections forge.Store, auth GitAuth,
+) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		sub, ref, ok := g.admit(rw, r, authz.ActionAppDeploy)
 		if !ok {
@@ -92,6 +96,24 @@ func deploy(g guard, w *gitwrite.Writer, places placement.Store, auth GitAuth) h
 			return
 		}
 
+		// The connection is optional and its absence is not an error: an app
+		// nobody has connected to a repository still deploys, it just deploys
+		// without anything checking who signed the image. Refusing here would
+		// make connecting a prerequisite for the platform working at all, which
+		// is the opposite of the adoption the free tier is for.
+		var conn *forge.Connection
+		if connections != nil {
+			got, err := connections.Get(r.Context(), forge.Key{TenantID: ref.TenantID, App: ref.App})
+			switch {
+			case errors.Is(err, forge.ErrNotFound):
+			case err != nil:
+				problem(rw, http.StatusInternalServerError, "reading the connection failed")
+				return
+			default:
+				conn = &got
+			}
+		}
+
 		method, err := auth.For(place.RepoURL)
 		if err != nil {
 			problem(rw, http.StatusInternalServerError, err.Error())
@@ -112,7 +134,7 @@ func deploy(g guard, w *gitwrite.Writer, places placement.Store, auth GitAuth) h
 			// could set is a licence check with a JSON field for a bypass.
 			Tier:    evidence.Tier(sub.Tier),
 			Message: fmt.Sprintf("deploy %s to %s/%s", req.Image, ref.App, ref.Env),
-			Render:  renderDeploy(place, req),
+			Render:  renderDeploy(place, req, conn),
 		})
 		switch {
 		case errors.Is(err, gitwrite.ErrNoChange):
@@ -141,7 +163,23 @@ type renderFunc = func(rolloutID string, current map[string][]byte) (map[string]
 // control plane's database. The committed file is the state, so the panel and
 // the cluster cannot drift apart — and a field the request does not mention
 // keeps the value somebody set last time rather than the type's zero.
-func renderDeploy(place placement.Placement, req deployRequest) renderFunc {
+// The signature policy travels with the manifest it protects.
+//
+// Written into the same directory, by the same path, in the same commit — which
+// makes it desired state like everything else here rather than something a
+// second reconciler applies out of band. Three things follow from that and each
+// is the reason not to do it another way: damga stays the only writer, so the
+// rule that admits an image is under the same authorship as the image; the
+// evidence record covers the policy as well as the workload, so "what was
+// enforcing when this deployed" is answerable; and the policy is rendered in
+// exactly one place, so it cannot drift from the workflow it pins the way a
+// second renderer in the operator would.
+//
+// Reconciled on every deploy rather than when the connection changes. The bytes
+// are identical when nothing moved, so an unchanged policy costs nothing — and
+// the transition out of audit mode lands on the next deploy, which is also when
+// it starts mattering.
+func renderDeploy(place placement.Placement, req deployRequest, conn *forge.Connection) renderFunc {
 	return func(rolloutID string, current map[string][]byte) (map[string][]byte, error) {
 		app := platformv1alpha1.Workload{}
 		if body, ok := current[manifest.File]; ok {
@@ -178,6 +216,19 @@ func renderDeploy(place placement.Placement, req deployRequest) renderFunc {
 		if err != nil {
 			return nil, err
 		}
-		return map[string][]byte{manifest.File: body}, nil
+		out := map[string][]byte{manifest.File: body}
+
+		if conn != nil {
+			// The namespace comes from the placement, which is the same source
+			// the manifest above takes it from. A policy scoped somewhere the
+			// workload does not run applies to nothing while looking like a
+			// rule in force.
+			policy, err := conn.Policy(place.Namespace)
+			if err != nil {
+				return nil, fmt.Errorf("rendering the signature policy: %w", err)
+			}
+			out[forge.PolicyFile] = policy
+		}
+		return out, nil
 	}
 }

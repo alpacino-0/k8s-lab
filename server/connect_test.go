@@ -20,14 +20,21 @@ package server_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+
+	"github.com/damgahq/damga/evidence/memory"
 	"github.com/damgahq/damga/forge"
 	forgemem "github.com/damgahq/damga/forge/memory"
 	"github.com/damgahq/damga/identity"
+	"github.com/damgahq/damga/placement"
+	placementmem "github.com/damgahq/damga/placement/memory"
 	"github.com/damgahq/damga/server"
 )
 
@@ -232,4 +239,116 @@ func TestConnectingWorksWithNothingConfigured(t *testing.T) {
 			"that configures no DSN gets an in-process store for everything else",
 			code, body)
 	}
+}
+
+// The policy that admits an image travels in the same commit as the image.
+//
+// Written by the same path, into the same directory, under the same authorship.
+// The alternatives were a second reconciler applying it out of band, which
+// makes damga stop being the only writer, and rendering it in the operator,
+// which would put a second copy of the policy renderer somewhere it can drift
+// from the workflow it pins.
+func TestADeployCommitsTheSignaturePolicyBesideTheWorkload(t *testing.T) {
+	repo := bareRepo(t)
+	places := placementmem.New()
+	if _, err := places.Put(t.Context(), placement.Placement{
+		TenantID: testTenant, App: testApp, Env: testEnv,
+		RepoURL: repo, Branch: testBranch, Path: testPath, Namespace: testNamespace,
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	conns := forgemem.New()
+
+	base := start(t, server.Options{
+		Evidence: memory.New(0), Placement: places, Forge: conns,
+		GitAuth:  localAuth{},
+		Identity: identityWith(t, identity.RoleOwner),
+	})
+	session := login(t, base)
+
+	if code, body := put(t, connectionURL(base), connectBody, session); code != http.StatusCreated {
+		t.Fatalf("connecting = %d %q", code, body)
+	}
+
+	deployURL := fmt.Sprintf("%s/api/v1/tenants/%s/apps/%s/envs/%s/deploys",
+		base, testTenant, testApp, testEnv)
+	if code, body := post(t, deployURL, `{"image":"ghcr.io/acme/api:1.0.0"}`, session); code != http.StatusAccepted {
+		t.Fatalf("deploy = %d %q, want 202", code, body)
+	}
+
+	policy := committedFile(t, repo, testPath+"/"+forge.PolicyFile)
+	for _, want := range []string{
+		"kind: Policy",
+		"namespace: " + testNamespace,
+		"https://github.com/acme/api/" + server.DefaultWorkflowPath + "@refs/heads/main",
+		"githubWorkflowTrigger: push",
+	} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("the committed policy has no %q:\n%s", want, policy)
+		}
+	}
+	// Nothing has verified this connection, so the rule records rather than
+	// rejects. The other way round refuses the deploy that was just made.
+	if !strings.Contains(policy, "validationFailureAction: Audit") {
+		t.Errorf("the policy enforces on a connection nothing has verified:\n%s", policy)
+	}
+}
+
+// An app nobody connected still deploys, and no policy appears beside it.
+//
+// Refusing an unconnected deploy would make connecting a prerequisite for the
+// platform working at all, which is the opposite of what the free tier is for.
+// Writing an empty or inert policy would be worse: a rule that admits anything
+// looks from the outside exactly like a rule that is doing its job.
+func TestAnUnconnectedAppDeploysWithNoPolicy(t *testing.T) {
+	repo := bareRepo(t)
+	places := placementmem.New()
+	if _, err := places.Put(t.Context(), placement.Placement{
+		TenantID: testTenant, App: testApp, Env: testEnv,
+		RepoURL: repo, Branch: testBranch, Path: testPath, Namespace: testNamespace,
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	base := start(t, server.Options{
+		Evidence: memory.New(0), Placement: places, Forge: forgemem.New(),
+		GitAuth:  localAuth{},
+		Identity: identityWith(t, identity.RoleOwner),
+	})
+	session := login(t, base)
+
+	deployURL := fmt.Sprintf("%s/api/v1/tenants/%s/apps/%s/envs/%s/deploys",
+		base, testTenant, testApp, testEnv)
+	if code, body := post(t, deployURL, `{"image":"ghcr.io/acme/api:1.0.0"}`, session); code != http.StatusAccepted {
+		t.Fatalf("deploying an unconnected app = %d %q, want 202 — connecting is not a "+
+			"prerequisite for the platform working", code, body)
+	}
+
+	if _, err := commitFileOrNil(t, repo, testPath+"/"+forge.PolicyFile); err == nil {
+		t.Error("a signature policy was committed for an app connected to nothing, " +
+			"so admission would be checking a signer that was never chosen")
+	}
+}
+
+// commitFileOrNil is committedFile without the fatal, for asserting a file is
+// absent.
+func commitFileOrNil(t *testing.T, repoPath, name string) (string, error) {
+	t.Helper()
+	repo, err := git.PlainOpen(repoPath)
+	if err != nil {
+		t.Fatalf("open remote: %v", err)
+	}
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName("main"), true)
+	if err != nil {
+		t.Fatalf("resolve main: %v", err)
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	f, err := commit.File(name)
+	if err != nil {
+		return "", err
+	}
+	return f.Contents()
 }

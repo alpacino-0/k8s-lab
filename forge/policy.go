@@ -25,6 +25,14 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
+// PolicyFile is what the rendered policy is called inside a placement's
+// directory, beside the workload manifest.
+//
+// Fixed rather than derived, for the reason manifest.File is: the directory
+// already names the app, and a second copy of the name in the filename is a
+// second thing to keep in step.
+const PolicyFile = "signature-policy.yaml"
+
 // The two things a rendered policy can do, and the transition between them is
 // the only one this package has: recording until a signature carrying this
 // identity has been seen, rejecting afterwards.

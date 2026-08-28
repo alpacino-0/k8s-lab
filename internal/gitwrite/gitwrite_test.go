@@ -436,3 +436,59 @@ func keysOf(m map[string][]byte) []string {
 	slices.Sort(out)
 	return out
 }
+
+// What Render returns is written; what it leaves out is left alone.
+//
+// A characterisation test, and it is here because the semantics are load-bearing
+// and were incidental. Render's map is a set of files to write, not the desired
+// contents of the directory — so a caller that stops returning a name does not
+// remove the file, it stops updating it. Nothing said so, and the first caller
+// to assume the other reading will leave a manifest in git that the control
+// plane believes it has retracted.
+//
+// It matters most for anything conditional. The signature policy is written
+// beside the workload manifest only while the app is connected to a repository;
+// disconnecting it cannot take the file away through this path, so a policy
+// enforcing an identity nothing is connected to any more would stay in git,
+// keep being applied, and reject every deploy of that app. Until this path can
+// express a deletion, the rule is that a conditional file may be added and
+// changed here but never withdrawn — which is why nothing offers to disconnect.
+func TestRenderWritesWhatItReturnsAndLeavesTheRestAlone(t *testing.T) {
+	url := remote(t)
+	w := newWriter(memory.New(0))
+	ctx := context.Background()
+
+	two := func(string, map[string][]byte) (map[string][]byte, error) {
+		return map[string][]byte{
+			"workload.yaml": []byte("kind: Workload\nspec: {image: a}\n"),
+			"extra.yaml":    []byte("kind: Extra\n"),
+		}, nil
+	}
+	if _, err := w.Deploy(ctx, request(url, two)); err != nil {
+		t.Fatalf("first deploy: %v", err)
+	}
+
+	// The second render knows only about one of them.
+	one := func(string, map[string][]byte) (map[string][]byte, error) {
+		return map[string][]byte{
+			manifestPath: []byte("kind: Workload\nspec: {image: b}\n"),
+		}, nil
+	}
+	if _, err := w.Deploy(ctx, request(url, one)); err != nil {
+		t.Fatalf("second deploy: %v", err)
+	}
+
+	var seen []byte
+	if _, err := w.Deploy(ctx, request(url, func(_ string, current map[string][]byte) (map[string][]byte, error) {
+		seen = current["extra.yaml"]
+		return map[string][]byte{manifestPath: []byte("kind: Workload\nspec: {image: c}\n")}, nil
+	})); err != nil {
+		t.Fatalf("third deploy: %v", err)
+	}
+
+	if seen == nil {
+		t.Error("a file the previous render omitted was removed; every caller of this " +
+			"package is written as though omission means \"leave it\", and one that " +
+			"means \"delete it\" would drop whatever else lives in the directory")
+	}
+}
