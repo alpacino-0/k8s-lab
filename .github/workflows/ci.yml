@@ -481,6 +481,14 @@ jobs:
       # Reading the rendered pod back rather than the operator's own source. The
       # unit tests already prove the renderer intends this; this proves the API
       # server accepted it, which is a different claim.
+      # The observer reads ReplicaFailure off a Deployment and quotes its message
+      # as the reason a deploy was refused. Both halves are Kubernetes' doing,
+      # and envtest runs neither the ReplicaSet controller nor an admission
+      # webhook — so the unit tests write the condition by hand and prove the
+      # reading, and this proves there is something to read.
+      - name: A refused deploy says so on the Deployment
+        run: NS=damga IMAGE="damga-app:${IMAGE_TAG}" ./scripts/refusal-probe.sh
+
       - name: The rendered pod must actually carry the hardening
         run: |
           pod=$(kubectl -n damga get pod -l app.kubernetes.io/instance=ci-probe \

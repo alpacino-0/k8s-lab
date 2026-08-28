@@ -44,6 +44,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -212,6 +213,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		},
 		Image:        admittedImage(&deploy),
 		Signature:    verdict,
+		Admission:    admissionOutcome(&deploy, want),
 		ExpectEvents: &version,
 	})
 	switch {
@@ -285,6 +287,13 @@ func derive(d *appsv1.Deployment) (evidence.State, string) {
 		d.Status.ReadyReplicas == want &&
 		d.Status.Replicas == want:
 		return evidence.StateRunning, "every replica is updated and ready"
+	case admissionRefused(d) != nil:
+		// The pods were refused before they existed. This is the state the
+		// product's whole claim rests on being able to reach: without it a
+		// deploy that admission rejected sits at "applied" until the sweep
+		// gives up and marks it unknown, and the page cannot say why — on a
+		// page whose entire reason to exist is saying why.
+		return evidence.StateRejected, admissionRefused(d).Message
 	case progressDeadlineExceeded(d):
 		// The only failure a Deployment reports about itself, and it can only
 		// arrive while a rollout is in flight: the deployment controller stops
@@ -329,6 +338,12 @@ func allowedFrom(to evidence.State) []evidence.State {
 		}
 	case evidence.StateFailed:
 		return []evidence.State{evidence.StatePending, evidence.StateSyncing, evidence.StateApplied}
+	case evidence.StateRejected:
+		// Not from Applied or Running. Admission refuses an object before it
+		// exists, so a deploy that reached either of those was admitted — and a
+		// later refusal is a different deploy with a record of its own. Coming
+		// back from Running would rewrite the history of one that ran.
+		return []evidence.State{evidence.StatePending, evidence.StateSyncing, evidence.StateUnknown}
 	default:
 		return nil
 	}
@@ -368,6 +383,59 @@ func passedDigest(d *appsv1.Deployment) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// admissionRefused returns the condition saying pods could not be created, or
+// nil.
+//
+// ReplicaFailure is the one thing a Deployment says about admission. The
+// ReplicaSet controller sets it when it cannot create pods and the deployment
+// controller copies it up, so a webhook denial — an unsigned image, a policy
+// violation — arrives here carrying the admission message verbatim. That
+// message is the answer to "why is my deploy not running", and it is quotable
+// to the person who asked.
+//
+// Only while it is True. The condition is not removed when the problem clears;
+// it flips to False, and a stale True would report a deploy as refused because
+// an earlier one was.
+func admissionRefused(d *appsv1.Deployment) *appsv1.DeploymentCondition {
+	for i := range d.Status.Conditions {
+		c := &d.Status.Conditions[i]
+		if c.Type == appsv1.DeploymentReplicaFailure && c.Status == corev1.ConditionTrue {
+			return c
+		}
+	}
+	return nil
+}
+
+// admissionOutcome is what the record gets to say about admission.
+//
+// Both answers, not one. "Refused, and here is what the webhook said" is the
+// obvious half; "admitted" is the half that was missing, and its absence is why
+// every record ever written carried Allowed:false and the page called every
+// deploy refused. A record that cannot say it was admitted is a record that
+// says the opposite by default.
+func admissionOutcome(d *appsv1.Deployment, state evidence.State) *evidence.AdmissionOutcome {
+	if c := admissionRefused(d); c != nil {
+		return &evidence.AdmissionOutcome{
+			Allowed: false, Reason: c.Reason, Message: c.Message,
+		}
+	}
+	switch state {
+	case evidence.StateApplied, evidence.StateRunning:
+		// The objects exist, which is a thing admission had to allow. Not
+		// inferred from the absence of a refusal — inferred from pods that are
+		// there, which is positive evidence.
+		return &evidence.AdmissionOutcome{
+			Allowed: true, Reason: "Admitted",
+			Message: "the objects were admitted and the pods exist",
+		}
+	default:
+		// Nothing observed yet. Deliberately no outcome rather than a cheerful
+		// one: a record claiming it was admitted before anything was created
+		// is the same lie in the other direction.
+		return nil
+	}
 }
 
 // signatureVerdict is what the record gets to say about the supply chain.

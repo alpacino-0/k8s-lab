@@ -607,3 +607,129 @@ func TestOnlyAPassMarksAConnectionVerified(t *testing.T) {
 		})
 	}
 }
+
+// refused writes the status a Deployment carries when admission would not let
+// its pods exist.
+//
+// envtest runs no ReplicaSet controller, so the condition has to be written by
+// hand — the same arrangement as seeding another controller's annotation. The
+// shape is Kubernetes': the ReplicaSet controller sets ReplicaFailure when it
+// cannot create pods, the deployment controller copies it up, and the webhook's
+// own sentence arrives in Message. That the real thing does this is proved in
+// CI against a cluster with admission policies, not here.
+func (f *fixture) refused(t *testing.T, d *appsv1.Deployment, reason, message string) {
+	t.Helper()
+	d.Status = appsv1.DeploymentStatus{
+		ObservedGeneration: d.Generation,
+		Conditions: []appsv1.DeploymentCondition{{
+			Type: appsv1.DeploymentReplicaFailure, Status: corev1.ConditionTrue,
+			Reason: reason, Message: message, LastUpdateTime: metav1.Now(),
+		}},
+	}
+	if err := f.c.Status().Update(context.Background(), d); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+}
+
+// The state nothing could ever reach, and the question the product exists to
+// answer.
+//
+// Admission refusing a deploy is the single most likely reason somebody opens
+// this page — an unsigned image, a policy violation — and until now the record
+// sat at "applied" until the sweep gave up and marked it unknown. The page
+// could not say why, on a page whose entire reason to exist is saying why.
+func TestARefusedDeployIsRecordedAsRejectedWithTheReason(t *testing.T) {
+	f := newFixture(t)
+	const msg = `admission webhook "kyverno-resource-validating-webhook-cfg" denied ` +
+		`the request: image ghcr.io/acme/api:1.0.0 is not signed`
+
+	d := f.deploy(t, map[string]string{deploywatch.RolloutAnnotation: string(f.record.ID)})
+	f.refused(t, d, "FailedCreate", msg)
+	f.reconcile(t)
+
+	got := f.state(t)
+	if got.State != evidence.StateRejected {
+		t.Fatalf("state = %q, want rejected — a deploy admission refused sat at %q, "+
+			"and the sweep would eventually call it unknown", got.State, got.State)
+	}
+	if !got.Admission.Allowed == false && got.Admission.Message == "" {
+		t.Error("the outcome carries no message")
+	}
+	if got.Admission.Allowed {
+		t.Error("a refused deploy is recorded as admitted")
+	}
+	// Quotable to the person who asked. A reason of "rejected" tells them
+	// nothing they did not already see on the page.
+	if !strings.Contains(got.Admission.Message, "is not signed") {
+		t.Errorf("the webhook's own sentence did not reach the record: %q", got.Admission.Message)
+	}
+}
+
+// The other half, and the one whose absence made the page call every deploy
+// refused: a record has to be able to say it was admitted.
+func TestAnAdmittedDeploySaysSo(t *testing.T) {
+	f := newFixture(t)
+	d := f.deploy(t, map[string]string{deploywatch.RolloutAnnotation: string(f.record.ID)})
+	f.settled(t, d, 2)
+	f.reconcile(t)
+
+	got := f.state(t)
+	if got.State != evidence.StateRunning {
+		t.Fatalf("state = %q, want running", got.State)
+	}
+	if !got.Admission.Allowed {
+		t.Error("a deploy whose pods are running is recorded as not admitted; every " +
+			"record ever written carried this and the page called them all refused")
+	}
+}
+
+// A refusal that has cleared is not a refusal. The condition is not removed
+// when the problem goes away — it flips to False — so a reader that only checks
+// the type reports a deploy as refused because an earlier one was.
+func TestAClearedRefusalIsNotARefusal(t *testing.T) {
+	f := newFixture(t)
+	d := f.deploy(t, map[string]string{deploywatch.RolloutAnnotation: string(f.record.ID)})
+
+	d.Status = appsv1.DeploymentStatus{
+		ObservedGeneration: d.Generation,
+		Replicas:           2, UpdatedReplicas: 2, ReadyReplicas: 2, AvailableReplicas: 2,
+		Conditions: []appsv1.DeploymentCondition{{
+			Type: appsv1.DeploymentReplicaFailure, Status: corev1.ConditionFalse,
+			Reason: "SlowStartFailure", Message: "an earlier attempt could not create pods",
+			LastUpdateTime: metav1.Now(),
+		}},
+	}
+	if err := f.c.Status().Update(context.Background(), d); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	f.reconcile(t)
+
+	got := f.state(t)
+	if got.State == evidence.StateRejected {
+		t.Error("a condition that had flipped to False was read as a refusal")
+	}
+	if !got.Admission.Allowed {
+		t.Error("the deploy is running and is not recorded as admitted")
+	}
+}
+
+// A deploy that ran cannot become refused. Admission acts before an object
+// exists, so a later refusal belongs to a different deploy with a record of its
+// own — and moving this one back would rewrite the history of something that
+// demonstrably ran.
+func TestRunningIsNotRewrittenByALaterRefusal(t *testing.T) {
+	f := newFixture(t)
+	d := f.deploy(t, map[string]string{deploywatch.RolloutAnnotation: string(f.record.ID)})
+	f.settled(t, d, 2)
+	f.reconcile(t)
+	if f.state(t).State != evidence.StateRunning {
+		t.Fatal("the fixture did not reach running")
+	}
+
+	f.refused(t, d, "FailedCreate", "denied later")
+	f.reconcile(t)
+
+	if got := f.state(t); got.State != evidence.StateRunning {
+		t.Errorf("state = %q; a record that reached running was rewritten", got.State)
+	}
+}
