@@ -69,6 +69,21 @@ const (
 	//
 	//	{"ghcr.io/damgahq/damga@sha256:f8b41ad0…":"pass"}
 	//
+	// Read off the Deployment, and that is measured rather than assumed. The
+	// policy matches Pods and Kyverno autogenerates the rule that covers pod
+	// controllers, so where the annotation lands is upstream's decision. On the
+	// installed version, with a signed image and an auditing policy:
+	//
+	//	deployment metadata : {"ghcr.io/…@sha256:83b4496a…":"pass"}
+	//	pod template        : <absent>
+	//	pod metadata        : {"ghcr.io/…@sha256:83b4496a…":"pass"}
+	//
+	// The Deployment and the Pod carry it; the pod template does not — which is
+	// the one that would have mattered, because a template annotation is part
+	// of the hash the deployment controller rolls on. scripts/verdict-probe.sh
+	// is where that comes from and it runs in CI, so a version of Kyverno that
+	// moves it fails there rather than here.
+	//
 	// Its ABSENCE is a signal in its own right, and the one this project got
 	// wrong once already: an image no rule matched produces no annotation, and
 	// rendering that the same as "verified" is how an evidence page lies.

@@ -96,13 +96,24 @@ fi
 # Deployment created in that window is admitted by nobody — which reads exactly
 # like "Kyverno does not annotate in audit mode".
 echo "== waiting for the policy to be ready =="
+# .status.ready was a guess and the first successful run said so: it printed
+# "unknown" every time and the loop simply ran out, which turned a wait into a
+# sixty-second sleep that happened to be long enough. A wait that never observes
+# what it waits for is a sleep with a misleading name.
+#
+# Both spellings are read now — Kyverno has moved this between a bare field and
+# a condition across versions — and the raw status is printed either way, so the
+# next person to touch this reads the shape instead of guessing it again.
+ready=""
 for _ in $(seq 1 30); do
-  ready=$(kubectl -n "$NS" get policy damga-image-signature \
-    -o jsonpath='{.status.ready}' 2>/dev/null)
-  [ "$ready" = "true" ] && break
+  ready=$(kubectl -n "$NS" get policy damga-image-signature -o jsonpath='{.status.ready}' 2>/dev/null)
+  [ -z "$ready" ] && ready=$(kubectl -n "$NS" get policy damga-image-signature \
+    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
+  case "$ready" in true|True) break ;; esac
   sleep 2
 done
-note "policy ready: ${ready:-unknown}"
+note "policy ready: ${ready:-<neither .status.ready nor a Ready condition>}"
+note "raw status: $(kubectl -n "$NS" get policy damga-image-signature -o jsonpath='{.status}' 2>/dev/null)"
 
 echo "== deploying the signed image =="
 kubectl -n "$NS" create deployment "$NAME" --image="$IMAGE" >/dev/null 2>&1 \

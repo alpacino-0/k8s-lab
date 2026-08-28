@@ -121,10 +121,16 @@ type Connection struct {
 	// nothing checks them, which delivers nothing but breaks nothing. So the
 	// rule is: record until there is proof the chain works, reject afterwards.
 	//
-	// Zero until something observes that signature. Nothing does yet; the
-	// observation belongs with the evidence the deploy path already writes,
-	// and until it exists every connection renders an auditing policy, which
-	// is the safe end of the wrong answer.
+	// Set by the observer, which reads the admission controller's own verdict
+	// off the Deployment.
+	//
+	// That this can ever happen is measured and not assumed, because the whole
+	// design turns on it: if the controller only recorded verdicts while
+	// enforcing, no connection would ever leave the auditing state its policy
+	// starts in, and the chain would stall one step from the end — silently, in
+	// the direction where nothing fails. It does record while auditing;
+	// scripts/verdict-probe.sh proves it against a real cluster on every run
+	// that publishes an image.
 	FirstSignatureAt time.Time
 
 	// Set by the store, ignored on the way in. UpdatedAt is what the drift
