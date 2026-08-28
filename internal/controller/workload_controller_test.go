@@ -276,7 +276,7 @@ var _ = Describe("Workload Controller", func() {
 	// checked here is one the attack was observed to change.
 	It("leaves an object it does not own exactly as it found it", func() {
 		// Quoted from the recorded attack rather than invented.
-		victimSelector := map[string]string{"app": "payments-backend"}
+		victimSelector := map[string]string{containerName: "payments-backend"}
 		foreign := &corev1.Service{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: name, Namespace: namespace,

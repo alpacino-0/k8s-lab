@@ -14,6 +14,17 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - serviceaccounts
   - services
   verbs:
@@ -28,6 +39,7 @@ rules:
   - apps
   resources:
   - deployments
+  - statefulsets
   verbs:
   - create
   - delete
@@ -64,6 +76,7 @@ rules:
 - apiGroups:
   - platform.damga.co
   resources:
+  - databases
   - workloads
   verbs:
   - create
@@ -76,16 +89,17 @@ rules:
 - apiGroups:
   - platform.damga.co
   resources:
-  - workloads/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - platform.damga.co
-  resources:
+  - databases/status
   - workloads/status
   verbs:
   - get
   - patch
+  - update
+- apiGroups:
+  - platform.damga.co
+  resources:
+  - workloads/finalizers
+  verbs:
   - update
 - apiGroups:
   - policy

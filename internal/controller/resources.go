@@ -52,8 +52,19 @@ const (
 	// The port the Service and the Ingress agree to call the application
 	// port, and the label whose second writer is Argo CD. Both are named
 	// because more than one place has to spell them the same way.
-	portName      = "http"
-	instanceLabel = "app.kubernetes.io/instance"
+	portName       = "http"
+	instanceLabel  = "app.kubernetes.io/instance"
+	nameLabel      = "app.kubernetes.io/name"
+	managedByLabel = "app.kubernetes.io/managed-by"
+	componentLabel = "app.kubernetes.io/component"
+	managedByDamga = "damga-platform"
+
+	// The default database and role name a Database gets, and the value
+	// the CRD defaults them to. Spelled once so the two cannot drift.
+	defaultDatabaseName = "app"
+
+	// Dropped from every container this platform renders.
+	capabilityAll = "ALL"
 
 	// preStop buys the endpoint removal a head start. Without it, a pod is
 	// removed from the Service and its process is killed at the same moment,

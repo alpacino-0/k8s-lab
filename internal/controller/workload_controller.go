@@ -281,9 +281,12 @@ type conflictError struct {
 }
 
 func (e *conflictError) Error() string {
+	// "this resource" rather than "this workload": a Database renders objects
+	// through the same check, and an error that names the wrong kind sends the
+	// reader looking at the wrong object.
 	return fmt.Sprintf(
-		"%s %q already exists and is not owned by this workload; "+
-			"rename the workload or remove the object that is in the way",
+		"%s %q already exists and is not owned by this resource; "+
+			"rename it or remove the object that is in the way",
 		e.kind, e.name)
 }
 

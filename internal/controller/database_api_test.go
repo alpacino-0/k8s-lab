@@ -46,7 +46,7 @@ var _ = Describe("Database API", func() {
 		d := &platformv1alpha1.Database{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 			Spec: platformv1alpha1.DatabaseSpec{
-				Image:   "postgres:17.2-alpine3.21",
+				Image:   testPostgresImage,
 				Storage: resource.MustParse("1Gi"),
 			},
 		}

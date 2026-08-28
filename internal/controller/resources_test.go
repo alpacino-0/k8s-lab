@@ -33,6 +33,10 @@ import (
 const (
 	testDomain = "blog.example.com"
 
+	// A pinned PostgreSQL, because the API refuses one that can move under a
+	// running data directory.
+	testPostgresImage = "postgres:17.2-alpine3.21"
+
 	// Two annotations named side by side, because telling them apart is the
 	// whole subject of the tests below: the first is this operator's to write
 	// and retract, the second belongs to the deployment controller and is only
