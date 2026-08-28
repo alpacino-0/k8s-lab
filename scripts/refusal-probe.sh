@@ -43,10 +43,8 @@ echo "== deploying something admission must refuse at the pod, not the deploymen
 # So the spec below satisfies every VAP — token off, read-only root, resources
 # set — and violates PSA restricted by running as root. Anything the VAPs catch
 # would be measuring the wrong path.
-cat <<EOF | kubectl apply -f - >/dev/null || { echo "::error::the deployment was refused at the deployment level, so no \
-ReplicaSet was created and there is no ReplicaFailure to read. The probe is \
-measuring the wrong path — see the note above; this spec is supposed to satisfy \
-every rule that binds to deployments."; exit 1; }
+manifest=$(mktemp)
+cat > "$manifest" <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -72,11 +70,26 @@ spec:
           resources:
             requests: {cpu: 50m, memory: 64Mi}
             limits: {memory: 128Mi}
+          # Present because damga-workload-hygiene requires both on anything
+          # long-running. Everything except runAsUser satisfies a rule that
+          # binds to deployments; miss one and the probe measures which rule it
+          # forgot instead of the path it is about.
+          readinessProbe:
+            httpGet: {path: /readyz, port: 3000}
+          livenessProbe:
+            httpGet: {path: /healthz, port: 3000}
 EOF
 
-# The Deployment itself is admitted — a Deployment is not a Pod, and the rules
-# match Pods. The refusal happens when the ReplicaSet tries to create one, which
-# is a controller loop and not this request, so it has to be waited for.
+if ! applied=$(kubectl apply -f "$manifest" 2>&1); then
+  echo "::error::the deployment was refused at the deployment level, so no ReplicaSet"
+  echo "::error::was created and there is no ReplicaFailure to read. The probe is"
+  echo "::error::measuring the wrong path — what admission actually said:"
+  printf '%s\n' "$applied"
+  rm -f "$manifest"
+  exit 1
+fi
+rm -f "$manifest"
+
 echo "== waiting for the refusal to reach the Deployment =="
 for _ in $(seq 1 30); do
   status=$(kubectl -n "$NS" get "deployment/$NAME" \
