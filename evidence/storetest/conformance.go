@@ -68,6 +68,7 @@ func Run(t *testing.T, newStore Factory) {
 		fn   func(*testing.T, Factory)
 	}{
 		{"AppendAssignsIdentity", testAppendAssignsIdentity},
+		{"ATransitionCanRecordTheSignatureVerdict", testATransitionCanRecordTheSignatureVerdict},
 		{"AppendRequiresIdempotencyKey", testAppendRequiresIdempotencyKey},
 		{"AppendRequiresAValidTier", testAppendRequiresAValidTier},
 		{"DuplicateReturnsExistingRecord", testDuplicateReturnsExistingRecord},
@@ -949,5 +950,55 @@ func testAnUnusableCursorIsReportedNotEmptied(t *testing.T, newStore Factory) {
 	}
 	if len(second.Records) != 1 {
 		t.Errorf("second page has %d records, want 1", len(second.Records))
+	}
+}
+
+// The verdict the record has always had a column for and never a way to fill.
+//
+// Written by whichever transition observed it — the observer reading the
+// admission controller's answer off the live object — and frozen from then on.
+// Re-running the check later answers a different question, because a policy can
+// be edited and a signature cannot be revoked.
+func testATransitionCanRecordTheSignatureVerdict(t *testing.T, newStore Factory) {
+	ctx := context.Background()
+	s := newStore(t, 0)
+
+	// Opened with nothing verified, which is what a deploy knows at the moment
+	// it is committed: a commit was pushed and no admission controller has seen
+	// anything yet.
+	start := rec("k-sig", evidence.Ref{TenantID: tenantA, App: "shop", Env: prod}, "abc123")
+	start.Signature = evidence.SignatureVerdict{}
+	opened := mustAppend(t, s, start)
+
+	verdict := evidence.SignatureVerdict{
+		Verified: true,
+		Issuer:   "https://token.actions.githubusercontent.com",
+		Subject:  "https://github.com/acme/shop/.github/workflows/damga-sign.yml@refs/heads/main",
+		Digest:   "ghcr.io/acme/shop@sha256:abc",
+		Message:  "verified at admission",
+	}
+	version := len(opened.Transitions)
+	got, err := s.Transition(ctx, opened.ID, evidence.Transition{
+		From: []evidence.State{opened.State}, To: evidence.StateSyncing,
+		At: time.Now().UTC(), Reason: "observed",
+		Signature: &verdict, ExpectEvents: &version,
+	})
+	if err != nil {
+		t.Fatalf("Transition: %v", err)
+	}
+	if got.Signature != verdict {
+		t.Fatalf("returned verdict = %+v, want %+v", got.Signature, verdict)
+	}
+
+	// And it survives the round trip, which is the half a store gets wrong: the
+	// columns were already written on append and read back, so a verdict that
+	// only ever lived in the returned struct would look right here and be
+	// absent on the page that reads it.
+	reread, err := s.Get(ctx, opened.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if reread.Signature != verdict {
+		t.Errorf("stored verdict = %+v, want %+v", reread.Signature, verdict)
 	}
 }

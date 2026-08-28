@@ -294,6 +294,9 @@ func (s *Store) Transition(ctx context.Context, id evidence.ID, t evidence.Trans
 	if t.Image != nil {
 		rec.Image = *t.Image
 	}
+	if t.Signature != nil {
+		rec.Signature = *t.Signature
+	}
 
 	policies, err := json.Marshal(rec.Policies)
 	if err != nil {
@@ -302,11 +305,15 @@ func (s *Store) Transition(ctx context.Context, id evidence.ID, t evidence.Trans
 	if err := s.txExec(ctx, tx, `
 		UPDATE record SET state = ?, updated_at = ?, policies = ?,
 		       adm_allowed = ?, adm_reason = ?, adm_message = ?,
-		       image_requested = ?, image_admitted = ?
+		       image_requested = ?, image_admitted = ?,
+		       sig_verified = ?, sig_issuer = ?, sig_subject = ?,
+		       sig_digest = ?, sig_message = ?
 		 WHERE id = ?`,
 		string(rec.State), asText(rec.UpdatedAt), string(policies),
 		boolInt(rec.Admission.Allowed), rec.Admission.Reason, rec.Admission.Message,
-		rec.Image.RequestedRef, rec.Image.AdmittedDigest, string(rec.ID),
+		rec.Image.RequestedRef, rec.Image.AdmittedDigest,
+		boolInt(rec.Signature.Verified), rec.Signature.Issuer, rec.Signature.Subject,
+		rec.Signature.Digest, rec.Signature.Message, string(rec.ID),
 	); err != nil {
 		return evidence.Record{}, err
 	}

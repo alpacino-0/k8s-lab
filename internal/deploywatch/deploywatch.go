@@ -50,6 +50,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/damgahq/damga/evidence"
+	"github.com/damgahq/damga/forge"
 )
 
 const (
@@ -78,6 +79,13 @@ const (
 type Reconciler struct {
 	client.Client
 	Evidence evidence.Store
+
+	// Connections is where the signing identity for an app lives, and it is
+	// optional. Without it the verdict still reaches the record — the digest
+	// and the pass are on the Deployment — but with no subject or issuer
+	// attached, and nothing ever leaves audit mode. An installation that
+	// connects no repositories is exactly that installation.
+	Connections forge.Store
 }
 
 // SetupWithManager registers the reconciler. It watches Deployments only.
@@ -158,6 +166,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
+	// The connection, if this app has one. Read before the transition so the
+	// verdict can name the identity, and a failure to read it is not a failure
+	// to record what was observed: the pass on the object is true whether or
+	// not the control plane can say whose signature it was.
+	var conn *forge.Connection
+	if r.Connections != nil {
+		got, cErr := r.Connections.Get(ctx, forge.Key{TenantID: rec.Ref.TenantID, App: rec.Ref.App})
+		if cErr == nil {
+			conn = &got
+		} else if !errors.Is(cErr, forge.ErrNotFound) {
+			log.V(1).Info("could not read the connection; recording the verdict without it",
+				"app", rec.Ref.App, "error", cErr)
+		}
+	}
+	verdict := signatureVerdict(&deploy, conn)
+
 	// Fenced on the version the derivation was made from. Without this, a
 	// write computed before a leader handover can land after it and set a
 	// state on the strength of an observation that is already stale — and the
@@ -172,6 +196,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			At:     time.Now().UTC(),
 		},
 		Image:        admittedImage(&deploy),
+		Signature:    verdict,
 		ExpectEvents: &version,
 	})
 	switch {
@@ -188,6 +213,30 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{Requeue: true}, nil
 	case err != nil:
 		return ctrl.Result{}, fmt.Errorf("transitioning the record to %s: %w", want, err)
+	}
+
+	// The first signature is what ends the policy's recording state, and this
+	// is the only place that ever learns of one. Written after the transition
+	// rather than before: the record is the evidence, and marking a connection
+	// verified on the strength of an observation that then failed to record
+	// would enforce a policy against a chain nothing can show working.
+	//
+	// Once, and never moved. A later deploy is another signature, not a
+	// different first one, and rewriting it would make "since when has this
+	// been enforcing" unanswerable.
+	if conn != nil && verdict != nil && verdict.Verified && !conn.Verified() {
+		conn.FirstSignatureAt = time.Now().UTC()
+		if _, err := r.Connections.Put(ctx, *conn); err != nil {
+			// Not fatal, and not retried here. The record moved, which is the
+			// thing that had to happen; the next deploy sees the same pass and
+			// tries again. Failing the reconcile would roll back nothing and
+			// requeue an observation that has already been written.
+			log.Error(err, "could not mark the connection verified",
+				"app", rec.Ref.App)
+		} else {
+			log.Info("first signature seen; the signature policy will enforce from the next deploy",
+				"app", rec.Ref.App, "identity", conn.Identity())
+		}
 	}
 
 	log.Info("evidence record moved", "rollout", id, "to", want, "reason", reason)
@@ -277,21 +326,61 @@ func allowedFrom(to evidence.State) []evidence.State {
 // it is an image no rule matched. Reporting the two identically is the defect
 // this project already measured once, in a namespace that claimed to enforce.
 func admittedImage(d *appsv1.Deployment) *evidence.Image {
+	if ref, ok := passedDigest(d); ok {
+		return &evidence.Image{AdmittedDigest: ref}
+	}
+	return nil
+}
+
+// passedDigest is the digest the admission controller says it verified.
+//
+// Only a pass counts. Kyverno's own helper treats "skip" as verified, and a
+// record that has to survive an auditor must not — an image no rule matched
+// produces no annotation at all, and rendering that the same as verified is how
+// an evidence page lies.
+func passedDigest(d *appsv1.Deployment) (string, bool) {
 	raw := d.Annotations[VerifyImagesAnnotation]
 	if raw == "" {
-		return nil
+		return "", false
 	}
 	verdicts := map[string]string{}
 	if err := json.Unmarshal([]byte(raw), &verdicts); err != nil {
-		return nil
+		return "", false
 	}
 	for ref, verdict := range verdicts {
-		// Only a pass names an image this platform is willing to say was
-		// verified. Kyverno's own helper counts "skip" as verified; a record
-		// that has to survive an auditor must not.
 		if verdict == "pass" {
-			return &evidence.Image{AdmittedDigest: ref}
+			return ref, true
 		}
 	}
-	return nil
+	return "", false
+}
+
+// signatureVerdict is what the record gets to say about the supply chain.
+//
+// The pass and the digest come off the live object, from the controller that
+// actually did the checking. The issuer and the subject come from the
+// connection, and they have to: the annotation records that a rule passed and
+// not which identity satisfied it. That is sound only because the rule in that
+// namespace is the one rendered from this connection, pinned to this subject
+// and scoped to this image repository — so a pass on a matching image is a pass
+// against that identity and no other.
+//
+// Without a connection there is still a verdict, carrying the digest and the
+// pass and nothing about who signed. Weaker, and said as such rather than left
+// out: a record with no verdict at all is indistinguishable from a deploy
+// nothing checked.
+func signatureVerdict(d *appsv1.Deployment, conn *forge.Connection) *evidence.SignatureVerdict {
+	digest, ok := passedDigest(d)
+	if !ok {
+		return nil
+	}
+	v := &evidence.SignatureVerdict{
+		Verified: true, Digest: digest,
+		Message: "admission verified the signature on this digest",
+	}
+	if conn != nil {
+		v.Issuer = forge.OIDCIssuer
+		v.Subject = conn.Identity()
+	}
+	return v
 }

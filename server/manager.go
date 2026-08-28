@@ -88,6 +88,10 @@ func (o Options) runWithManager(
 	if err := (&deploywatch.Reconciler{
 		Client:   mgr.GetClient(),
 		Evidence: store,
+		// The only place a first signature is ever learned of. Without it the
+		// verdict still reaches the record, and no connection ever leaves the
+		// recording state its policy starts in.
+		Connections: o.Forge,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("deploy observer: %w", err)
 	}

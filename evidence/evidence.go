@@ -336,6 +336,16 @@ type Transition struct {
 	Policies  []PolicyResult
 	Admission *AdmissionOutcome
 	Image     *Image
+
+	// Signature is the supply-chain verdict, learned by whichever transition
+	// observed it and frozen from then on.
+	//
+	// It has always been on the record and there has never been a way to put
+	// it there: the store wrote the columns on Open and read them back, and
+	// every record therefore carried an unverified verdict for ever. A field
+	// nothing can write is a field that reads as a measurement and is a
+	// default, which on an evidence page is the worst of both.
+	Signature *SignatureVerdict
 }
 
 // Order is the direction History and Export walk. Export defaults to Oldest

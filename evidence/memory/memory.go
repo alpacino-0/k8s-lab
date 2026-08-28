@@ -142,6 +142,9 @@ func (s *Store) Transition(_ context.Context, id evidence.ID, t evidence.Transit
 	if t.Image != nil {
 		rec.Image = *t.Image
 	}
+	if t.Signature != nil {
+		rec.Signature = *t.Signature
+	}
 	return *rec, nil
 }
 
