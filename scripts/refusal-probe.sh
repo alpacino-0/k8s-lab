@@ -23,11 +23,30 @@ IMAGE="${IMAGE:?set IMAGE}"
 FAILED=0
 trap 'kubectl -n "$NS" delete deployment "$NAME" --ignore-not-found --wait=false >/dev/null 2>&1' EXIT
 
-echo "== deploying something the admission policies must refuse =="
-# Root, which damga-workload-hygiene rejects. Deliberately not "a pod with no
-# resources": in a namespace carrying a ResourceQuota the quota answers first
-# with its own message, and the probe would be measuring the quota.
-cat <<EOF | kubectl apply -f - >/dev/null || { echo "::error::the deployment was rejected outright, so no ReplicaSet ever existed"; exit 1; }
+echo "== deploying something admission must refuse at the pod, not the deployment =="
+# There are two refusal paths in this platform and they surface in different
+# places. Measured, after this probe was first written against the wrong one:
+#
+#   Deployment-level. The ValidatingAdmissionPolicies bind to pods AND to
+#   deployments/statefulsets/daemonsets/jobs, and Kyverno autogenerates rules
+#   covering the same controllers. A violation they catch fails the apply
+#   itself — "the deployments X is invalid: ... denied request" — so no
+#   Deployment is ever created and no condition exists to read. Nothing that
+#   watches Deployments can see this one. See the note in deploywatch.
+#
+#   Pod-level. Pod Security Admission enforces on pods and only *warns* on the
+#   controllers that make them, so the Deployment is admitted, the ReplicaSet
+#   is refused when it tries to create a pod, and the refusal arrives as
+#   ReplicaFailure with the message attached. That is the path the observer
+#   reads and the one this probe has to exercise.
+#
+# So the spec below satisfies every VAP — token off, read-only root, resources
+# set — and violates PSA restricted by running as root. Anything the VAPs catch
+# would be measuring the wrong path.
+cat <<EOF | kubectl apply -f - >/dev/null || { echo "::error::the deployment was refused at the deployment level, so no \
+ReplicaSet was created and there is no ReplicaFailure to read. The probe is \
+measuring the wrong path — see the note above; this spec is supposed to satisfy \
+every rule that binds to deployments."; exit 1; }
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -41,6 +60,7 @@ spec:
     metadata:
       labels: {app: $NAME}
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: app
           image: $IMAGE

@@ -390,10 +390,28 @@ func passedDigest(d *appsv1.Deployment) (string, bool) {
 //
 // ReplicaFailure is the one thing a Deployment says about admission. The
 // ReplicaSet controller sets it when it cannot create pods and the deployment
-// controller copies it up, so a webhook denial — an unsigned image, a policy
-// violation — arrives here carrying the admission message verbatim. That
-// message is the answer to "why is my deploy not running", and it is quotable
-// to the person who asked.
+// controller copies it up, so the denial arrives here carrying the admission
+// message verbatim. That message is the answer to "why is my deploy not
+// running", and it is quotable to the person who asked.
+//
+// It covers one of the two refusal paths, and the smaller one. Measured:
+//
+//	Pod-level. Pod Security Admission enforces on pods and only warns on the
+//	controllers that make them, so the Deployment is admitted and the refusal
+//	surfaces here. This is that path.
+//
+//	Deployment-level. The ValidatingAdmissionPolicies bind to deployments,
+//	statefulsets, daemonsets and jobs as well as pods, and Kyverno
+//	autogenerates rules over the same controllers — so a violation they catch
+//	fails the apply itself. No Deployment is created, no condition exists, and
+//	nothing that watches Deployments can ever learn of it. That is most of the
+//	refusals this platform issues, including an unsigned image.
+//
+// The second path is a real gap and it is not closable from here. damga writes
+// to git; Argo CD applies, so Argo CD is what receives the refusal, and its
+// Application status is where that sentence lives. Until something reads it, a
+// deploy refused at the controller level stays pending until the sweep gives up
+// — which is where it was before this function existed, for every refusal.
 //
 // Only while it is True. The condition is not removed when the problem clears;
 // it flips to False, and a stale True would report a deploy as refused because
