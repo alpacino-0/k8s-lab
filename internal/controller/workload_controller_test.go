@@ -30,6 +30,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -44,6 +45,8 @@ var _ = Describe("Workload Controller", func() {
 		name      = "test-app"
 		namespace = "default"
 	)
+
+	const dataVol = "data"
 
 	const testImage = "ghcr.io/example/app:1.0.0"
 
@@ -84,6 +87,98 @@ var _ = Describe("Workload Controller", func() {
 			obj.SetNamespace(namespace)
 			_ = k8sClient.Delete(ctx, obj)
 		}
+		// The claim is not owned, so it is not in the list above and would
+		// survive into the next spec.
+		pvc := &corev1.PersistentVolumeClaim{}
+		pvc.SetName(name + "-data")
+		pvc.SetNamespace(namespace)
+		_ = k8sClient.Delete(ctx, pvc)
+	})
+
+	Describe("volumes", func() {
+		volumes := []platformv1alpha1.Volume{{
+			Name: dataVol, Path: "/var/lib/app",
+			Size: resource.MustParse("2Gi"),
+		}}
+
+		It("claims the storage, mounts it, and stops rolling", func() {
+			create(platformv1alpha1.WorkloadSpec{Image: testImage, Volumes: volumes})
+			reconcileNow()
+
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx,
+				types.NamespacedName{Name: name + "-data", Namespace: namespace}, pvc)).To(Succeed())
+			Expect(pvc.Spec.AccessModes).To(Equal([]corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}))
+			Expect(pvc.Spec.Resources.Requests.Storage().String()).To(Equal("2Gi"))
+
+			dep := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
+
+			// Recreate, not RollingUpdate. Both pods would want the same
+			// ReadWriteOnce claim and the new one would never schedule.
+			Expect(dep.Spec.Strategy.Type).To(Equal(appsv1.RecreateDeploymentStrategyType))
+			Expect(dep.Spec.Strategy.RollingUpdate).To(BeNil())
+			Expect(*dep.Spec.Replicas).To(BeNumerically("==", 1))
+
+			pod := dep.Spec.Template.Spec
+			Expect(pod.Volumes).To(HaveLen(2)) // tmp + data
+			var claimed string
+			for _, v := range pod.Volumes {
+				if v.PersistentVolumeClaim != nil {
+					claimed = v.PersistentVolumeClaim.ClaimName
+				}
+			}
+			Expect(claimed).To(Equal(name + "-data"))
+			Expect(pod.Containers[0].VolumeMounts).To(ContainElement(
+				corev1.VolumeMount{Name: dataVol, MountPath: "/var/lib/app"}))
+		})
+
+		// The reason the claim carries no owner reference. Written as a test
+		// because the failure it prevents is silent and total: deleting an app
+		// to recreate it would take its data with it, and nothing would say so.
+		It("leaves the claim behind when the workload is deleted", func() {
+			create(platformv1alpha1.WorkloadSpec{Image: testImage, Volumes: volumes})
+			reconcileNow()
+
+			pvcKey := types.NamespacedName{Name: name + "-data", Namespace: namespace}
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+			Expect(pvc.OwnerReferences).To(BeEmpty(),
+				"an owner reference here deletes the tenant's data on the next redeploy")
+
+			app := &platformv1alpha1.Workload{}
+			Expect(k8sClient.Get(ctx, key, app)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, app)).To(Succeed())
+			Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+		})
+
+		// Enforced by the API server rather than by the controller, so a
+		// manifest applied with kubectl is refused too.
+		It("refuses to autoscale a workload that has volumes", func() {
+			err := k8sClient.Create(ctx, &platformv1alpha1.Workload{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec: platformv1alpha1.WorkloadSpec{
+					Image: testImage, Volumes: volumes,
+					Autoscale: &platformv1alpha1.Autoscale{MinReplicas: 1, MaxReplicas: 3},
+				},
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("ReadWriteOnce"))
+		})
+
+		It("refuses a volume mounted over the emptyDir at /tmp", func() {
+			err := k8sClient.Create(ctx, &platformv1alpha1.Workload{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec: platformv1alpha1.WorkloadSpec{
+					Image: testImage,
+					Volumes: []platformv1alpha1.Volume{{
+						Name: dataVol, Path: "/tmp", Size: resource.MustParse("1Gi"),
+					}},
+				},
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("emptyDir"))
+		})
 	})
 
 	It("renders the full set of objects a production workload needs", func() {

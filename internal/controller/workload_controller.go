@@ -99,7 +99,45 @@ func normalise(app *platformv1alpha1.Workload) {
 	}
 }
 
+// reconcileClaims creates the volumes a workload asked for, and never deletes
+// one.
+//
+// Deliberately not owned by the Workload, and this is the same decision the
+// database's backup volume already made: an owner reference would delete the
+// data the moment somebody deleted the app to recreate it. A claim that
+// outlives its workload is a claim somebody can still get their data out of;
+// one that does not is a delete key wearing a redeploy's clothes.
+//
+// A volume removed from the spec therefore leaves its claim behind. That is
+// visible in `kubectl get pvc` and reversible; the alternative is not.
+func (r *WorkloadReconciler) reconcileClaims(ctx context.Context, app *platformv1alpha1.Workload) error {
+	for i := range app.Spec.Volumes {
+		want := desiredClaim(app, app.Spec.Volumes[i])
+		var have corev1.PersistentVolumeClaim
+		err := r.Get(ctx, client.ObjectKeyFromObject(want), &have)
+		switch {
+		case apierrors.IsNotFound(err):
+			if err := r.Create(ctx, want); err != nil && !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("volume %s: %w", app.Spec.Volumes[i].Name, err)
+			}
+		case err != nil:
+			return fmt.Errorf("volume %s: %w", app.Spec.Volumes[i].Name, err)
+		}
+		// No update pass. Almost every field of a bound claim is immutable, and
+		// the one that is not — a size increase — needs a StorageClass that
+		// allows expansion and a node that can take it. Attempting it here
+		// would fail every reconcile on a class that cannot.
+	}
+	return nil
+}
+
 func (r *WorkloadReconciler) reconcileOwned(ctx context.Context, app *platformv1alpha1.Workload) error {
+	// Before the Deployment, which names the claims: a pod referring to a claim
+	// that does not exist stays Pending without saying why in the Deployment.
+	if err := r.reconcileClaims(ctx, app); err != nil {
+		return err
+	}
+
 	// Order matters only for the ServiceAccount, which the Deployment names.
 	if err := r.apply(ctx, app, desiredServiceAccount(app), func(existing, desired client.Object) {
 		e := existing.(*corev1.ServiceAccount)

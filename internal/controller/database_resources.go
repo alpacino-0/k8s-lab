@@ -151,7 +151,7 @@ func desiredDatabaseService(db *platformv1alpha1.Database) *corev1.Service {
 func desiredDatabaseStatefulSet(db *platformv1alpha1.Database) *appsv1.StatefulSet {
 	volumeMode := corev1.PersistentVolumeFilesystem
 	claim := corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "data"},
+		ObjectMeta: metav1.ObjectMeta{Name: dataVolume},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 			// Stated rather than left out. The API server defaults it, and a
@@ -226,7 +226,7 @@ func desiredDatabaseStatefulSet(db *platformv1alpha1.Database) *appsv1.StatefulS
 							Name: postgresPortName, ContainerPort: postgresPort,
 						}},
 						VolumeMounts: []corev1.VolumeMount{
-							{Name: "data", MountPath: "/var/lib/postgresql/data"},
+							{Name: dataVolume, MountPath: "/var/lib/postgresql/data"},
 							{Name: "run", MountPath: "/var/run/postgresql"},
 							{Name: tmpVolume, MountPath: tmpPath},
 						},

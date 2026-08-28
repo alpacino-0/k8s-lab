@@ -70,6 +70,10 @@ const (
 	// nowhere else to write, and most runtimes write something.
 	tmpPath = "/tmp"
 
+	// dataVolume is the conventional name for a workload's single volume and
+	// the database's data directory. Shared so the two never drift.
+	dataVolume = "data"
+
 	// preStop buys the endpoint removal a head start. Without it, a pod is
 	// removed from the Service and its process is killed at the same moment,
 	// and whichever loses that race drops requests that were already in flight.
@@ -302,6 +306,67 @@ func desiredServiceAccount(app *platformv1alpha1.Workload) *corev1.ServiceAccoun
 // damga.co/rollout off one, and attaches the running state to the evidence
 // record that annotation names. Putting them on the Service or the autoscaler
 // as well would be annotations nothing reads.
+// volumeMounts is the emptyDir every pod gets plus whatever the workload asked
+// to keep.
+func volumeMounts(app *platformv1alpha1.Workload) []corev1.VolumeMount {
+	mounts := make([]corev1.VolumeMount, 0, 1+len(app.Spec.Volumes))
+	mounts = append(mounts, corev1.VolumeMount{Name: "tmp", MountPath: tmpPath})
+	for _, v := range app.Spec.Volumes {
+		mounts = append(mounts, corev1.VolumeMount{Name: v.Name, MountPath: v.Path})
+	}
+	return mounts
+}
+
+// podVolumes names the claims. The claims themselves are created by the
+// reconciler and deliberately not owned by the Workload — see reconcileClaims.
+func podVolumes(app *platformv1alpha1.Workload) []corev1.Volume {
+	vols := make([]corev1.Volume, 0, 1+len(app.Spec.Volumes))
+	vols = append(vols, corev1.Volume{
+		Name:         "tmp",
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
+	for _, v := range app.Spec.Volumes {
+		vols = append(vols, corev1.Volume{
+			Name: v.Name,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: claimName(app, v.Name),
+				},
+			},
+		})
+	}
+	return vols
+}
+
+// claimName is the workload's name and the volume's, which is what keeps two
+// workloads in one namespace from sharing a claim by naming a volume the same.
+func claimName(app *platformv1alpha1.Workload, volume string) string {
+	return app.Name + "-" + volume
+}
+
+// desiredClaim is one PersistentVolumeClaim for a declared volume.
+//
+// ReadWriteOnce, which is the only mode a single-node install can actually
+// provide and the reason the API refuses autoscale alongside volumes.
+func desiredClaim(app *platformv1alpha1.Workload, v platformv1alpha1.Volume) *corev1.PersistentVolumeClaim {
+	claim := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: claimName(app, v.Name), Namespace: app.Namespace,
+			Labels: labelsFor(app),
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: v.Size},
+			},
+		},
+	}
+	if v.StorageClass != "" {
+		claim.Spec.StorageClassName = ptr.To(v.StorageClass)
+	}
+	return claim
+}
+
 func desiredDeployment(app *platformv1alpha1.Workload) *appsv1.Deployment {
 	probe := func(path string) *corev1.Probe {
 		return &corev1.Probe{
@@ -352,21 +417,35 @@ func desiredDeployment(app *platformv1alpha1.Workload) *appsv1.Deployment {
 		replicas = ptr.To(int32(2))
 	}
 
+	// A workload that keeps data cannot roll. MaxSurge 1 asks the new pod to
+	// start while the old one is still running, and both want the same
+	// ReadWriteOnce claim — the new pod stays Pending with "Multi-Attach error"
+	// until progressDeadlineSeconds gives up. Recreate takes the old pod down
+	// first, which costs the downtime the volume already implied and is the only
+	// thing that actually completes.
+	strategy := appsv1.DeploymentStrategy{
+		Type: appsv1.RollingUpdateDeploymentStrategyType,
+		RollingUpdate: &appsv1.RollingUpdateDeployment{
+			// Never fewer than the current count while rolling. Combined with
+			// readiness gating this is what makes an upgrade cost zero requests
+			// rather than a few.
+			MaxUnavailable: ptr.To(intstr.FromInt32(0)),
+			MaxSurge:       ptr.To(intstr.FromInt32(1)),
+		},
+	}
+	if len(app.Spec.Volumes) > 0 {
+		strategy = appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
+		// One at a time, for the same reason. The API refuses autoscale beside
+		// volumes; this covers the fixed count, which it does not police.
+		replicas = ptr.To(int32(1))
+	}
+
 	return &appsv1.Deployment{
 		ObjectMeta: withAnnotations(objectMeta(app), platformAnnotations(app)),
 		Spec: appsv1.DeploymentSpec{
 			Replicas: replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: selectorFor(app)},
-			Strategy: appsv1.DeploymentStrategy{
-				Type: appsv1.RollingUpdateDeploymentStrategyType,
-				RollingUpdate: &appsv1.RollingUpdateDeployment{
-					// Never fewer than the current count while rolling. Combined
-					// with readiness gating this is what makes an upgrade cost
-					// zero requests rather than a few.
-					MaxUnavailable: ptr.To(intstr.FromInt32(0)),
-					MaxSurge:       ptr.To(intstr.FromInt32(1)),
-				},
-			},
+			Strategy: strategy,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labelsFor(app)},
 				Spec: corev1.PodSpec{
@@ -434,12 +513,9 @@ func desiredDeployment(app *platformv1alpha1.Workload) *appsv1.Deployment {
 						// A read-only root filesystem breaks anything that writes
 						// a temp file, which is most runtimes. This gives them
 						// somewhere to write that does not survive the pod.
-						VolumeMounts: []corev1.VolumeMount{{Name: "tmp", MountPath: tmpPath}},
+						VolumeMounts: volumeMounts(app),
 					}},
-					Volumes: []corev1.Volume{{
-						Name:         "tmp",
-						VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-					}},
+					Volumes: podVolumes(app),
 				},
 			},
 		},

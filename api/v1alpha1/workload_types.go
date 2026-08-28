@@ -99,6 +99,12 @@ type Autoscale struct {
 // before its replacement is ready. Those are not defaults — there is no field
 // that turns them off.
 // +kubebuilder:validation:XValidation:rule="has(self.replicas) ? !has(self.autoscale) : true",message="set replicas or autoscale, not both"
+// The claims a volume produces are ReadWriteOnce, which one node may mount at a
+// time. A second replica scheduled elsewhere stays Pending for ever with
+// "Multi-Attach error" while the first keeps serving — so the symptom is not an
+// outage but an autoscaler that silently never scales. Refused here rather than
+// in the controller, so a manifest applied with kubectl is refused too.
+// +kubebuilder:validation:XValidation:rule="!(has(self.autoscale) && has(self.volumes) && self.volumes.size() > 0)",message="a workload with volumes cannot autoscale: its storage is ReadWriteOnce and only one node can mount it"
 type WorkloadSpec struct {
 	// Image is the container image to run. A digest is preferred; a tag is
 	// accepted as long as it is not :latest, which means "whatever is there
@@ -160,11 +166,57 @@ type WorkloadSpec struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Database string `json:"database,omitempty"`
 
+	// Volumes are directories that survive the pod.
+	//
+	// Needed by most of what anybody actually installs: measured against the 371
+	// service templates this project converts from, 345 of them mount at least
+	// one. Without this field a catalogue is twenty applications, not a
+	// catalogue.
+	//
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=8
+	Volumes []Volume `json:"volumes,omitempty"`
+
 	Resources Resources `json:"resources,omitempty"`
 
 	Health Health `json:"health,omitempty"`
 
+	// Autoscale hands the replica count to a HorizontalPodAutoscaler.
+	//
+	// Refused together with volumes; see the rule on WorkloadSpec.
 	Autoscale *Autoscale `json:"autoscale,omitempty"`
+}
+
+// Volume is one directory that outlives the pod.
+type Volume struct {
+	// Name identifies the claim within the workload. It becomes part of the
+	// PersistentVolumeClaim's name, so it is a DNS label rather than free text.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=40
+	Name string `json:"name"`
+
+	// Path is where the volume is mounted inside the container.
+	//
+	// Absolute, and not /tmp: the renderer already mounts an emptyDir there so a
+	// read-only root filesystem has somewhere to write, and a second volume at
+	// the same path would shadow it.
+	// +kubebuilder:validation:Pattern=`^/.+`
+	// +kubebuilder:validation:XValidation:rule="self != '/tmp' && !self.startsWith('/tmp/')",message="/tmp is already an emptyDir; mount persistent storage elsewhere"
+	Path string `json:"path"`
+
+	// Size is how much storage to request.
+	//
+	// Required, with no default. A default here would be a number nobody chose
+	// silently becoming the size of somebody's data directory — and a claim
+	// cannot be shrunk afterwards.
+	// +kubebuilder:validation:XValidation:rule="quantity(self).isGreaterThan(quantity('0'))",message="size must be greater than zero"
+	Size resource.Quantity `json:"size"`
+
+	// StorageClass names the class to provision from. Empty means the cluster's
+	// default class, which is what a single-node install has.
+	// +kubebuilder:validation:MaxLength=253
+	StorageClass string `json:"storageClass,omitempty"`
 }
 
 // WorkloadStatus reports what the platform observed, never what it was asked

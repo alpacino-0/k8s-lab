@@ -68,16 +68,17 @@ spec:
               networking, a disruption budget, and a rollout that never takes a replica out
               before its replacement is ready. Those are not defaults — there is no field
               that turns them off.
+              The claims a volume produces are ReadWriteOnce, which one node may mount at a
+              time. A second replica scheduled elsewhere stays Pending for ever with
+              "Multi-Attach error" while the first keeps serving — so the symptom is not an
+              outage but an autoscaler that silently never scales. Refused here rather than
+              in the controller, so a manifest applied with kubectl is refused too.
             properties:
               autoscale:
                 description: |-
-                  Autoscale replaces a fixed replica count with a range. Scale-up is immediate
-                  and scale-down is deliberately slow: being late to scale up costs users,
-                  being hasty to scale down causes thrashing.
+                  Autoscale hands the replica count to a HorizontalPodAutoscaler.
 
-                  The bound is checked here rather than left to the HorizontalPodAutoscaler.
-                  Without it the CRD accepts max < min, the HPA is then rejected as invalid, and
-                  reconciliation fails on every pass with an error the author never sees.
+                  Refused together with volumes; see the rule on WorkloadSpec.
                 properties:
                   maxReplicas:
                     default: 10
@@ -246,12 +247,78 @@ spec:
                 - message: memoryLimit must be greater than or equal to memoryRequest
                   rule: quantity(self.memoryLimit).compareTo(quantity(self.memoryRequest))
                     >= 0
+              volumes:
+                description: |-
+                  Volumes are directories that survive the pod.
+
+                  Needed by most of what anybody actually installs: measured against the 371
+                  service templates this project converts from, 345 of them mount at least
+                  one. Without this field a catalogue is twenty applications, not a
+                  catalogue.
+                items:
+                  description: Volume is one directory that outlives the pod.
+                  properties:
+                    name:
+                      description: |-
+                        Name identifies the claim within the workload. It becomes part of the
+                        PersistentVolumeClaim's name, so it is a DNS label rather than free text.
+                      maxLength: 40
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    path:
+                      description: |-
+                        Path is where the volume is mounted inside the container.
+
+                        Absolute, and not /tmp: the renderer already mounts an emptyDir there so a
+                        read-only root filesystem has somewhere to write, and a second volume at
+                        the same path would shadow it.
+                      pattern: ^/.+
+                      type: string
+                      x-kubernetes-validations:
+                      - message: /tmp is already an emptyDir; mount persistent storage
+                          elsewhere
+                        rule: self != '/tmp' && !self.startsWith('/tmp/')
+                    size:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: |-
+                        Size is how much storage to request.
+
+                        Required, with no default. A default here would be a number nobody chose
+                        silently becoming the size of somebody's data directory — and a claim
+                        cannot be shrunk afterwards.
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                      x-kubernetes-validations:
+                      - message: size must be greater than zero
+                        rule: quantity(self).isGreaterThan(quantity('0'))
+                    storageClass:
+                      description: |-
+                        StorageClass names the class to provision from. Empty means the cluster's
+                        default class, which is what a single-node install has.
+                      maxLength: 253
+                      type: string
+                  required:
+                  - name
+                  - path
+                  - size
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
             required:
             - image
             type: object
             x-kubernetes-validations:
             - message: set replicas or autoscale, not both
               rule: 'has(self.replicas) ? !has(self.autoscale) : true'
+            - message: 'a workload with volumes cannot autoscale: its storage is ReadWriteOnce
+                and only one node can mount it'
+              rule: '!(has(self.autoscale) && has(self.volumes) && self.volumes.size()
+                > 0)'
           status:
             description: |-
               WorkloadStatus reports what the platform observed, never what it was asked
