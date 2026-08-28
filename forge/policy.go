@@ -124,7 +124,17 @@ func (c Connection) Policy(namespace string) ([]byte, error) {
 					// checked. Without it a signed digest is verified and then a
 					// mutable tag is pulled, which is a different image by the
 					// time it runs.
-					"mutateDigest": true,
+					//
+					// Off while auditing, and not by choice: Kyverno's own
+					// admission webhook refuses the policy outright —
+					// "mutateDigest must be set to false for 'Audit' failure
+					// action". Measured, after this package spent a day
+					// rendering a policy that every cluster would have
+					// rejected. Which is consistent rather than arbitrary: a
+					// rule that is only recording has no business rewriting the
+					// object it is recording about, and the pin arrives with
+					// enforcement, when it is the thing being enforced.
+					"mutateDigest": c.Verified(),
 					"required":     true,
 					"attestors": []any{map[string]any{
 						"count": 1,

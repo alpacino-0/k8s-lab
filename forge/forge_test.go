@@ -269,9 +269,12 @@ func TestThePolicyIsScopedToOneTenant(t *testing.T) {
 		t.Errorf("imageReferences = %v; unscoped, this demands this tenant's signature "+
 			"on every image in the namespace, sidecars included", vi.ImageReferences)
 	}
-	if !vi.MutateDigest {
-		t.Error("mutateDigest is off, so a signed digest is verified and a mutable tag " +
-			"is pulled — a different image by the time it runs")
+	// Off here, because this connection is unverified and the policy is
+	// therefore auditing. Kyverno rejects the policy outright otherwise, which
+	// is how this was found: every rendered policy was invalid.
+	if vi.MutateDigest {
+		t.Error("mutateDigest is on while the policy audits; Kyverno's webhook refuses " +
+			"the policy entirely, so nothing is enforced and nothing records either")
 	}
 	if !vi.Required {
 		t.Error("required is off, so an image with no signature at all passes")
@@ -481,4 +484,57 @@ func action(t *testing.T, policy []byte) string {
 		t.Fatalf("parsing policy: %v", err)
 	}
 	return p.Spec.ValidationFailureAction
+}
+
+// The pin arrives with enforcement, and cannot arrive before it.
+//
+// Kyverno's admission webhook refuses a policy that sets mutateDigest while its
+// failure action is Audit — measured against a real cluster after this package
+// spent a day rendering policies every cluster would have rejected. Consistent
+// rather than arbitrary: a rule that is only recording has no business
+// rewriting the object it records about.
+//
+// It has to arrive, though. Without it a signed digest is verified and a
+// mutable tag is pulled, which is a different image by the time it runs.
+func TestTheDigestPinArrivesWithEnforcement(t *testing.T) {
+	for name, tc := range map[string]struct {
+		conn Connection
+		want bool
+	}{
+		"while auditing": {conn: conn(), want: false},
+		"once enforcing": {conn: conn(func(c *Connection) {
+			c.FirstSignatureAt = time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+		}), want: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			policy, err := tc.conn.Policy(testNamespace)
+			if err != nil {
+				t.Fatalf("rendering: %v", err)
+			}
+			var p struct {
+				Spec struct {
+					ValidationFailureAction string `json:"validationFailureAction"`
+					Rules                   []struct {
+						VerifyImages []struct {
+							MutateDigest bool `json:"mutateDigest"`
+						} `json:"verifyImages"`
+					} `json:"rules"`
+				} `json:"spec"`
+			}
+			if err := yaml.Unmarshal(policy, &p); err != nil {
+				t.Fatalf("parsing: %v", err)
+			}
+			got := p.Spec.Rules[0].VerifyImages[0].MutateDigest
+
+			// The invariant Kyverno enforces, stated as one line so a future
+			// change to either field has to satisfy it.
+			if p.Spec.ValidationFailureAction == actionAudit && got {
+				t.Error("mutateDigest with Audit: Kyverno's webhook rejects this policy, " +
+					"so it is not auditing anything — it is not installed")
+			}
+			if got != tc.want {
+				t.Errorf("mutateDigest = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }

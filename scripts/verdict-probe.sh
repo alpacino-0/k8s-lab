@@ -64,7 +64,10 @@ spec:
       verifyImages:
         - imageReferences:
             - "${IMAGE%@*}*"
-          mutateDigest: true
+          # False, because the action is Audit. Kyverno refuses the policy
+          # outright otherwise, and forge.Policy renders it the same way for
+          # the same reason.
+          mutateDigest: false
           required: true
           attestors:
             - count: 1
@@ -75,6 +78,19 @@ spec:
                     rekor:
                       url: https://rekor.sigstore.dev
 EOF
+
+# Stop here if it was refused, rather than carrying on to blame the annotation.
+#
+# The first run of this probe did exactly that: Kyverno rejected the policy for
+# an unrelated reason, no rule was ever installed, and the assertion at the
+# bottom reported "Kyverno does not annotate while auditing" — a conclusion
+# about behaviour that had never been exercised. The apply error was three lines
+# above it and said what actually happened. A probe that keeps going after its
+# subject failed to exist is a probe that measures nothing and says something.
+if [ "$FAILED" -ne 0 ]; then
+  echo "::error::the policy was refused, so nothing below was measured. The apply error above is the finding."
+  exit 1
+fi
 
 # The webhook is registered asynchronously after the Policy is accepted, and a
 # Deployment created in that window is admitted by nobody — which reads exactly
