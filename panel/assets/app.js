@@ -12,6 +12,16 @@ class NotSignedIn extends Error {}
 
 const $ = (id) => document.getElementById(id);
 
+// Whether anything actually recorded an admission outcome for this record.
+//
+// The panel decides nothing, and this is the smallest amount of deciding that
+// still honours that: it does not work out whether a deploy was admitted, only
+// whether anybody said. A record carrying no reason, not allowed, and not in
+// the rejected state is one nothing has observed — and saying "refused" about
+// it would be the panel reaching a conclusion the API never gave it.
+const admissionKnown = (r) =>
+  Boolean(r.admission.allowed || r.admission.reason || r.state === "rejected");
+
 // One place that talks to the API, so the signed-out case is handled once.
 // Anything can 401 at any time — a session expires, an account is disabled
 // while somebody has the page open — and the answer is always the same.
@@ -171,7 +181,19 @@ async function showEvidence() {
   // next record down. On a product whose entire claim is that it can tell you
   // why, that is the wrong place to go quiet.
   const latest = history.records[0] || null;
-  const blocked = !current && latest && !latest.admission.allowed;
+  // Read from the state, not inferred from a boolean nobody sets.
+  //
+  // This was `!latest.admission.allowed`, and nothing in the product writes
+  // that field — so it was false on every record ever created, and every
+  // deploy that had not finished syncing yet rendered as "was refused" with a
+  // banner explaining the refusal. On the page whose entire claim is that it
+  // can tell you what happened, the absence of an observation was being shown
+  // as the worst thing that could have happened.
+  //
+  // "rejected" is a state the record reaches because something moved it there.
+  // A record that is merely pending has not been refused; it has not been
+  // looked at, and those are different sentences.
+  const blocked = !current && latest && latest.state === "rejected";
   const shown = current || (blocked ? latest : null);
 
   const parts = [
@@ -210,8 +232,14 @@ async function showEvidence() {
         ["Deployed by", shown.actor.displayName || shown.actor.email || "—"],
       ])),
       box("Admission", dl([
-        ["Outcome", verdict(shown.admission.allowed,
-          shown.admission.allowed ? "admitted" : "refused")],
+        // Three answers and not two. Nothing records an admission outcome yet,
+        // so a page with only "admitted" and "refused" has to call every deploy
+        // in existence refused — which is a claim, made out of a zero value,
+        // about the one thing this page exists to be trusted on.
+        ["Outcome", admissionKnown(shown)
+          ? verdict(shown.admission.allowed,
+              shown.admission.allowed ? "admitted" : "refused")
+          : el("span", { class: "muted" }, "not observed")],
         ["Reason", shown.admission.reason || "—"],
       ])),
     ));
