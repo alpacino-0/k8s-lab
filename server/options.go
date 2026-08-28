@@ -205,6 +205,16 @@ type Options struct {
 	// working installation, just one whose images nothing verifies.
 	Forge forge.Store
 
+	// Proposer opens the pull request that carries the signing workflow into a
+	// tenant's own repository.
+	//
+	// Separate from Forge, and separately optional, because they fail
+	// differently: the store is local and the proposer is a call into somebody
+	// else's forge. An install can hold connections and render policies with no
+	// proposer at all — the workflow is on screen and can be added by hand,
+	// which is the fallback for every forge this build cannot reach.
+	Proposer forge.Proposer
+
 	// GitAuth answers how to authenticate to a repository. nil means the
 	// free build's answer, built from Config.GitTokenFile — and with no token
 	// configured, a deploy is refused with a message that says which flag is

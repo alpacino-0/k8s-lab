@@ -352,3 +352,133 @@ func commitFileOrNil(t *testing.T, repoPath, name string) (string, error) {
 	}
 	return f.Contents()
 }
+
+// fakeProposer records what it was asked and answers without a network.
+type fakeProposer struct {
+	seen  []forge.Connection
+	err   error
+	reply forge.Proposed
+}
+
+func (f *fakeProposer) Propose(_ context.Context, c forge.Connection) (forge.Proposed, error) {
+	f.seen = append(f.seen, c)
+	if f.err != nil {
+		return forge.Proposed{}, f.err
+	}
+	return f.reply, nil
+}
+
+func proposalURL(base string) string { return connectionURL(base) + "/proposal" }
+
+func TestProposingOpensThePullRequestForTheStoredConnection(t *testing.T) {
+	p := &fakeProposer{reply: forge.Proposed{
+		URL: "https://github.com/acme/api/pull/7", Number: 7, Branch: forge.ProposalBranch,
+	}}
+	base := start(t, server.Options{
+		Identity: identityWith(t, identity.RoleOwner),
+		Forge:    forgemem.New(), Proposer: p,
+	})
+	cookie := login(t, base)
+
+	if code, body := put(t, connectionURL(base), connectBody, cookie); code != http.StatusCreated {
+		t.Fatalf("connecting = %d %q", code, body)
+	}
+	code, body := post(t, proposalURL(base), "", cookie)
+	if code != http.StatusCreated {
+		t.Fatalf("proposing = %d %q, want 201", code, body)
+	}
+	if !strings.Contains(body, "pull/7") {
+		t.Errorf("the response does not carry the pull request: %s", body)
+	}
+
+	if len(p.seen) != 1 {
+		t.Fatalf("the proposer was called %d times", len(p.seen))
+	}
+	// The connection it was handed is the stored one, not something rebuilt
+	// from the request — which is what stops a proposal from carrying a
+	// workflow the policy does not pin.
+	if p.seen[0].Identity() != "https://github.com/acme/api/"+server.DefaultWorkflowPath+"@refs/heads/main" {
+		t.Errorf("the proposer was given %q", p.seen[0].Identity())
+	}
+}
+
+// Pressing the button twice must not open a second pull request in a repository
+// damga does not own, and the answer has to say which of the two happened.
+func TestASecondProposalSaysItFoundOneRatherThanMadeOne(t *testing.T) {
+	p := &fakeProposer{reply: forge.Proposed{
+		URL: "https://github.com/acme/api/pull/7", Number: 7,
+		Branch: forge.ProposalBranch, Existing: true,
+	}}
+	base := start(t, server.Options{
+		Identity: identityWith(t, identity.RoleOwner),
+		Forge:    forgemem.New(), Proposer: p,
+	})
+	cookie := login(t, base)
+	if code, _ := put(t, connectionURL(base), connectBody, cookie); code != http.StatusCreated {
+		t.Fatal("connecting failed")
+	}
+
+	code, body := post(t, proposalURL(base), "", cookie)
+	if code != http.StatusOK {
+		t.Errorf("a proposal that found an open pull request = %d, want 200 and not 201 — "+
+			"nothing was created and the panel should not say it was", code)
+	}
+	if !strings.Contains(body, `"existing":true`) {
+		t.Errorf("the response does not say the pull request was already open: %s", body)
+	}
+}
+
+// A forge that refuses is the tenant's to fix by granting access, so it is not
+// a 500 that sends them to the platform's operator.
+func TestAForgeRefusalReachesTheTenant(t *testing.T) {
+	base := start(t, server.Options{
+		Identity: identityWith(t, identity.RoleOwner),
+		Forge:    forgemem.New(),
+		Proposer: &fakeProposer{err: forge.ErrNotPermitted},
+	})
+	cookie := login(t, base)
+	if code, _ := put(t, connectionURL(base), connectBody, cookie); code != http.StatusCreated {
+		t.Fatal("connecting failed")
+	}
+
+	if code, body := post(t, proposalURL(base), "", cookie); code != http.StatusForbidden {
+		t.Errorf("a forge refusal = %d %q, want 403", code, body)
+	}
+}
+
+// Connecting must not depend on a forge being reachable. The store write is
+// local; the pull request is a call into somebody else's service, and coupling
+// them would mean a tenant who cannot connect at all because GitHub is having
+// an afternoon — with not even the file to add by hand.
+func TestConnectingDoesNotNeedAProposer(t *testing.T) {
+	base := start(t, server.Options{
+		Identity: identityWith(t, identity.RoleOwner),
+		Forge:    forgemem.New(),
+	})
+	cookie := login(t, base)
+
+	if code, body := put(t, connectionURL(base), connectBody, cookie); code != http.StatusCreated {
+		t.Fatalf("connecting with no proposer = %d %q, want 201", code, body)
+	}
+	code, body := post(t, proposalURL(base), "", cookie)
+	if code != http.StatusNotImplemented {
+		t.Errorf("proposing with no proposer = %d, want 501", code)
+	}
+	// And it says what to do instead, because there is something to do: the
+	// workflow is on screen.
+	if !strings.Contains(body, "by hand") {
+		t.Errorf("the refusal does not name the fallback: %s", body)
+	}
+}
+
+func TestProposingBeforeConnectingSaysWhichIsMissing(t *testing.T) {
+	base := start(t, server.Options{
+		Identity: identityWith(t, identity.RoleOwner),
+		Forge:    forgemem.New(), Proposer: &fakeProposer{},
+	})
+	cookie := login(t, base)
+
+	if code, body := post(t, proposalURL(base), "", cookie); code != http.StatusConflict {
+		t.Errorf("proposing for an unconnected app = %d %q, want 409", code, body)
+	}
+}

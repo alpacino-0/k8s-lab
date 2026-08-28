@@ -201,6 +201,7 @@ type stores struct {
 	evidence  evidence.Store
 	placement placement.Store
 	forge     forge.Store
+	proposer  forge.Proposer
 	writer    *gitwrite.Writer
 	gitAuth   GitAuth
 }
@@ -221,6 +222,11 @@ var tenantRoutes = []struct {
 	// signing identity, and deploys to several environments out of it.
 	{http.MethodPut, "/apps/{app}/connection", connectRoute},
 	{http.MethodGet, "/apps/{app}/connection", connectionRoute},
+	// Opening the pull request is its own call and not part of connecting.
+	// Storing the connection is local and must not fail because a forge is
+	// down, and this one is safe to repeat: it finds the pull request a
+	// previous attempt opened rather than opening a second.
+	{http.MethodPost, "/apps/{app}/connection/proposal", proposeRoute},
 	{http.MethodGet, "/apps/{app}/envs/{env}/evidence", currentEvidence},
 	{http.MethodGet, "/apps/{app}/envs/{env}/history", history},
 	{http.MethodGet, "/apps/{app}/envs/{env}/verify", verify},
@@ -263,8 +269,9 @@ func (o Options) handler(store evidence.Store, idStore identity.Store) (http.Han
 	g := guard{authorizer: o.Authorizer, identity: idStore, sessions: sess}
 	st := stores{
 		evidence: store, placement: o.Placement,
-		forge:  o.Forge,
-		writer: &gitwrite.Writer{Evidence: store}, gitAuth: o.GitAuth,
+		forge:    o.Forge,
+		proposer: o.Proposer,
+		writer:   &gitwrite.Writer{Evidence: store}, gitAuth: o.GitAuth,
 	}
 	for _, rt := range tenantRoutes {
 		mux.Handle(rt.method+" "+tenantScope+rt.suffix, rt.handler(g, st))

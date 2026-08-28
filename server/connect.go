@@ -209,3 +209,76 @@ func connectionRoute(g guard, st stores) http.Handler {
 		})
 	})
 }
+
+// proposeRoute opens the pull request that carries the signing workflow.
+//
+// Its own call rather than part of connecting, because the two fail
+// differently: storing a connection is local, and this is a request into a
+// forge somebody else runs. Connecting would otherwise fail because GitHub was
+// having an afternoon, and the tenant would have nothing — not even the file to
+// add by hand.
+//
+// Safe to repeat, which is the property that makes a button honest. The
+// implementation finds the pull request a previous attempt opened instead of
+// opening a second one in a repository damga does not own.
+func proposeRoute(g guard, st stores) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The same right as connecting, because it is the same decision
+		// reaching further: this writes a branch into the tenant's own
+		// repository, which is not something the deploy right should carry.
+		_, ref, ok := g.admit(w, r, authz.ActionAppConnect)
+		if !ok {
+			return
+		}
+		if st.forge == nil {
+			problem(w, http.StatusNotImplemented, "this installation has no forge store configured")
+			return
+		}
+		if st.proposer == nil {
+			// Not an error in the install. The workflow is on screen and can be
+			// added by hand, which is the documented fallback for every forge
+			// this build cannot reach — so the message says what to do rather
+			// than only what is missing.
+			problem(w, http.StatusNotImplemented,
+				"this installation cannot open pull requests; add the workflow shown here by hand")
+			return
+		}
+
+		c, err := st.forge.Get(r.Context(), forge.Key{TenantID: ref.TenantID, App: ref.App})
+		switch {
+		case errors.Is(err, forge.ErrNotFound):
+			problem(w, http.StatusConflict, "this app is not connected to a repository yet")
+			return
+		case err != nil:
+			problem(w, http.StatusInternalServerError, "reading the connection failed")
+			return
+		}
+
+		proposed, err := st.proposer.Propose(r.Context(), c)
+		switch {
+		case errors.Is(err, forge.ErrNotPermitted):
+			// The tenant fixes this by granting access, so it is theirs to see
+			// and not a 500 that sends them to the platform's operator.
+			problem(w, http.StatusForbidden, err.Error())
+			return
+		case err != nil:
+			problem(w, http.StatusBadGateway, "the forge did not accept the pull request: "+err.Error())
+			return
+		}
+
+		status := http.StatusCreated
+		if proposed.Existing {
+			// Nothing was created, so it does not say 201. The panel says "your
+			// pull request is still open" off this rather than claiming to have
+			// made one every time somebody presses the button.
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		writeJSON(w, map[string]any{
+			"pullRequest": map[string]any{
+				"url": proposed.URL, "number": proposed.Number,
+				"branch": proposed.Branch, "existing": proposed.Existing,
+			},
+		})
+	})
+}
