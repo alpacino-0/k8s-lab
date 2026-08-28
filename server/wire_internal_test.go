@@ -40,8 +40,6 @@ func TestTheWireTypesCoverTheStoreTypes(t *testing.T) {
 		{evidence.Actor{}, wireActor{}},
 		{evidence.Source{}, wireSource{}},
 		{evidence.Image{}, wireImage{}},
-		{evidence.SignatureVerdict{}, wireSignature{}},
-		{evidence.PolicyResult{}, wirePolicy{}},
 		{evidence.AdmissionOutcome{}, wireAdmission{}},
 		{evidence.Observation{}, wireObservation{}},
 		{evidence.Proof{}, wireProof{}},
@@ -93,7 +91,7 @@ func TestEmptyIsRenderedAsEmptyAndNotAsNull(t *testing.T) {
 		t.Fatalf("Marshal: %v", err)
 	}
 	body := string(b)
-	for _, want := range []string{`"policies":[]`, `"transitions":[]`, `"createdAt":""`} {
+	for _, want := range []string{`"transitions":[]`, `"createdAt":""`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("an empty record does not contain %s\n%s", want, body)
 		}

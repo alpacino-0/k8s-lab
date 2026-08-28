@@ -49,7 +49,7 @@ func main() {
 	}
 
 	var opts server.Options
-	// The one implementation this main supplies that a paid main would swap.
+	// The one implementation this main supplies rather than defaults.
 	// Everything else it passes is a default the server picks for itself.
 	opts.Panel = panel.FS()
 	opts.Config.BindFlags(flag.CommandLine)

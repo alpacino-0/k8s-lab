@@ -114,25 +114,6 @@ const (
 	StateUnknown State = "unknown"
 )
 
-// Tier is which plan the record was produced under. Recorded rather than
-// derived: a retention claim made two years later has to be checkable against
-// what was true then, not against what the licence says today.
-type Tier string
-
-const (
-	TierFree       Tier = "free"
-	TierEnterprise Tier = "enterprise"
-)
-
-// Valid reports whether the tier is one a store may write.
-//
-// Checked rather than defaulted. Tier is copied into the record instead of
-// joined, so that a retention claim made two years later is checkable against
-// what was true then; writing "free" over a caller that forgot would turn that
-// record into a guess, and it would be a guess inside the hash chain, where it
-// cannot be corrected afterwards.
-func (t Tier) Valid() bool { return t == TierFree || t == TierEnterprise }
-
 // Actor is who caused this. ID references the control-plane user row so that
 // an erasure request is one row, not a scan of the archive. DisplayName and
 // Email are copied deliberately: an audit record has to stay readable after
@@ -167,30 +148,6 @@ type Source struct {
 type Image struct {
 	RequestedRef   string
 	AdmittedDigest string
-}
-
-// SignatureVerdict is the supply-chain answer at admission time, frozen. Re-
-// running the check later answers a different question, because a policy can
-// be edited and a signature cannot be revoked.
-type SignatureVerdict struct {
-	Verified bool
-	Issuer   string // e.g. https://token.actions.githubusercontent.com
-	Subject  string // e.g. https://github.com/org/repo/.github/workflows/x.yml@refs/heads/main
-	Digest   string
-	Message  string
-}
-
-// PolicyResult is one gate's answer. Name is the policy, Rule the rule inside
-// it, and Source says which engine answered — the two do not agree about what
-// a "result" is, and the page has to be able to say which one it is quoting.
-type PolicyResult struct {
-	Name     string
-	Rule     string
-	Source   string // "ValidatingAdmissionPolicy" | "kyverno"
-	Result   string // "pass" | "fail" | "warn" | "error" | "skip"
-	Severity string
-	Category string
-	Message  string
 }
 
 // AdmissionOutcome is the API server's verdict, as quoted back to the user.
@@ -242,13 +199,10 @@ type Record struct {
 	IdempotencyKey string
 
 	Ref   Ref
-	Tier  Tier
 	Actor Actor
 
 	Source    Source
 	Image     Image
-	Signature SignatureVerdict
-	Policies  []PolicyResult
 	Admission AdmissionOutcome
 
 	// Note is free text the panel shows. Not a place for structured data.
@@ -335,22 +289,10 @@ type Transition struct {
 	// len(Record.Transitions), which the caller has already read.
 	ExpectEvents *int
 
-	// Policies and Admission are merged into the record when the transition
-	// is the one that learned them. Nil leaves what is there alone; a record's
-	// existing entries are never removed.
-	Policies  []PolicyResult
+	// Admission and Image are merged into the record when the transition is
+	// the one that learned them. Nil leaves what is there alone.
 	Admission *AdmissionOutcome
 	Image     *Image
-
-	// Signature is the supply-chain verdict, learned by whichever transition
-	// observed it and frozen from then on.
-	//
-	// It has always been on the record and there has never been a way to put
-	// it there: the store wrote the columns on Open and read them back, and
-	// every record therefore carried an unverified verdict for ever. A field
-	// nothing can write is a field that reads as a measurement and is a
-	// default, which on an evidence page is the worst of both.
-	Signature *SignatureVerdict
 }
 
 // Order is the direction History and Export walk. Export defaults to Oldest
@@ -383,7 +325,7 @@ type Page struct {
 }
 
 // RetentionPolicy is what the store promises. It is read, not set, through
-// this interface: the free store reports its fixed window, an archive reports
+// this interface: a store reports its fixed window, another reports
 // whatever it was configured with, and the evidence page prints the answer
 // instead of a marketing claim.
 type RetentionPolicy struct {
@@ -398,8 +340,6 @@ type RetentionPolicy struct {
 	Immutable bool
 	// Anchor names where chain checkpoints are published, if anywhere.
 	Anchor string
-	// Tier is the plan this policy came from.
-	Tier Tier
 }
 
 // PruneResult is what Prune did. Reported so the platform can show it rather
@@ -454,7 +394,7 @@ type Proof struct {
 	RootHash  []byte
 	CheckedAt time.Time
 	// Anchors are external attestations covering this range, if the store
-	// publishes any. Empty for the free store, which is a complete answer
+	// publishes any. Empty when nothing does, which is a complete answer
 	// rather than a missing one: the chain is still verifiable, it is just not
 	// witnessed by anyone else.
 	Anchors []Anchor
@@ -468,11 +408,11 @@ type Anchor struct {
 	At        time.Time
 }
 
-// Store is the whole persistence surface of the evidence system, and the seam
-// damga-ee replaces. Every method is implemented completely by the free store;
-// what the paid archive changes is the policy the same methods run under —
-// retention window, whether the backing store is WORM, and whether checkpoints
-// are published — never whether a method works.
+// Store is the whole persistence surface of the evidence system. Three
+// implementations satisfy it — in-memory, SQLite and PostgreSQL — and what
+// differs between them is the policy the same methods run under (retention
+// window, whether the backing store refuses in-place edits), never whether a
+// method works.
 type Store interface {
 	// Append writes a new record in StatePending unless the caller set a
 	// different State, which only the observer does when it records a deploy
@@ -514,8 +454,7 @@ type Store interface {
 	// not go quiet at the retention edge while the app is still running.
 	Refs(ctx context.Context, tenantID string) ([]Ref, error)
 
-	// Export streams records in the requested encoding. Free and paid differ
-	// in how far back the query can reach, not in whether export exists.
+	// Export streams records in the requested encoding.
 	Export(ctx context.Context, req ExportRequest, w io.Writer) (ExportResult, error)
 
 	// Retention reports the policy in force. The page prints it.

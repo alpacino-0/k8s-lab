@@ -19,7 +19,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // configured per engine.
 //
 // There are two engines and there has to be: SQLite is what a one-node install
-// runs, and PostgreSQL is what the paid archive requires, because SQLite has no
+// runs, and PostgreSQL is what a larger one wants, because SQLite has no
 // roles and no REVOKE and therefore cannot enforce "we cannot modify evidence"
 // — only promise it. Writing the logic twice would have meant auditing every
 // write path against both engines forever, so the logic is written once and the

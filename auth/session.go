@@ -36,7 +36,7 @@ import (
 // the cookie — but Chrome and Safari refuse a prefixed cookie on
 // http://localhost, which is exactly this project's documented first run. A
 // login that silently never sticks, with nothing in the logs, is a wall at the
-// front door for the one person the free tier exists to reach.
+// front door for the one person this exists to reach.
 //
 // The property is obtained instead by omitting Domain, which already stops a
 // parent from targeting this cookie by name, and by binding each session to the
@@ -63,7 +63,7 @@ type Sessions struct {
 	Secure bool
 
 	// SameSite defaults to Lax. It is a field rather than a constant because
-	// SAML's HTTP-POST binding cannot carry a Lax cookie, and SAML is a paid
+	// SAML's HTTP-POST binding cannot carry a Lax cookie, and that is a
 	// feature that must not require forking this package to enable.
 	//
 	// It is defence in depth and not the CSRF control; that is

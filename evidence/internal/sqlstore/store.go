@@ -108,11 +108,6 @@ func (s *Store) Append(ctx context.Context, rec evidence.Record) (evidence.Recor
 	if rec.IdempotencyKey == "" {
 		return evidence.Record{}, errors.New("evidence: IdempotencyKey is required")
 	}
-	// Ahead of the CHECK constraint that would catch it anyway, so the error
-	// names the field rather than the constraint.
-	if !rec.Tier.Valid() {
-		return evidence.Record{}, fmt.Errorf("evidence: invalid tier %q", rec.Tier)
-	}
 	if rec.State == "" {
 		rec.State = evidence.StatePending
 	}
@@ -168,29 +163,21 @@ func (s *Store) Append(ctx context.Context, rec evidence.Record) (evidence.Recor
 	rec.Hash = evidence.ChainRecord(rec.PrevHash, rec)
 	rec.Transitions = nil
 
-	policies, err := json.Marshal(rec.Policies)
-	if err != nil {
-		return evidence.Record{}, err
-	}
-
 	if err := s.txExec(ctx, tx, `
 		INSERT INTO record (
-		  id, idempotency_key, tenant_id, app, env, seq, tier,
+		  id, idempotency_key, tenant_id, app, env, seq,
 		  actor_id, actor_kind, actor_name, actor_email,
 		  repo_url, git_ref, repo_path, commit_sha, author_email, committer_email,
 		  image_requested, image_admitted,
-		  sig_verified, sig_issuer, sig_subject, sig_digest, sig_message,
-		  policies, adm_allowed, adm_reason, adm_message, note,
+		  adm_allowed, adm_reason, adm_message, note,
 		  state, initial_state, created_at, updated_at, prev_hash, hash
-		) VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?,?, ?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?)`,
-		string(rec.ID), rec.IdempotencyKey, rec.Ref.TenantID, rec.Ref.App, rec.Ref.Env, rec.Seq, string(rec.Tier),
+		) VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?,?, ?,?, ?,?,?,?, ?,?,?,?,?,?)`,
+		string(rec.ID), rec.IdempotencyKey, rec.Ref.TenantID, rec.Ref.App, rec.Ref.Env, rec.Seq,
 		rec.Actor.ID, rec.Actor.Kind, rec.Actor.DisplayName, rec.Actor.Email,
 		rec.Source.RepoURL, rec.Source.Ref, rec.Source.Path, rec.Source.CommitSHA,
 		rec.Source.AuthorEmail, rec.Source.CommitterEmail,
 		rec.Image.RequestedRef, rec.Image.AdmittedDigest,
-		boolInt(rec.Signature.Verified), rec.Signature.Issuer, rec.Signature.Subject,
-		rec.Signature.Digest, rec.Signature.Message,
-		string(policies), boolInt(rec.Admission.Allowed), rec.Admission.Reason, rec.Admission.Message, rec.Note,
+		boolInt(rec.Admission.Allowed), rec.Admission.Reason, rec.Admission.Message, rec.Note,
 		string(rec.State), string(rec.InitialState), asText(rec.CreatedAt), asText(rec.UpdatedAt),
 		hex.EncodeToString(rec.PrevHash), hex.EncodeToString(rec.Hash),
 	); err != nil {
@@ -287,33 +274,20 @@ func (s *Store) Transition(ctx context.Context, id evidence.ID, t evidence.Trans
 	rec.Transitions = append(rec.Transitions, ev)
 	rec.State = t.To
 	rec.UpdatedAt = evidence.Canonical(s.now())
-	rec.Policies = append(rec.Policies, t.Policies...)
 	if t.Admission != nil {
 		rec.Admission = *t.Admission
 	}
 	if t.Image != nil {
 		rec.Image = *t.Image
 	}
-	if t.Signature != nil {
-		rec.Signature = *t.Signature
-	}
-
-	policies, err := json.Marshal(rec.Policies)
-	if err != nil {
-		return evidence.Record{}, err
-	}
 	if err := s.txExec(ctx, tx, `
-		UPDATE record SET state = ?, updated_at = ?, policies = ?,
+		UPDATE record SET state = ?, updated_at = ?,
 		       adm_allowed = ?, adm_reason = ?, adm_message = ?,
-		       image_requested = ?, image_admitted = ?,
-		       sig_verified = ?, sig_issuer = ?, sig_subject = ?,
-		       sig_digest = ?, sig_message = ?
+		       image_requested = ?, image_admitted = ?
 		 WHERE id = ?`,
-		string(rec.State), asText(rec.UpdatedAt), string(policies),
+		string(rec.State), asText(rec.UpdatedAt),
 		boolInt(rec.Admission.Allowed), rec.Admission.Reason, rec.Admission.Message,
-		rec.Image.RequestedRef, rec.Image.AdmittedDigest,
-		boolInt(rec.Signature.Verified), rec.Signature.Issuer, rec.Signature.Subject,
-		rec.Signature.Digest, rec.Signature.Message, string(rec.ID),
+		rec.Image.RequestedRef, rec.Image.AdmittedDigest, string(rec.ID),
 	); err != nil {
 		return evidence.Record{}, err
 	}
@@ -556,7 +530,6 @@ func (s *Store) Retention(context.Context) (evidence.RetentionPolicy, error) {
 		// becomes so once the application connects as a role without UPDATE or
 		// DELETE — which is a deployment decision this package cannot observe.
 		Immutable: false,
-		Tier:      evidence.TierFree,
 	}, nil
 }
 
@@ -692,31 +665,27 @@ type querier interface {
 func (s *Store) load(ctx context.Context, q querier, id evidence.ID) (evidence.Record, error) {
 	var (
 		rec                        evidence.Record
-		tier, state, initial       string
+		state, initial             string
 		createdAt, updatedAt       string
 		prevHash, hash             string
-		policiesJSON               string
-		sigVerified, admAllowed    int
+		admAllowed                 int
 		recID                      string
 		tenantID, appName, envName string
 	)
 	err := q.QueryRowContext(ctx, s.d.Rebind(`
-		SELECT id, idempotency_key, tenant_id, app, env, seq, tier,
+		SELECT id, idempotency_key, tenant_id, app, env, seq,
 		       actor_id, actor_kind, actor_name, actor_email,
 		       repo_url, git_ref, repo_path, commit_sha, author_email, committer_email,
 		       image_requested, image_admitted,
-		       sig_verified, sig_issuer, sig_subject, sig_digest, sig_message,
-		       policies, adm_allowed, adm_reason, adm_message, note,
+		       adm_allowed, adm_reason, adm_message, note,
 		       state, initial_state, created_at, updated_at, prev_hash, hash
 		  FROM record WHERE id = ?`), string(id)).Scan(
-		&recID, &rec.IdempotencyKey, &tenantID, &appName, &envName, &rec.Seq, &tier,
+		&recID, &rec.IdempotencyKey, &tenantID, &appName, &envName, &rec.Seq,
 		&rec.Actor.ID, &rec.Actor.Kind, &rec.Actor.DisplayName, &rec.Actor.Email,
 		&rec.Source.RepoURL, &rec.Source.Ref, &rec.Source.Path, &rec.Source.CommitSHA,
 		&rec.Source.AuthorEmail, &rec.Source.CommitterEmail,
 		&rec.Image.RequestedRef, &rec.Image.AdmittedDigest,
-		&sigVerified, &rec.Signature.Issuer, &rec.Signature.Subject,
-		&rec.Signature.Digest, &rec.Signature.Message,
-		&policiesJSON, &admAllowed, &rec.Admission.Reason, &rec.Admission.Message, &rec.Note,
+		&admAllowed, &rec.Admission.Reason, &rec.Admission.Message, &rec.Note,
 		&state, &initial, &createdAt, &updatedAt, &prevHash, &hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return evidence.Record{}, evidence.ErrNotFound
@@ -727,9 +696,7 @@ func (s *Store) load(ctx context.Context, q querier, id evidence.ID) (evidence.R
 
 	rec.ID = evidence.ID(recID)
 	rec.Ref = evidence.Ref{TenantID: tenantID, App: appName, Env: envName}
-	rec.Tier = evidence.Tier(tier)
 	rec.State, rec.InitialState = evidence.State(state), evidence.State(initial)
-	rec.Signature.Verified = sigVerified == 1
 	rec.Admission.Allowed = admAllowed == 1
 	if rec.CreatedAt, err = fromText(createdAt); err != nil {
 		return evidence.Record{}, err
@@ -743,10 +710,6 @@ func (s *Store) load(ctx context.Context, q querier, id evidence.ID) (evidence.R
 	if rec.Hash, err = hex.DecodeString(hash); err != nil {
 		return evidence.Record{}, err
 	}
-	if err := json.Unmarshal([]byte(policiesJSON), &rec.Policies); err != nil {
-		return evidence.Record{}, fmt.Errorf("%s: stored policies are not JSON: %w", s.d.Name(), err)
-	}
-
 	rec.Transitions, err = s.loadEvents(ctx, q, rec.ID)
 	if err != nil {
 		return evidence.Record{}, err

@@ -16,7 +16,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
 // Package postgres is the evidence store for an installation that has more
-// than one node, and the only one the paid archive can be built on.
+// than one node, and the only one an append-only deployment can be built on.
 //
 // The reason is not scale. SQLite has no roles and no REVOKE, so the process
 // that writes evidence can always rewrite it: that engine can carry "we do not

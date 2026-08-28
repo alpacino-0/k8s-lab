@@ -269,7 +269,7 @@ func (o Options) handler(store evidence.Store, idStore identity.Store) (http.Han
 
 	// Mounted only when there is one. There is no built-in bundle yet, and
 	// serving a 404 at "/" from an embedded empty FS would be a worse answer
-	// than not claiming the route at all — an enterprise build could then not
+	// than not claiming the route at all — another build could then not
 	// take it either, because registering it twice panics.
 	if o.Panel != nil {
 		mux.Handle("GET /", http.FileServerFS(o.Panel))

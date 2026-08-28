@@ -29,10 +29,10 @@ import (
 // what is chained is append-time facts and each state change as its own link.
 // The store is an append-only log and the record's State is a projection of it.
 //
-// It is exported because the free store and a paid archive have to produce
+// It is exported because every store implementation has to produce
 // identical hashes, or an export taken before an upgrade stops verifying after
 // one — which would make the retention promise unfalsifiable exactly when it
-// starts being paid for.
+// starts mattering.
 
 // Precision is the resolution every timestamp is reduced to before it is
 // hashed, and therefore the resolution a store has to persist at.
@@ -61,12 +61,9 @@ type chainedRecord struct {
 	ID             ID               `json:"id"`
 	Seq            int64            `json:"seq"`
 	Ref            Ref              `json:"ref"`
-	Tier           Tier             `json:"tier"`
 	Actor          Actor            `json:"actor"`
 	Source         Source           `json:"source"`
 	Image          Image            `json:"image"`
-	Signature      SignatureVerdict `json:"signature"`
-	Policies       []PolicyResult   `json:"policies"`
 	Admission      AdmissionOutcome `json:"admission"`
 	Note           string           `json:"note"`
 	InitialState   State            `json:"initialState"`
@@ -76,9 +73,9 @@ type chainedRecord struct {
 // ChainRecord returns the link for a newly appended record.
 func ChainRecord(prev []byte, r Record) []byte {
 	return link(prev, chainedRecord{
-		IdempotencyKey: r.IdempotencyKey, ID: r.ID, Seq: r.Seq, Ref: r.Ref, Tier: r.Tier,
-		Actor: r.Actor, Source: r.Source, Image: r.Image, Signature: r.Signature,
-		Policies: r.Policies, Admission: r.Admission, Note: r.Note,
+		IdempotencyKey: r.IdempotencyKey, ID: r.ID, Seq: r.Seq, Ref: r.Ref,
+		Actor: r.Actor, Source: r.Source, Image: r.Image,
+		Admission: r.Admission, Note: r.Note,
 		InitialState: r.InitialState, CreatedAt: Canonical(r.CreatedAt),
 	})
 }

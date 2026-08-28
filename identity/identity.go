@@ -18,30 +18,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // Package identity is who may act, in which tenant, and how they proved it.
 //
 // It declares types and one interface and performs no I/O, the same shape as
-// package evidence — but it is deliberately NOT an Options seam, and the
-// difference is the point. The evidence store is replaced wholesale by a paid
-// build, because an audit archive is a different product. Identity is not:
-// single sign-on changes how an account row is *created*, never where accounts
-// live, so making this a seam would force the enterprise build to reimplement
-// teams and memberships to gain nothing.
-//
-// # The line this package draws
-//
-// Authenticating against an identity provider is free — a password, GitHub,
-// or the customer's own Keycloak or Okta over OIDC. What is paid is making
-// that provider the record of authority: SAML, SCIM, standing group-to-team
-// synchronisation, and enforced single sign-on as a policy a local config edit
-// cannot bypass. Everything in this package is the free half.
+// package evidence.
 //
 // # Its relationship to the evidence store
 //
 // There is no foreign key into the evidence schema and there must never be a
 // join across the two. That is what the copied name and email on an evidence
-// record buy: the archive is a store a paid build replaces entirely, possibly
-// against another database, and it can only be replaced without carrying the
-// account tables if nothing ever joined to them. The first query that resolves
-// a fresher display name for an old deploy converts a seam into a schema
-// contract, and nothing fails until the enterprise archive ships.
+// record buy: the two stores can live in different databases, and they can only
+// do that if nothing ever joined across them. The first query that resolves a
+// fresher display name for an old deploy converts a seam into a schema
+// contract — and nothing fails at the moment it is written.
 package identity
 
 import (
@@ -61,25 +47,8 @@ var (
 	ErrInvalid = errors.New("identity: invalid")
 )
 
-// Tier is what a tenant is paying for. It mirrors evidence.Tier and must keep
-// mirroring it: the value is copied onto every evidence record so that a
-// retention claim made two years later is checkable against what was true then.
-//
-// Nothing in the free build branches on this, which is what keeps it out of the
-// crippleware reading — writing "enterprise" here on a free binary buys the
-// writer nothing at all.
-type Tier string
-
-const (
-	TierFree       Tier = "free"
-	TierEnterprise Tier = "enterprise"
-)
-
-func (t Tier) Valid() bool { return t == TierFree || t == TierEnterprise }
-
-// Role is the free tier's whole permission model: three values, no custom
-// roles. Fine-grained roles are the paid tier, and they arrive by replacing the
-// Authorizer rather than by adding rows here.
+// Role is the whole permission model: three values, no custom roles. Anything
+// finer arrives by replacing the Authorizer rather than by adding rows here.
 type Role string
 
 const (
@@ -98,7 +67,6 @@ type Tenant struct {
 	ID          string
 	Slug        string
 	DisplayName string
-	Tier        Tier
 	Suspended   bool
 	CreatedAt   time.Time
 }
@@ -177,7 +145,7 @@ type Session struct {
 
 // Store is the whole persistence surface of identity.
 //
-// Deliberately narrow. Everything a paid build adds — SAML, SCIM, directory
+// Deliberately narrow. Everything a directory integration would add — SAML,
 // sync — creates and updates the same rows through the same methods; none of it
 // needs a different store, which is why this is not an Options seam.
 type Store interface {
@@ -186,14 +154,14 @@ type Store interface {
 	// Tenant returns one by ID.
 	Tenant(ctx context.Context, id string) (Tenant, error)
 	// UpdateTenant replaces the mutable half of a tenant: its slug, display
-	// name, tier and suspension. The id and CreatedAt are not among them —
+	// name and suspension. The id and CreatedAt are not among them —
 	// evidence records carry a copy of the id across a boundary with no
 	// foreign key, so a mutable id silently orphans every record ever written
 	// about the tenant.
 	//
 	// Whole-row rather than one setter per field. Suspending a tenant and
 	// moving it to another plan are the same kind of act — an administrative
-	// change to one row — and a store with SetTier, SetSuspended, SetSlug
+	// change to one row — and a store with SetSuspended, SetSlug
 	// grows a method every time the model does, each with its own chance of
 	// forgetting the not-found case.
 	UpdateTenant(ctx context.Context, t Tenant) (Tenant, error)

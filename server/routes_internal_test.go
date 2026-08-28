@@ -58,7 +58,6 @@ func TestEveryTenantRouteIsGuarded(t *testing.T) {
 	for _, id := range []string{home, foreign} {
 		if _, err := idStore.CreateTenant(ctx, identity.Tenant{
 			ID: id, Slug: strings.TrimPrefix(id, "t_"), DisplayName: id,
-			Tier: identity.TierFree,
 		}); err != nil {
 			t.Fatalf("CreateTenant %s: %v", id, err)
 		}

@@ -39,7 +39,6 @@ func openRecord(t *testing.T, s evidence.Store, key string) evidence.Record {
 	rec, err := s.Append(context.Background(), evidence.Record{
 		IdempotencyKey: key,
 		Ref:            testRef,
-		Tier:           evidence.TierFree,
 		Source:         evidence.Source{CommitSHA: key, RepoURL: "https://example.test/r.git"},
 	})
 	if err != nil {

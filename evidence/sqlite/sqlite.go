@@ -24,8 +24,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //
 // It is not the whole answer, and the limit is worth stating where someone
 // choosing it will read it: SQLite has no roles and no REVOKE, so it can carry
-// "we do not modify evidence" and never "we cannot". The paid archive is sold
-// on the second sentence, and that tier needs PostgreSQL.
+// "we do not modify evidence" and never "we cannot". An install that needs
+// the second sentence needs PostgreSQL and a role without UPDATE.
 package sqlite
 
 import (
@@ -70,7 +70,7 @@ func (dialect) Migrations() fs.FS { return migrations }
 // Options configures Open. The zero value is usable.
 type Options struct {
 	// Window is how long a record that is not current is kept. Zero means
-	// unbounded, which is the free tier's default: a sweep is what blanks a
+	// unbounded, which is the default: a sweep is what blanks a
 	// page, and the page is the product.
 	Window time.Duration
 }

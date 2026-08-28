@@ -16,7 +16,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
 // Package postgres is the identity store for an installation with more than one
-// node, and the one the paid tier requires — because it is the only engine that
+// node — because it is the only engine that
 // can be handed a role with INSERT and SELECT and neither UPDATE nor DELETE,
 // enforced in a different process from the one making the claim.
 package postgres

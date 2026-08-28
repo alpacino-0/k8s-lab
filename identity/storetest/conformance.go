@@ -52,7 +52,6 @@ func Run(t *testing.T, newStore Factory) {
 		fn   func(*testing.T, Factory)
 	}{
 		{"TenantRoundTrips", testTenantRoundTrips},
-		{"TenantRejectsAnInvalidTier", testTenantRejectsAnInvalidTier},
 		{"SlugIsUnique", testSlugIsUnique},
 		{"UpdateTenantChangesOnlyTheMutableHalf", testUpdateTenantChangesOnlyTheMutableHalf},
 		{"AccountRoundTrips", testAccountRoundTrips},
@@ -108,7 +107,6 @@ const (
 func tenant() identity.Tenant {
 	return identity.Tenant{
 		ID: tenantID, Slug: "alpha", DisplayName: "Alpha",
-		Tier: identity.TierFree,
 	}
 }
 
@@ -165,22 +163,8 @@ func testTenantRoundTrips(t *testing.T, newStore Factory) {
 	if err != nil {
 		t.Fatalf("TenantBySlug: %v", err)
 	}
-	if byID.ID != bySlug.ID || byID.Tier != identity.TierFree {
+	if byID.ID != bySlug.ID {
 		t.Errorf("the two lookups disagree: %+v vs %+v", byID, bySlug)
-	}
-}
-
-// The tier is copied onto every evidence record, where it lands inside a hash
-// chain and can never be corrected. A store that accepts a nonsense value there
-// makes every retention claim built on it a guess.
-func testTenantRejectsAnInvalidTier(t *testing.T, newStore Factory) {
-	s := newStore(t)
-	for _, tier := range []identity.Tier{"", "platinum"} {
-		x := tenant()
-		x.Tier = tier
-		if _, err := s.CreateTenant(context.Background(), x); !errors.Is(err, identity.ErrInvalid) {
-			t.Errorf("CreateTenant with tier %q returned %v, want ErrInvalid", tier, err)
-		}
 	}
 }
 
@@ -487,7 +471,7 @@ func testAnExpiredSessionIsNotASession(t *testing.T, newStore Factory) {
 	}
 }
 
-// What deprovisioning needs. The paid tier sells SCIM, and SCIM's whole promise
+// What deprovisioning needs. Directory synchronisation's whole promise
 // is that removing somebody from the directory removes their access now —
 // not when a token happens to expire.
 func testSessionsCanBeTerminatedByAccount(t *testing.T, newStore Factory) {
@@ -622,7 +606,7 @@ func testBootstrapHappensAtMostOnce(t *testing.T, newStore Factory) {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 
-	other := identity.Tenant{ID: otherTenantID, Slug: betaSlug, DisplayName: betaName, Tier: identity.TierFree}
+	other := identity.Tenant{ID: otherTenantID, Slug: betaSlug, DisplayName: betaName}
 	stranger := identity.Account{
 		ID: "a_stranger", Kind: kindUser, Email: "stranger@example.test",
 		AuditEmail: "a_stranger@users.damga.local", DisplayName: "Stranger",
@@ -667,7 +651,7 @@ func testAFailedBootstrapLeavesNothingBehind(t *testing.T, newStore Factory) {
 
 	// And the proof that the state is still usable: a bootstrap that does not
 	// collide still works.
-	free := identity.Tenant{ID: otherTenantID, Slug: betaSlug, DisplayName: betaName, Tier: identity.TierFree}
+	free := identity.Tenant{ID: otherTenantID, Slug: betaSlug, DisplayName: betaName}
 	if err := s.Bootstrap(ctx, free, account(), identity.Credential{Hash: fakeHash}); err != nil {
 		t.Fatalf("the store is unusable after a failed bootstrap: %v", err)
 	}
@@ -707,8 +691,7 @@ func testConcurrentBootstrapsProduceOneOwner(t *testing.T, newStore Factory) {
 			// no two of them can collide on anything except the claim itself.
 			tn := identity.Tenant{
 				ID: "t_" + string(rune('a'+i)), Slug: string(rune('a' + i)),
-				DisplayName: "T", Tier: identity.TierFree,
-			}
+				DisplayName: "T"}
 			ac := identity.Account{
 				ID: "a_" + string(rune('a'+i)), Kind: kindUser,
 				Email:      string(rune('a'+i)) + "@example.test",
@@ -756,14 +739,12 @@ func testUpdateTenantChangesOnlyTheMutableHalf(t *testing.T, newStore Factory) {
 	// builds the row from a form will do.
 	updated, err := s.UpdateTenant(ctx, identity.Tenant{
 		ID: tenantID, Slug: renamedSlug, DisplayName: "Alpha Renamed",
-		Tier: identity.TierEnterprise, Suspended: true,
+		Suspended: true,
 	})
 	if err != nil {
 		t.Fatalf("UpdateTenant: %v", err)
 	}
 	switch {
-	case updated.Tier != identity.TierEnterprise:
-		t.Errorf("Tier = %q, want enterprise", updated.Tier)
 	case !updated.Suspended:
 		t.Error("Suspended did not take")
 	case updated.Slug != renamedSlug:
@@ -780,7 +761,7 @@ func testUpdateTenantChangesOnlyTheMutableHalf(t *testing.T, newStore Factory) {
 		t.Errorf("the old slug still resolves: %v", err)
 	}
 	stored, err := s.Tenant(ctx, tenantID)
-	if err != nil || !stored.Suspended || stored.Tier != identity.TierEnterprise {
+	if err != nil || !stored.Suspended {
 		t.Errorf("the change did not survive a read: %+v err=%v", stored, err)
 	}
 
@@ -788,20 +769,17 @@ func testUpdateTenantChangesOnlyTheMutableHalf(t *testing.T, newStore Factory) {
 	// engines treat an UPDATE matching no rows as fine, so this is the case
 	// that has to be checked rather than assumed.
 	if _, err := s.UpdateTenant(ctx, identity.Tenant{
-		ID: "t_nobody", Slug: "nobody", Tier: identity.TierFree,
-	}); !errors.Is(err, identity.ErrNotFound) {
+		ID: "t_nobody", Slug: "nobody"}); !errors.Is(err, identity.ErrNotFound) {
 		t.Errorf("updating a tenant that does not exist returned %v, want ErrNotFound", err)
 	}
 
 	// And a slug another tenant already holds is refused rather than taken.
 	if _, err := s.CreateTenant(ctx, identity.Tenant{
-		ID: otherTenantID, Slug: betaSlug, DisplayName: betaName, Tier: identity.TierFree,
-	}); err != nil {
+		ID: otherTenantID, Slug: betaSlug, DisplayName: betaName}); err != nil {
 		t.Fatalf("CreateTenant beta: %v", err)
 	}
 	if _, err := s.UpdateTenant(ctx, identity.Tenant{
-		ID: otherTenantID, Slug: renamedSlug, Tier: identity.TierFree,
-	}); !errors.Is(err, identity.ErrDuplicate) {
+		ID: otherTenantID, Slug: renamedSlug}); !errors.Is(err, identity.ErrDuplicate) {
 		t.Errorf("taking another tenant's slug returned %v, want ErrDuplicate", err)
 	}
 }

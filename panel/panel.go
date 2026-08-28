@@ -24,12 +24,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //   - No npm. A Go product whose own interface needs a second toolchain has
 //     two dependency trees to audit, two lockfiles to keep current and two
 //     things that can break a release — for a page whose job is to render one
-//     record and a list. The core will not grow one; a paid panel that wants
-//     React supplies its own bundle through server.Options.Panel.
-//   - Nothing loaded from a CDN. Air-gapped installation is a paid feature,
-//     but a free install that silently stops working without a route to the
-//     internet is not a free install, it is a hosted product with extra steps.
-//     Everything the page needs is in the binary.
+//     record and a list. This will not grow one.
+//   - Nothing loaded from a CDN. An install that silently stops working
+//     without a route to the internet is not a self-hosted product, it is a
+//     hosted one with extra steps. Everything the page needs is in the binary.
 //   - There are tests, and they need nothing installed. app_test.js runs under
 //     node --test, which is built in — so the argument against a build step
 //     holds without extending to an argument against being checked. It exists

@@ -3,7 +3,7 @@
 -- Written in the subset of SQL that is correct on both SQLite and PostgreSQL,
 -- because the second engine is not hypothetical: SQLite has no roles and no
 -- REVOKE, so it can support "we do not modify evidence" but never "we cannot",
--- and the paid archive is sold on the second sentence. The rules that follow
+-- and an install that needs the second sentence needs PostgreSQL. The rules that follow
 -- from that, and that are cheap now and expensive later:
 --
 --   * TEXT ids and lowercase-hex digests, never a uuid or bytea column type.
@@ -32,8 +32,6 @@ CREATE TABLE record (
   env                TEXT NOT NULL,
   seq                INTEGER NOT NULL,
 
-  tier               TEXT NOT NULL CHECK (tier IN ('free', 'enterprise')),
-
   -- Actor. DisplayName and Email are copied rather than joined: an audit
   -- record has to stay readable after the account is gone.
   actor_id           TEXT NOT NULL,
@@ -50,25 +48,11 @@ CREATE TABLE record (
   author_email       TEXT NOT NULL,
   committer_email    TEXT NOT NULL,
 
-  -- Image. requested is what git said, admitted is what ran after Kyverno's
-  -- mutateDigest rewrote the reference. Both are kept because they disagree
+  -- Image. requested is what git said; admitted is the resolved digest when
+  -- something in the cluster reports one. Both are kept because they disagree
   -- exactly when something interesting happened.
   image_requested    TEXT NOT NULL,
   image_admitted     TEXT NOT NULL,
-
-  -- The supply-chain answer at admission time, frozen. Re-running the check
-  -- later answers a different question: a policy can be edited and a signature
-  -- cannot be revoked.
-  sig_verified       INTEGER NOT NULL CHECK (sig_verified IN (0, 1)),
-  sig_issuer         TEXT NOT NULL,
-  sig_subject        TEXT NOT NULL,
-  sig_digest         TEXT NOT NULL,
-  sig_message        TEXT NOT NULL,
-
-  -- JSON. Deliberately opaque to the database: these are quoted back verbatim
-  -- and never filtered on, and a schema for them would have to track two
-  -- policy engines that do not agree about what a result is.
-  policies           TEXT NOT NULL,
 
   adm_allowed        INTEGER NOT NULL CHECK (adm_allowed IN (0, 1)),
   adm_reason         TEXT NOT NULL,

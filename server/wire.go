@@ -29,7 +29,7 @@ import (
 // JSON tags on evidence.Record.
 //
 // The hash chain is computed with json.Marshal over evidence.chainedRecord,
-// which carries Ref, Actor, Source, Image, SignatureVerdict, PolicyResult and
+// which carries Ref, Actor, Source, Image and
 // AdmissionOutcome by value. Those types have no tags, so the chain hashes
 // their Go field names — "TenantID", not "tenantId". Adding tags to make the
 // API read well would change the bytes every existing record was hashed over,
@@ -73,24 +73,6 @@ type wireImage struct {
 	AdmittedDigest string `json:"admittedDigest"`
 }
 
-type wireSignature struct {
-	Verified bool   `json:"verified"`
-	Issuer   string `json:"issuer"`
-	Subject  string `json:"subject"`
-	Digest   string `json:"digest"`
-	Message  string `json:"message"`
-}
-
-type wirePolicy struct {
-	Name     string `json:"name"`
-	Rule     string `json:"rule"`
-	Source   string `json:"source"`
-	Result   string `json:"result"`
-	Severity string `json:"severity"`
-	Category string `json:"category"`
-	Message  string `json:"message"`
-}
-
 type wireAdmission struct {
 	Allowed bool   `json:"allowed"`
 	Reason  string `json:"reason"`
@@ -120,24 +102,18 @@ type wireRecord struct {
 	IdempotencyKey string        `json:"idempotencyKey"`
 	Seq            int64         `json:"seq"`
 	Ref            wireRef       `json:"ref"`
-	Tier           string        `json:"tier"`
 	Actor          wireActor     `json:"actor"`
 	Source         wireSource    `json:"source"`
 	Image          wireImage     `json:"image"`
-	Signature      wireSignature `json:"signature"`
-	// Never null. A client that writes `for (const p of record.policies)`
-	// should not have to know that "no policies ran" and "the field is
-	// missing" are spelled differently.
-	Policies     []wirePolicy  `json:"policies"`
-	Admission    wireAdmission `json:"admission"`
-	Note         string        `json:"note"`
-	State        string        `json:"state"`
-	InitialState string        `json:"initialState"`
-	CreatedAt    string        `json:"createdAt"`
-	UpdatedAt    string        `json:"updatedAt"`
-	Transitions  []wireEvent   `json:"transitions"`
-	PrevHash     string        `json:"prevHash"`
-	Hash         string        `json:"hash"`
+	Admission      wireAdmission `json:"admission"`
+	Note           string        `json:"note"`
+	State          string        `json:"state"`
+	InitialState   string        `json:"initialState"`
+	CreatedAt      string        `json:"createdAt"`
+	UpdatedAt      string        `json:"updatedAt"`
+	Transitions    []wireEvent   `json:"transitions"`
+	PrevHash       string        `json:"prevHash"`
+	Hash           string        `json:"hash"`
 }
 
 type wireProof struct {
@@ -202,13 +178,6 @@ func effectiveCommit(r evidence.Record) string {
 }
 
 func toWireRecord(r evidence.Record) wireRecord {
-	policies := make([]wirePolicy, 0, len(r.Policies))
-	for _, p := range r.Policies {
-		policies = append(policies, wirePolicy{
-			Name: p.Name, Rule: p.Rule, Source: p.Source, Result: p.Result,
-			Severity: p.Severity, Category: p.Category, Message: p.Message,
-		})
-	}
 	transitions := make([]wireEvent, 0, len(r.Transitions))
 	for _, e := range r.Transitions {
 		ev := wireEvent{
@@ -229,7 +198,7 @@ func toWireRecord(r evidence.Record) wireRecord {
 	}
 	return wireRecord{
 		ID: string(r.ID), IdempotencyKey: r.IdempotencyKey, Seq: r.Seq,
-		Ref: toWireRef(r.Ref), Tier: string(r.Tier),
+		Ref: toWireRef(r.Ref),
 		Actor: wireActor{
 			ID: r.Actor.ID, Kind: r.Actor.Kind,
 			DisplayName: r.Actor.DisplayName, Email: r.Actor.Email,
@@ -242,12 +211,6 @@ func toWireRecord(r evidence.Record) wireRecord {
 		Image: wireImage{
 			RequestedRef: r.Image.RequestedRef, AdmittedDigest: r.Image.AdmittedDigest,
 		},
-		Signature: wireSignature{
-			Verified: r.Signature.Verified, Issuer: r.Signature.Issuer,
-			Subject: r.Signature.Subject, Digest: r.Signature.Digest,
-			Message: r.Signature.Message,
-		},
-		Policies: policies,
 		Admission: wireAdmission{
 			Allowed: r.Admission.Allowed, Reason: r.Admission.Reason,
 			Message: r.Admission.Message,

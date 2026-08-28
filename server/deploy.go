@@ -27,7 +27,6 @@ import (
 
 	platformv1alpha1 "github.com/damgahq/damga/api/v1alpha1"
 	"github.com/damgahq/damga/authz"
-	"github.com/damgahq/damga/evidence"
 	"github.com/damgahq/damga/internal/gitwrite"
 	"github.com/damgahq/damga/internal/manifest"
 	"github.com/damgahq/damga/placement"
@@ -109,11 +108,8 @@ func deploy(
 			// is the platform; gitwrite sets that. What is written here is the
 			// instance-local audit alias and never the login address, because
 			// a commit cannot be redacted.
-			Author: gitwrite.Author{ID: sub.ID, Name: sub.ID, Email: sub.Email},
-			Ref:    ref,
-			// From the tenant row, through the checkpoint. A tier a request
-			// could set is a licence check with a JSON field for a bypass.
-			Tier:    evidence.Tier(sub.Tier),
+			Author:  gitwrite.Author{ID: sub.ID, Name: sub.ID, Email: sub.Email},
+			Ref:     ref,
 			Message: fmt.Sprintf("deploy %s to %s/%s", req.Image, ref.App, ref.Env),
 			Render:  renderDeploy(place, req),
 		})

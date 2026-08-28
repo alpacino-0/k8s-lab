@@ -132,7 +132,6 @@ func newFixture(t *testing.T) *fixture {
 	rec, err := store.Append(context.Background(), evidence.Record{
 		IdempotencyKey: "commit:" + ns,
 		Ref:            testRef,
-		Tier:           evidence.TierFree,
 	})
 	if err != nil {
 		t.Fatalf("Append: %v", err)

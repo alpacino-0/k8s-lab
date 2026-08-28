@@ -125,7 +125,6 @@ func Bootstrap(ctx context.Context, c Config, req BootstrapRequest) (BootstrapRe
 		// Always free. The tier is provenance copied onto evidence records,
 		// and a bootstrap that could write 'enterprise' would be a licence
 		// check with a command-line flag for a bypass.
-		Tier: identity.TierFree,
 	}
 
 	if err := idStore.Bootstrap(ctx, tenant, account, identity.Credential{Hash: hash}); err != nil {

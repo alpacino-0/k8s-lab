@@ -73,9 +73,6 @@ func (s *Store) CreateTenant(_ context.Context, t identity.Tenant) (identity.Ten
 	if t.ID == "" || t.Slug == "" {
 		return identity.Tenant{}, fmt.Errorf("%w: a tenant needs an id and a slug", identity.ErrInvalid)
 	}
-	if !t.Tier.Valid() {
-		return identity.Tenant{}, fmt.Errorf("%w: tier %q", identity.ErrInvalid, t.Tier)
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, taken := s.slugs[t.Slug]; taken {
@@ -97,9 +94,6 @@ func (s *Store) CreateTenant(_ context.Context, t identity.Tenant) (identity.Ten
 func (s *Store) UpdateTenant(_ context.Context, t identity.Tenant) (identity.Tenant, error) {
 	if t.ID == "" || t.Slug == "" {
 		return identity.Tenant{}, fmt.Errorf("%w: a tenant needs an id and a slug", identity.ErrInvalid)
-	}
-	if !t.Tier.Valid() {
-		return identity.Tenant{}, fmt.Errorf("%w: tier %q", identity.ErrInvalid, t.Tier)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -407,8 +401,6 @@ func (s *Store) Bootstrap(
 	switch {
 	case t.ID == "" || t.Slug == "":
 		return fmt.Errorf("%w: a tenant needs an id and a slug", identity.ErrInvalid)
-	case !t.Tier.Valid():
-		return fmt.Errorf("%w: tier %q", identity.ErrInvalid, t.Tier)
 	case a.ID == "" || a.Email == "":
 		return fmt.Errorf("%w: an account needs an id and an email", identity.ErrInvalid)
 	case a.Kind != "user" && a.Kind != "automation":

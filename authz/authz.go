@@ -47,20 +47,8 @@ type Subject struct {
 	Email  string
 	Groups []string
 
-	// Tier is the tenant's plan, copied from the tenant row and never taken
-	// from anything the caller sent. Values are identity.Tier's; it is a
-	// string here because this package is the seam damga-ee replaces and must
-	// not import the identity model to be usable.
-	//
-	// Provenance, not permission. The free authorizer below does not read it,
-	// and that is what keeps this out of the crippleware reading: setting a
-	// tenant to enterprise on a free binary unlocks nothing, because nothing
-	// in the free build branches on it. It is here so the checkpoint is the
-	// ONE place a paid authorizer has to look — which is the whole point of
-	// there being one checkpoint.
-	Tier string
-	// Attributes carries claims the core has no opinion about. The free
-	// authorizer ignores it; a fine-grained one does not.
+	// Attributes carries claims this package has no opinion about. The
+	// default authorizer ignores it; a finer one need not.
 	Attributes map[string]string
 }
 

@@ -118,7 +118,6 @@ func request(target string, render func(string, map[string][]byte) (map[string][
 		Target:  gitwrite.Target{RepoURL: target, Branch: branch, Dir: "apps/api"},
 		Author:  gitwrite.Author{ID: "u-1", Name: "Orhan Yavuz", Email: authorEmail},
 		Ref:     testRef,
-		Tier:    evidence.TierFree,
 		Message: "deploy api to prod",
 		Render:  render,
 	}

@@ -1,14 +1,14 @@
 -- Identity: who may act, in which tenant, and how they proved it.
 --
 -- Same portable subset as evidence/*/migrations/0001_init.sql, plus two rules
--- this schema found on its own and paid for finding:
+-- this schema found the hard way:
 --
 --   * No table or column named "user" or "group". Both are reserved words in
 --     PostgreSQL. Unquoted DDL using them PARSES ON SQLITE and FAILS ON
 --     POSTGRESQL, which is the worst split available to this product: SQLite is
---     what every install starts on, PostgreSQL is what the paid tier requires,
---     so it would migrate cleanly on every free install and fail at CREATE
---     TABLE on the first enterprise one. Hence "account", and hence a role
+--     what every install starts on, and PostgreSQL is what a larger one wants,
+--     so it would migrate cleanly on every small install and fail at CREATE
+--     TABLE on the first large one. Hence "account", and hence a role
 --     column plus a team table rather than anything called a group.
 --
 --   * NULL is never "absent". Both engines treat NULLs as distinct inside a
@@ -18,9 +18,8 @@
 --
 -- Nothing here has a foreign key into the evidence schema and nothing here is
 -- ever joined to it. That is what the copied actor name and email on an
--- evidence record buy: the archive is a store a paid build replaces entirely,
--- possibly against a different database, and it can only be replaced without
--- carrying these tables if nothing ever joined to them.
+-- evidence record buy: the two stores can live in different databases, and they
+-- can only do that if nothing ever joined across them.
 --
 -- This sequence records itself in identity_schema_migration, not in the
 -- evidence store's schema_migration. Sharing one table means one version read
@@ -29,18 +28,11 @@
 
 CREATE TABLE tenant (
   -- Opaque and permanent. evidence.record.tenant_id holds this value and the
-  -- free store builds record ids out of it, so a renameable tenant id would
+  -- evidence store builds record ids out of it, so a renameable tenant id would
   -- orphan every record ever written about it. The slug is what changes.
   id            TEXT PRIMARY KEY,
   slug          TEXT NOT NULL UNIQUE,
   display_name  TEXT NOT NULL,
-
-  -- Provenance, not permission. Copied onto every evidence record so a
-  -- retention claim made two years later is checkable against what was true
-  -- then. Nothing in the free build branches on it, which is what keeps it out
-  -- of the crippleware reading: writing 'enterprise' here on a free binary buys
-  -- the writer nothing. The value set must stay identical to evidence.Tier.
-  tier          TEXT NOT NULL CHECK (tier IN ('free', 'enterprise')),
 
   suspended     INTEGER NOT NULL CHECK (suspended IN (0, 1)),
   created_at    TEXT NOT NULL

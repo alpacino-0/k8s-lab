@@ -18,7 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // Package sqlstore is identity.Store in SQL, written once and configured per
 // engine — the same arrangement the evidence store uses, and for the same
 // reason: SQLite is what a one-node install runs and PostgreSQL is what the
-// paid archive requires, so writing the logic twice would mean auditing every
+// a larger install wants, so writing the logic twice would mean auditing every
 // write path against both engines forever.
 //
 // The dialect surface here is smaller than the evidence store's. That one needs
@@ -121,7 +121,7 @@ func (s *Store) CreateTenant(ctx context.Context, t identity.Tenant) (identity.T
 	}
 
 	err := s.exec(ctx, insertTenant,
-		t.ID, t.Slug, t.DisplayName, string(t.Tier), boolInt(t.Suspended), asText(t.CreatedAt))
+		t.ID, t.Slug, t.DisplayName, boolInt(t.Suspended), asText(t.CreatedAt))
 	switch {
 	case isUnique(err):
 		return identity.Tenant{}, fmt.Errorf("%w: tenant %q or slug %q", identity.ErrDuplicate, t.ID, t.Slug)
@@ -136,13 +136,10 @@ func (s *Store) UpdateTenant(ctx context.Context, t identity.Tenant) (identity.T
 	if t.ID == "" || t.Slug == "" {
 		return identity.Tenant{}, fmt.Errorf("%w: a tenant needs an id and a slug", identity.ErrInvalid)
 	}
-	if !t.Tier.Valid() {
-		return identity.Tenant{}, fmt.Errorf("%w: tier %q", identity.ErrInvalid, t.Tier)
-	}
 	err := s.exec(ctx, `
-		UPDATE tenant SET slug = ?, display_name = ?, tier = ?, suspended = ?
+		UPDATE tenant SET slug = ?, display_name = ?, suspended = ?
 		WHERE id = ?`,
-		t.Slug, t.DisplayName, string(t.Tier), boolInt(t.Suspended), t.ID)
+		t.Slug, t.DisplayName, boolInt(t.Suspended), t.ID)
 	switch {
 	case isUnique(err):
 		return identity.Tenant{}, fmt.Errorf("%w: slug %q", identity.ErrDuplicate, t.Slug)
@@ -173,23 +170,22 @@ func (s *Store) TenantBySlug(ctx context.Context, slug string) (identity.Tenant,
 	return s.scanTenant(s.row(ctx, tenantSelect+` WHERE slug = ?`, slug))
 }
 
-const tenantSelect = `SELECT id, slug, display_name, tier, suspended, created_at FROM tenant`
+const tenantSelect = `SELECT id, slug, display_name, suspended, created_at FROM tenant`
 
 func (s *Store) scanTenant(r *sql.Row) (identity.Tenant, error) {
 	var (
 		t         identity.Tenant
-		tier      string
 		suspended int
 		created   string
 	)
-	err := r.Scan(&t.ID, &t.Slug, &t.DisplayName, &tier, &suspended, &created)
+	err := r.Scan(&t.ID, &t.Slug, &t.DisplayName, &suspended, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return identity.Tenant{}, identity.ErrNotFound
 	}
 	if err != nil {
 		return identity.Tenant{}, err
 	}
-	t.Tier, t.Suspended = identity.Tier(tier), suspended == 1
+	t.Suspended = suspended == 1
 	if t.CreatedAt, err = fromText(created); err != nil {
 		return identity.Tenant{}, err
 	}

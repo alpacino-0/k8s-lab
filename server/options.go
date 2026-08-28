@@ -15,24 +15,14 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-// Package server is the composition root, and the only package a second
-// repository has to import:
+// Package server is the composition root:
 //
-//	import core "github.com/damgahq/damga/server"
+//	core.Run(ctx, core.Options{})
 //
-//	core.Run(ctx, core.Options{
-//		Authorizer: enterprise.NewAuthorizer(),
-//		Evidence:   enterprise.NewArchive(),
-//	})
-//
-// That is the whole shape of the open-core arrangement. The enterprise build is
-// a thin main against this package; nothing it substitutes lives under
-// internal/, and there is no plugin mechanism, no gRPC and no sidecar, because
-// none is needed when the seam is a Go interface.
-//
-// Every field of Options may be zero. server.Run(ctx, server.Options{}) is a
-// complete free installation, which is the property that keeps the free tier
-// honest: the paid build replaces implementations, never fills in gaps.
+// Every field of Options may be zero, and that is the property worth keeping:
+// the zero value is a complete installation. A seam exists so a test can
+// substitute one piece without standing up the rest, not so some other build
+// can fill in a gap — there is no gap to fill.
 package server
 
 import (

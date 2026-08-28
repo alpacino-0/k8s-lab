@@ -34,8 +34,8 @@ import (
 // runs once per install and never again in any test that is not about it.
 const (
 	insertTenant = `
-		INSERT INTO tenant (id, slug, display_name, tier, suspended, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`
+		INSERT INTO tenant (id, slug, display_name, suspended, created_at)
+		VALUES (?, ?, ?, ?, ?)`
 	insertAccount = `
 		INSERT INTO account (id, kind, email, email_folded, audit_email, display_name, disabled, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -84,7 +84,7 @@ func (s *Store) Bootstrap(
 	}
 
 	if _, err := tx.ExecContext(ctx, s.d.Rebind(insertTenant),
-		t.ID, t.Slug, t.DisplayName, string(t.Tier), boolInt(t.Suspended),
+		t.ID, t.Slug, t.DisplayName, boolInt(t.Suspended),
 		asText(t.CreatedAt)); err != nil {
 		return bootstrapErr(err, "tenant")
 	}
@@ -134,9 +134,6 @@ func bootstrapErr(err error, what string) error {
 func validTenant(t *identity.Tenant, now func() time.Time) error {
 	if t.ID == "" || t.Slug == "" {
 		return fmt.Errorf("%w: a tenant needs an id and a slug", identity.ErrInvalid)
-	}
-	if !t.Tier.Valid() {
-		return fmt.Errorf("%w: tier %q", identity.ErrInvalid, t.Tier)
 	}
 	if t.CreatedAt.IsZero() {
 		t.CreatedAt = now()

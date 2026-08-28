@@ -63,9 +63,6 @@ func (s *Store) Append(_ context.Context, rec evidence.Record) (evidence.Record,
 	if rec.IdempotencyKey == "" {
 		return evidence.Record{}, fmt.Errorf("evidence: IdempotencyKey is required")
 	}
-	if !rec.Tier.Valid() {
-		return evidence.Record{}, fmt.Errorf("evidence: invalid tier %q", rec.Tier)
-	}
 	if id, ok := s.byKey[rec.IdempotencyKey]; ok {
 		return *s.byID[id], fmt.Errorf("%w: %s", evidence.ErrDuplicate, rec.IdempotencyKey)
 	}
@@ -135,15 +132,11 @@ func (s *Store) Transition(_ context.Context, id evidence.ID, t evidence.Transit
 	rec.Transitions = append(rec.Transitions, ev)
 	rec.State = t.To
 	rec.UpdatedAt = evidence.Canonical(s.now())
-	rec.Policies = append(rec.Policies, t.Policies...)
 	if t.Admission != nil {
 		rec.Admission = *t.Admission
 	}
 	if t.Image != nil {
 		rec.Image = *t.Image
-	}
-	if t.Signature != nil {
-		rec.Signature = *t.Signature
 	}
 	return *rec, nil
 }
@@ -315,7 +308,7 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 
 func (s *Store) Retention(context.Context) (evidence.RetentionPolicy, error) {
 	return evidence.RetentionPolicy{
-		Window: s.window, KeepCurrent: true, Immutable: false, Tier: evidence.TierFree,
+		Window: s.window, KeepCurrent: true, Immutable: false,
 	}, nil
 }
 

@@ -63,7 +63,6 @@ func TestReopenIsIdempotent(t *testing.T) {
 	rec, err := first.Append(ctx, evidence.Record{
 		IdempotencyKey: "commit:aaa",
 		Ref:            evidence.Ref{TenantID: "t", App: "api", Env: "prod"},
-		Tier:           evidence.TierFree,
 	})
 	if err != nil {
 		t.Fatalf("Append: %v", err)

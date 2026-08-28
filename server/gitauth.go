@@ -29,7 +29,7 @@ import (
 
 // GitAuth answers how to authenticate to one repository.
 //
-// Exported because it is a seam a paid build replaces, and a seam nothing
+// Exported because it is a seam another build can replace, and a seam nothing
 // outside this package can implement is not a seam. One token for one
 // organisation is the whole free story; a GitHub App minting short-lived
 // installation tokens per repository, or per-tenant credentials, is a

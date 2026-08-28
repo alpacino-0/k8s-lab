@@ -191,6 +191,5 @@ func subjectFrom(
 		Groups: []string{string(m.Role)},
 		// From the row, never from the request. A tier a caller could set is
 		// a licence check with a query parameter for a bypass.
-		Tier: string(tenant.Tier),
 	}, nil
 }

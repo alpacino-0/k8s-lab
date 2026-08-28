@@ -166,8 +166,7 @@ func identityWith(t *testing.T, role identity.Role) identity.Store {
 	store := identitymem.New()
 
 	if _, err := store.CreateTenant(ctx, identity.Tenant{
-		ID: tenant, Slug: tenant, DisplayName: tenant, Tier: identity.TierFree,
-	}); err != nil {
+		ID: tenant, Slug: tenant, DisplayName: tenant}); err != nil {
 		t.Fatalf("CreateTenant: %v", err)
 	}
 	// Cheap parameters: the suite logs in a dozen times and what is under test
@@ -234,7 +233,6 @@ func seed(t *testing.T, store evidence.Store, ref evidence.Ref) {
 	rec, err := store.Append(ctx, evidence.Record{
 		IdempotencyKey: "commit:" + ref.App,
 		Ref:            ref,
-		Tier:           evidence.TierFree,
 		Source:         evidence.Source{CommitSHA: "abc123", RepoURL: "https://example.test/r.git"},
 	})
 	if err != nil {
@@ -662,46 +660,6 @@ func (a *capturingAuthorizer) Authorize(
 	return authz.Decision{Allow: true, Reason: "captured"}, nil
 }
 
-// The tier reaches the authorizer, and it comes from the tenant row.
-//
-// This is phase 1's remaining non-negotiable: a paid authorizer has to be able
-// to see which plan it is deciding for, and it has to see it at the one
-// checkpoint rather than by reaching into the database itself. What must never
-// work is a caller supplying it — a tier that arrives in a request is a licence
-// check with a query parameter for a bypass.
-func TestTheTierReachesTheCheckpointFromTheTenantRow(t *testing.T) {
-	ctx := context.Background()
-	idStore := identityWith(t, identity.RoleOwner)
-	if err := setTier(ctx, idStore, identity.TierEnterprise); err != nil {
-		t.Fatalf("setting the tier: %v", err)
-	}
-
-	captured := &capturingAuthorizer{}
-	store := memory.New(0)
-	ref := evidence.Ref{TenantID: testTenant, App: testApp, Env: testEnv}
-	seed(t, store, ref)
-	base := start(t, server.Options{
-		Evidence: store, Identity: idStore, Authorizer: captured,
-	})
-	session := login(t, base)
-
-	// Every shape a caller could use to smuggle one in.
-	url := fmt.Sprintf("%s/api/v1/tenants/%s/apps/%s/envs/%s/evidence?tier=free",
-		base, ref.TenantID, ref.App, ref.Env)
-	header := cookieHeader(session)
-	header["X-Damga-Tier"] = []string{"free"}
-	if status, _ := get(t, url, header); status != http.StatusOK {
-		t.Fatalf("evidence = %d, want 200", status)
-	}
-	if captured.got.Tier != string(identity.TierEnterprise) {
-		t.Errorf("the checkpoint saw tier %q, want %q — it did not come from the tenant row",
-			captured.got.Tier, identity.TierEnterprise)
-	}
-	if captured.got.Tenant != testTenant {
-		t.Errorf("the checkpoint saw tenant %q, want %q", captured.got.Tenant, testTenant)
-	}
-}
-
 // A suspended tenant is refused before any authorizer runs.
 //
 // Refused here rather than by each authorizer because suspension is a fact
@@ -743,12 +701,6 @@ func TestASuspendedTenantIsRefusedBeforeAnyPolicyRuns(t *testing.T) {
 	if captured.got.ID != "" {
 		t.Error("the authorizer was consulted about a suspended tenant")
 	}
-}
-
-// Read, change, write — the same three steps an administrative endpoint will
-// take, so these exercise the path rather than reaching past it.
-func setTier(ctx context.Context, s identity.Store, tier identity.Tier) error {
-	return mutateTenant(ctx, s, func(t *identity.Tenant) { t.Tier = tier })
 }
 
 func suspend(ctx context.Context, s identity.Store) error {
@@ -1015,9 +967,6 @@ func TestADeployCommitsAWorkloadAndOpensARecord(t *testing.T) {
 	}
 	if sha == "" {
 		t.Error("the record does not name the commit it opened")
-	}
-	if rec.Tier != evidence.TierFree {
-		t.Errorf("record tier = %q, want the tenant's", rec.Tier)
 	}
 }
 

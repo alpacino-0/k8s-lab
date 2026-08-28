@@ -17,12 +17,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 // Package storetest is the suite every evidence.Store has to pass.
 //
-// It exists because there will be more than one implementation and they have
-// to be interchangeable in a stronger sense than "they compile". The free
-// store, an in-process store used by tests, and whatever damga-ee substitutes
-// all make the same promises to the evidence page and to an auditor; a promise
-// that only some of them keep is worse than one none of them keeps, because it
-// is the kind that is discovered by a customer.
+// It exists because there is more than one implementation and they have to be
+// interchangeable in a stronger sense than "they compile". All three make the
+// same promises to the page that reads them; a promise that only some of them
+// keep is worse than one none of them keeps, because it is the kind that is
+// discovered by a user.
 //
 // It is also the cheap half of the dual-engine decision. No single SQL
 // statement is correct on both SQLite and PostgreSQL — BEGIN IMMEDIATE
@@ -68,9 +67,7 @@ func Run(t *testing.T, newStore Factory) {
 		fn   func(*testing.T, Factory)
 	}{
 		{"AppendAssignsIdentity", testAppendAssignsIdentity},
-		{"ATransitionCanRecordTheSignatureVerdict", testATransitionCanRecordTheSignatureVerdict},
 		{"AppendRequiresIdempotencyKey", testAppendRequiresIdempotencyKey},
-		{"AppendRequiresAValidTier", testAppendRequiresAValidTier},
 		{"DuplicateReturnsExistingRecord", testDuplicateReturnsExistingRecord},
 		{"SeqIsPerRefAndGapless", testSeqIsPerRefAndGapless},
 		{"TransitionIsCompareAndSet", testTransitionIsCompareAndSet},
@@ -119,7 +116,6 @@ func rec(key string, r evidence.Ref, sha string) evidence.Record {
 	return evidence.Record{
 		IdempotencyKey: key,
 		Ref:            r,
-		Tier:           evidence.TierFree,
 		Actor: evidence.Actor{
 			ID: "u-1", Kind: "user",
 			DisplayName: "Orhan Yavuz", Email: "orhan@example.test",
@@ -129,17 +125,7 @@ func rec(key string, r evidence.Ref, sha string) evidence.Record {
 			Path: "apps/" + r.App, CommitSHA: sha,
 			AuthorEmail: "orhan@example.test", CommitterEmail: "platform@damga.co",
 		},
-		Image: evidence.Image{RequestedRef: "ghcr.io/damgahq/damga:1.0.0"},
-		Signature: evidence.SignatureVerdict{
-			Verified: true,
-			Issuer:   "https://token.actions.githubusercontent.com",
-			Subject:  "https://github.com/damgahq/damga/.github/workflows/ci.yml@refs/heads/main",
-			Digest:   "sha256:" + sha,
-		},
-		Policies: []evidence.PolicyResult{{
-			Name: "damga-image-provenance", Source: "ValidatingAdmissionPolicy",
-			Result: "pass", Severity: "high", Category: "Supply chain",
-		}},
+		Image:     evidence.Image{RequestedRef: "ghcr.io/damgahq/damga:1.0.0"},
 		Admission: evidence.AdmissionOutcome{Allowed: true},
 		Note:      "conformance fixture",
 	}
@@ -204,51 +190,6 @@ func testAppendRequiresIdempotencyKey(t *testing.T, newStore Factory) {
 	r := rec("", ref("api", prod), "aaa")
 	if _, err := s.Append(context.Background(), r); err == nil {
 		t.Fatal("Append accepted an empty IdempotencyKey")
-	}
-}
-
-// Found in production code rather than in a test, which is the reason it is
-// here now: the deploy write path passed a Record through without setting Tier,
-// the in-process store accepted it and wrote an empty string into the hash
-// chain, and both SQL stores rejected it with a CHECK violation. So the write
-// path worked in every test and failed against a real database.
-//
-// The suite missed it because every fixture in this file sets a tier. Three
-// implementations disagreeing about what is a valid record is the exact failure
-// a conformance suite exists to prevent, so the agreement is asserted rather
-// than assumed — and the answer is refusal, not a default. Tier is copied into
-// the record deliberately, so that a retention claim made two years later is
-// checkable against what was true then; quietly writing "free" over a caller's
-// omission would make that claim a guess.
-func testAppendRequiresAValidTier(t *testing.T, newStore Factory) {
-	s := newStore(t, 0)
-	base := rec("commit:aaa", ref("api", prod), "aaa")
-
-	for _, tc := range []struct {
-		name string
-		tier evidence.Tier
-	}{
-		{"unset", ""},
-		{"nonsense", evidence.Tier("platinum")},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			r := base
-			r.IdempotencyKey = "commit:" + tc.name
-			r.Tier = tc.tier
-			if _, err := s.Append(context.Background(), r); err == nil {
-				t.Errorf("Append accepted Tier %q", tc.tier)
-			}
-		})
-	}
-
-	// And the valid ones are still accepted, or the check has gone too far.
-	for _, tier := range []evidence.Tier{evidence.TierFree, evidence.TierEnterprise} {
-		r := base
-		r.IdempotencyKey = "commit:" + string(tier)
-		r.Tier = tier
-		if _, err := s.Append(context.Background(), r); err != nil {
-			t.Errorf("Append rejected the valid tier %q: %v", tier, err)
-		}
 	}
 }
 
@@ -950,55 +891,5 @@ func testAnUnusableCursorIsReportedNotEmptied(t *testing.T, newStore Factory) {
 	}
 	if len(second.Records) != 1 {
 		t.Errorf("second page has %d records, want 1", len(second.Records))
-	}
-}
-
-// The verdict the record has always had a column for and never a way to fill.
-//
-// Written by whichever transition observed it — the observer reading the
-// admission controller's answer off the live object — and frozen from then on.
-// Re-running the check later answers a different question, because a policy can
-// be edited and a signature cannot be revoked.
-func testATransitionCanRecordTheSignatureVerdict(t *testing.T, newStore Factory) {
-	ctx := context.Background()
-	s := newStore(t, 0)
-
-	// Opened with nothing verified, which is what a deploy knows at the moment
-	// it is committed: a commit was pushed and no admission controller has seen
-	// anything yet.
-	start := rec("k-sig", evidence.Ref{TenantID: tenantA, App: "shop", Env: prod}, "abc123")
-	start.Signature = evidence.SignatureVerdict{}
-	opened := mustAppend(t, s, start)
-
-	verdict := evidence.SignatureVerdict{
-		Verified: true,
-		Issuer:   "https://token.actions.githubusercontent.com",
-		Subject:  "https://github.com/acme/shop/.github/workflows/damga-sign.yml@refs/heads/main",
-		Digest:   "ghcr.io/acme/shop@sha256:abc",
-		Message:  "verified at admission",
-	}
-	version := len(opened.Transitions)
-	got, err := s.Transition(ctx, opened.ID, evidence.Transition{
-		From: []evidence.State{opened.State}, To: evidence.StateSyncing,
-		At: time.Now().UTC(), Reason: "observed",
-		Signature: &verdict, ExpectEvents: &version,
-	})
-	if err != nil {
-		t.Fatalf("Transition: %v", err)
-	}
-	if got.Signature != verdict {
-		t.Fatalf("returned verdict = %+v, want %+v", got.Signature, verdict)
-	}
-
-	// And it survives the round trip, which is the half a store gets wrong: the
-	// columns were already written on append and read back, so a verdict that
-	// only ever lived in the returned struct would look right here and be
-	// absent on the page that reads it.
-	reread, err := s.Get(ctx, opened.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if reread.Signature != verdict {
-		t.Errorf("stored verdict = %+v, want %+v", reread.Signature, verdict)
 	}
 }

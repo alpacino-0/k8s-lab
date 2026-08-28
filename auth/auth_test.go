@@ -49,8 +49,7 @@ func seed(t *testing.T) identity.Store {
 	ctx := context.Background()
 	s := memory.New()
 	if _, err := s.CreateTenant(ctx, identity.Tenant{
-		ID: tenantID, Slug: "alpha", DisplayName: "Alpha", Tier: identity.TierFree,
-	}); err != nil {
+		ID: tenantID, Slug: "alpha", DisplayName: "Alpha"}); err != nil {
 		t.Fatalf("CreateTenant: %v", err)
 	}
 	if _, err := s.CreateAccount(ctx, identity.Account{
@@ -298,7 +297,7 @@ func TestCookieAttributes(t *testing.T) {
 	}
 
 	// And it must be settable to None, because SAML's HTTP-POST binding cannot
-	// carry a Lax cookie and SAML is a paid feature that must not require a
+	// carry a Lax cookie, and that must not require a
 	// fork of this package.
 	s.SameSite = http.SameSiteNoneMode
 	c, err = s.Issue(ctx, acctID, host)

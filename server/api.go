@@ -253,7 +253,6 @@ func retention(g guard, st stores) http.Handler {
 			"keepCurrent":   policy.KeepCurrent,
 			"immutable":     policy.Immutable,
 			"anchor":        policy.Anchor,
-			"tier":          string(policy.Tier),
 		})
 	})
 }
