@@ -315,3 +315,58 @@ func (c *Client) openPullRequest(ctx context.Context, conn forge.Connection) (fo
 	}
 	return forge.Proposed{URL: out.HTMLURL, Number: out.Number, Branch: forge.ProposalBranch}, nil
 }
+
+// MergeStatus reads the workflow on the branch the identity names.
+//
+// One call. The proposal branch is not consulted: a file sitting on a branch
+// nobody merged signs nothing, and reporting it as present would say the chain
+// is live when it is one click short.
+func (c *Client) MergeStatus(ctx context.Context, conn forge.Connection) (forge.Merged, error) {
+	if err := conn.Validate(); err != nil {
+		return forge.Merged{}, err
+	}
+	if c.Token == "" {
+		return forge.Merged{}, fmt.Errorf(
+			"%w: no token is configured for the tenant's forge", forge.ErrNotPermitted)
+	}
+	want, err := conn.Workflow()
+	if err != nil {
+		return forge.Merged{}, err
+	}
+
+	var found struct {
+		Content string `json:"content"`
+	}
+	path := c.repoPath(conn) + "/contents/" + conn.WorkflowPath +
+		"?ref=" + url.QueryEscape(conn.Branch)
+
+	// A 404 here is an answer and not a failure: the file is not on the branch.
+	// It is read from the status rather than the error because do() classes 404
+	// with the refusals, which is right for a repository and wrong for a path
+	// inside one.
+	status, err := c.do(ctx, http.MethodGet, path, nil, &found)
+	switch {
+	case status == http.StatusNotFound:
+		return forge.Merged{
+			State: forge.MergeAbsent,
+			Detail: "the workflow is not on " + conn.Branch +
+				"; the pull request has not been merged, or the file was removed",
+		}, nil
+	case err != nil:
+		return forge.Merged{}, err
+	}
+
+	if sameContent(found.Content, want) {
+		return forge.Merged{
+			State:  forge.MergeMatches,
+			Detail: "the workflow on " + conn.Branch + " is the one damga wrote",
+		}, nil
+	}
+	return forge.Merged{
+		State: forge.MergeDrifted,
+		Detail: "the workflow on " + conn.Branch + " has been edited since it was " +
+			"proposed; it still signs as " + conn.Identity() +
+			", so signatures from it remain genuine and damga no longer recognises " +
+			"what produced them",
+	}, nil
+}

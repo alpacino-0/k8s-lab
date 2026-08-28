@@ -44,8 +44,44 @@ type Proposed struct {
 	Existing bool
 }
 
+// MergeState is what the tenant's own branch says about the workflow damga
+// proposed.
+type MergeState string
+
+const (
+	// MergeAbsent: the file is not on the branch. The pull request has not been
+	// merged, or somebody removed the file afterwards. Those look identical
+	// from here and both mean the same thing — nothing on that branch signs.
+	MergeAbsent MergeState = "absent"
+
+	// MergeMatches: the file is there and is byte-for-byte what damga renders.
+	MergeMatches MergeState = "matches"
+
+	// MergeDrifted: the file is there and has been edited.
+	//
+	// This is the one the identity cannot catch, and the reason this check
+	// exists at all. The policy pins a workflow file at a ref, so a signature
+	// made by an edited file at the same path on the same branch presents
+	// exactly the accepted identity. The signature is genuine and the claim
+	// behind it is somebody else's — an image built from a different
+	// Dockerfile, a step that pulls its own base, a job that signs something it
+	// did not build.
+	MergeDrifted MergeState = "drifted"
+)
+
+// Merged is the answer, with enough detail to put on a page.
+type Merged struct {
+	State MergeState
+
+	// Detail says what was found, in words a person can act on. Not a diff:
+	// the file is the tenant's now, and quoting their edits back at them is
+	// both rude and unnecessary — what they need to know is that damga stopped
+	// vouching for what it signs.
+	Detail string
+}
+
 // Proposer opens the pull request that puts the signing workflow in a tenant's
-// repository.
+// repository, and reads back what became of it.
 //
 // It takes the connection and nothing else, deliberately. Handing it a file
 // alongside would allow proposing a workflow that is not the one the policy
@@ -58,6 +94,15 @@ type Proposed struct {
 // this build cannot is exactly the seam that answers it.
 type Proposer interface {
 	Propose(ctx context.Context, c Connection) (Proposed, error)
+
+	// MergeStatus reads the workflow on the branch the identity names and says
+	// whether it is the one damga wrote.
+	//
+	// On the same interface as Propose rather than its own, because they are
+	// the same capability against the same repository with the same credential,
+	// and a build that can do one and not the other would be a forge that
+	// accepts writes and refuses reads.
+	MergeStatus(ctx context.Context, c Connection) (Merged, error)
 }
 
 // ErrNotPermitted is a forge that answered "no" rather than "broken": a token
@@ -104,9 +149,16 @@ it is the reason this file has to live here rather than with us.
 would have rejected rather than rejecting it, so nothing breaks while this sits
 open. It starts enforcing after the first image built by this workflow is seen.
 
-**If you edit this file**, the identity it signs with changes and damga will
-stop accepting images built from it until the rule is updated to match. The
-file's name and the branch above are both part of that identity.
+**If you rename or move this file, or change the branch above**, the identity it
+signs with changes and damga stops accepting images built from it until the rule
+is updated to match. Both are part of that identity.
+
+**Editing what is inside it is different, and worth knowing.** The identity is
+the file's path on this branch, so an edited file still signs as itself: the
+signature stays genuine and damga keeps accepting it. What damga does instead is
+notice — it reads this file back and says on your evidence page whether it is
+still the one it wrote. It does not stop you editing it. It stops quietly
+vouching for something it no longer recognises.
 
 The identity this pins:
 

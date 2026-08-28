@@ -20,6 +20,7 @@ package server_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -355,9 +356,11 @@ func commitFileOrNil(t *testing.T, repoPath, name string) (string, error) {
 
 // fakeProposer records what it was asked and answers without a network.
 type fakeProposer struct {
-	seen  []forge.Connection
-	err   error
-	reply forge.Proposed
+	seen     []forge.Connection
+	err      error
+	reply    forge.Proposed
+	merged   forge.Merged
+	mergeErr error
 }
 
 func (f *fakeProposer) Propose(_ context.Context, c forge.Connection) (forge.Proposed, error) {
@@ -366,6 +369,16 @@ func (f *fakeProposer) Propose(_ context.Context, c forge.Connection) (forge.Pro
 		return forge.Proposed{}, f.err
 	}
 	return f.reply, nil
+}
+
+func (f *fakeProposer) MergeStatus(_ context.Context, _ forge.Connection) (forge.Merged, error) {
+	if f.mergeErr != nil {
+		return forge.Merged{}, f.mergeErr
+	}
+	if f.merged.State == "" {
+		return forge.Merged{State: forge.MergeAbsent, Detail: "not merged"}, nil
+	}
+	return f.merged, nil
 }
 
 func proposalURL(base string) string { return connectionURL(base) + "/proposal" }
@@ -480,5 +493,56 @@ func TestProposingBeforeConnectingSaysWhichIsMissing(t *testing.T) {
 
 	if code, body := post(t, proposalURL(base), "", cookie); code != http.StatusConflict {
 		t.Errorf("proposing for an unconnected app = %d %q, want 409", code, body)
+	}
+}
+
+// The evidence page's answer to the one question the identity cannot settle: a
+// workflow edited after it was merged still signs as itself, so the signature
+// stays genuine and what it vouches for is no longer what damga wrote.
+func TestTheConnectionSaysWhatBecameOfTheWorkflow(t *testing.T) {
+	p := &fakeProposer{merged: forge.Merged{
+		State: forge.MergeDrifted, Detail: "edited since it was proposed",
+	}}
+	base := start(t, server.Options{
+		Identity: identityWith(t, identity.RoleOwner),
+		Forge:    forgemem.New(), Proposer: p,
+	})
+	cookie := login(t, base)
+	if code, _ := put(t, connectionURL(base), connectBody, cookie); code != http.StatusCreated {
+		t.Fatal("connecting failed")
+	}
+
+	code, body := get(t, connectionURL(base), cookieHeader(cookie))
+	if code != http.StatusOK {
+		t.Fatalf("GET connection = %d %q", code, body)
+	}
+	if !strings.Contains(body, `"merge":"drifted"`) {
+		t.Errorf("the page cannot tell a merged workflow from an edited one: %s", body)
+	}
+	if !strings.Contains(body, "edited since") {
+		t.Error("the detail did not reach the page, so it can say drifted and not why")
+	}
+}
+
+// A forge that cannot be reached is not a workflow that was never merged. One
+// is damga's problem and the other is the tenant's, and a page that reports the
+// first as the second sends them to fix something that is not wrong.
+func TestAnUnreachableForgeIsNotAnUnmergedWorkflow(t *testing.T) {
+	base := start(t, server.Options{
+		Identity: identityWith(t, identity.RoleOwner),
+		Forge:    forgemem.New(),
+		Proposer: &fakeProposer{mergeErr: errors.New("the forge timed out")},
+	})
+	cookie := login(t, base)
+	if code, _ := put(t, connectionURL(base), connectBody, cookie); code != http.StatusCreated {
+		t.Fatal("connecting failed")
+	}
+
+	code, body := get(t, connectionURL(base), cookieHeader(cookie))
+	if code != http.StatusOK {
+		t.Fatalf("GET connection = %d, want the rest of the view anyway", code)
+	}
+	if strings.Contains(body, `"merge":`) {
+		t.Errorf("an unreachable forge produced a merge state: %s", body)
 	}
 }

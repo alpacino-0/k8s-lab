@@ -346,3 +346,88 @@ func TestTheBodyExplainsWhatMergingDoes(t *testing.T) {
 		}
 	}
 }
+
+// The check the identity cannot make for itself.
+//
+// A policy pins a workflow file at a ref, so an edited file at the same path on
+// the same branch presents exactly the accepted identity. The signature stays
+// genuine; what it vouches for does not. Nothing in Sigstore, Kyverno or git
+// notices, which is why something has to read the file back.
+func TestMergeStatusTellsMergedFromEditedFromAbsent(t *testing.T) {
+	written, err := conn().Workflow()
+	if err != nil {
+		t.Fatalf("rendering: %v", err)
+	}
+
+	for name, tc := range map[string]struct {
+		onBranch []byte
+		want     forge.MergeState
+	}{
+		"never merged":      {onBranch: nil, want: forge.MergeAbsent},
+		"merged as written": {onBranch: written, want: forge.MergeMatches},
+		"edited since": {
+			onBranch: append(append([]byte{}, written...), []byte("\n      - run: curl evil\n")...),
+			want:     forge.MergeDrifted,
+		},
+		// A file replaced entirely rather than appended to. Same identity, and
+		// nothing about it is the workflow damga proposed.
+		"replaced": {onBranch: []byte("name: mine\non:\n  push:\n"), want: forge.MergeDrifted},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFake(t)
+			if tc.onBranch != nil {
+				f.files["main"] = map[string][]byte{conn().WorkflowPath: tc.onBranch}
+			}
+			c := client(t, f)
+
+			got, err := c.MergeStatus(context.Background(), conn())
+			if err != nil {
+				t.Fatalf("MergeStatus: %v", err)
+			}
+			if got.State != tc.want {
+				t.Errorf("state = %q, want %q", got.State, tc.want)
+			}
+			if got.Detail == "" {
+				t.Error("no detail; the page has nothing to say beyond a word")
+			}
+		})
+	}
+}
+
+// It reads the branch the identity names, not the branch damga pushed to. A
+// file sitting on an unmerged proposal branch signs nothing, and reporting it
+// as present would say the chain is live when it is one click short.
+func TestMergeStatusIgnoresTheProposalBranch(t *testing.T) {
+	written, err := conn().Workflow()
+	if err != nil {
+		t.Fatalf("rendering: %v", err)
+	}
+	f := newFake(t)
+	f.branches[forge.ProposalBranch] = baseSHA
+	f.files[forge.ProposalBranch] = map[string][]byte{conn().WorkflowPath: written}
+	c := client(t, f)
+
+	got, err := c.MergeStatus(context.Background(), conn())
+	if err != nil {
+		t.Fatalf("MergeStatus: %v", err)
+	}
+	if got.State != forge.MergeAbsent {
+		t.Errorf("state = %q; an unmerged proposal was reported as merged, so the page "+
+			"would say the chain is live while the pull request is still open", got.State)
+	}
+}
+
+// Drift is not a refusal and a refusal is not drift. A forge that will not let
+// us read is something the tenant fixes by granting access; saying "edited"
+// about a file nobody could open would send them to change something that is
+// not wrong.
+func TestAForgeThatRefusesTheReadIsNotDrift(t *testing.T) {
+	f := newFake(t)
+	f.forbid = "/contents/"
+	c := client(t, f)
+
+	_, err := c.MergeStatus(context.Background(), conn())
+	if !errors.Is(err, forge.ErrNotPermitted) {
+		t.Errorf("err = %v, want ErrNotPermitted", err)
+	}
+}

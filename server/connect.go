@@ -66,6 +66,13 @@ type connectionView struct {
 
 	Identity string `json:"identity"`
 	Verified bool   `json:"verified"`
+
+	// Merge is what the tenant's own branch says about the workflow, and it is
+	// the one thing on this view that damga cannot work out for itself. Empty
+	// when this install has no proposer or the forge could not be reached —
+	// which is not the same as "not merged" and must not read as it.
+	Merge       string `json:"merge,omitempty"`
+	MergeDetail string `json:"mergeDetail,omitempty"`
 	// Enforcing is what the rendered policy will do today, said in the words
 	// the operator will see on the object rather than left to be inferred from
 	// verified.
@@ -200,8 +207,22 @@ func connectionRoute(g guard, st stores) http.Handler {
 			problem(w, http.StatusInternalServerError, "rendering the workflow failed")
 			return
 		}
+
+		// Read live rather than stored, because the question is about a file in
+		// somebody else's repository and a cached answer is a claim about the
+		// past dressed as one about now. A forge that will not answer leaves the
+		// fields empty: unknown and unmerged are different, and only one of them
+		// is the tenant's to fix.
+		view := viewOf(c)
+		if st.proposer != nil {
+			if merged, mErr := st.proposer.MergeStatus(r.Context(), c); mErr == nil {
+				view.Merge = string(merged.State)
+				view.MergeDetail = merged.Detail
+			}
+		}
+
 		writeJSON(w, map[string]any{
-			"connection": viewOf(c),
+			"connection": view,
 			"workflow": map[string]any{
 				"path":    c.WorkflowPath,
 				"content": string(workflow),
