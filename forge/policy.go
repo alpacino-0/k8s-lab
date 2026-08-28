@@ -20,8 +20,17 @@ package forge
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/yaml"
+)
+
+// The two things a rendered policy can do, and the transition between them is
+// the only one this package has: recording until a signature carrying this
+// identity has been seen, rejecting afterwards.
+const (
+	actionAudit   = "Audit"
+	actionEnforce = "Enforce"
 )
 
 // Policy renders the admission rule that accepts this connection's identity and
@@ -45,6 +54,12 @@ func (c Connection) Policy(namespace string) ([]byte, error) {
 		return nil, fmt.Errorf("forge: a policy needs a namespace to be scoped to")
 	}
 
+	action, reason := actionAudit, "no signature carrying this identity has been seen yet"
+	if c.Verified() {
+		action = actionEnforce
+		reason = "first signature seen at " + c.FirstSignatureAt.UTC().Format(time.RFC3339)
+	}
+
 	p := map[string]any{
 		"apiVersion": "kyverno.io/v1",
 		"kind":       "Policy",
@@ -61,12 +76,22 @@ func (c Connection) Policy(namespace string) ([]byte, error) {
 				// asking "why was my image rejected", and the answer is a
 				// string comparison they can make by eye against the signature.
 				"damga.co/identity": c.Identity(),
+				// Why this policy is or is not rejecting anything, in the
+				// place somebody reads during an incident.
+				"damga.co/enforcement": reason,
 			},
 		},
 		"spec": map[string]any{
-			// Enforce, not Audit. An audit-only signature rule is a rule that
-			// records the thing it was installed to prevent.
-			"validationFailureAction": "Enforce",
+			// Audit until this identity has produced a signature, Enforce
+			// afterwards.
+			//
+			// Audit forever would be the failure — a rule that records the
+			// thing it was installed to prevent. Audit until the chain is
+			// proven once is a rollout, and the difference is that this one
+			// ends. Applying it the other way round refuses the tenant's next
+			// deploy for a workflow that has never run, which is connecting a
+			// repository and having deploys stop.
+			"validationFailureAction": action,
 			// Existing workloads are not re-admitted when this lands, because a
 			// tenant who connects a repository today would otherwise have
 			// everything already running evicted by a rule about images built

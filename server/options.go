@@ -45,6 +45,7 @@ import (
 
 	"github.com/damgahq/damga/authz"
 	"github.com/damgahq/damga/evidence"
+	"github.com/damgahq/damga/forge"
 	"github.com/damgahq/damga/identity"
 	"github.com/damgahq/damga/placement"
 )
@@ -192,6 +193,17 @@ type Options struct {
 	// for the same reason Evidence is: a paid build may hold this somewhere
 	// else, and nothing above it needs to know.
 	Placement placement.Store
+
+	// Forge is where each app's source repository and signing identity live.
+	// Replaceable for the same reason the others are, and with one of its own:
+	// which forges can be connected is an open phase-2 question, and a paid
+	// build reaching a forge this one cannot is exactly the seam that answers
+	// it.
+	//
+	// nil is a build with no connection endpoints rather than a build that
+	// crashes on one — an installation that never connects a repository is a
+	// working installation, just one whose images nothing verifies.
+	Forge forge.Store
 
 	// GitAuth answers how to authenticate to a repository. nil means the
 	// free build's answer, built from Config.GitTokenFile — and with no token

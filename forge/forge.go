@@ -109,12 +109,33 @@ type Connection struct {
 	// their own.
 	ImageRepository string
 
+	// FirstSignatureAt is when a signature bearing this identity was first
+	// seen, and it is what decides whether the policy rejects or merely
+	// records.
+	//
+	// The ordering here only works in one direction, and getting it backwards
+	// breaks the tenant rather than protecting them. Enforce the policy before
+	// the workflow has ever produced a signed image and the next deploy is
+	// refused — the tenant connected a repository and their deploys stopped.
+	// Merge the workflow before anything verifies and images are signed while
+	// nothing checks them, which delivers nothing but breaks nothing. So the
+	// rule is: record until there is proof the chain works, reject afterwards.
+	//
+	// Zero until something observes that signature. Nothing does yet; the
+	// observation belongs with the evidence the deploy path already writes,
+	// and until it exists every connection renders an auditing policy, which
+	// is the safe end of the wrong answer.
+	FirstSignatureAt time.Time
+
 	// Set by the store, ignored on the way in. UpdatedAt is what the drift
 	// check will compare against: a connection edited after the pull request
 	// was merged is the open question phase 2 still owes an answer to.
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
+
+// Verified reports whether the chain has been proven end to end at least once.
+func (c Connection) Verified() bool { return !c.FirstSignatureAt.IsZero() }
 
 // Key is what identifies a connection. One source repository per app, and the
 // environments are not part of it.

@@ -58,6 +58,15 @@ func (a *Authorizer) Authorize(
 		return authz.Decision{Allow: true, Reason: role + " may read"}, nil
 	case authz.ActionAppDeploy, authz.ActionAppRollback, authz.ActionEnvCreate, authz.ActionEvidenceExport:
 		return authz.Decision{Allow: role != roleViewer, Reason: role + " deploy right"}, nil
+	case authz.ActionAppConnect:
+		// Owner only, and named here rather than left to the default, because
+		// the reason is not obvious from the verb. Deploying ships an image;
+		// connecting decides which signer is trusted for every image this app
+		// will ever run. Somebody who can do the second can arrange to be the
+		// one who does the first, so grouping it with the deploy right would
+		// make the signature check a formality for anybody who could already
+		// deploy.
+		return authz.Decision{Allow: role == roleOwner, Reason: role + " may choose the signer"}, nil
 	default:
 		return authz.Decision{Allow: role == roleOwner, Reason: role + " administrative right"}, nil
 	}

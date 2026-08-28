@@ -129,8 +129,8 @@ func (s *Store) Put(ctx context.Context, c forge.Connection) (forge.Connection, 
 	if _, err := tx.ExecContext(ctx, s.d.Rebind(`
 		INSERT INTO forge_connection
 			(tenant_id, app, host, owner, repo, branch, workflow_path, image_repository,
-			 identity, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 identity, first_signature_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (tenant_id, app) DO UPDATE SET
 			host = excluded.host,
 			owner = excluded.owner,
@@ -139,9 +139,10 @@ func (s *Store) Put(ctx context.Context, c forge.Connection) (forge.Connection, 
 			workflow_path = excluded.workflow_path,
 			image_repository = excluded.image_repository,
 			identity = excluded.identity,
+			first_signature_at = excluded.first_signature_at,
 			updated_at = excluded.updated_at`),
 		c.TenantID, c.App, c.Host, c.Owner, c.Repo, c.Branch, c.WorkflowPath,
-		c.ImageRepository, identity, created, asText(now)); err != nil {
+		c.ImageRepository, identity, firstSignature(c), created, asText(now)); err != nil {
 		return forge.Connection{}, err
 	}
 
@@ -163,16 +164,20 @@ func (s *Store) Put(ctx context.Context, c forge.Connection) (forge.Connection, 
 	return c, nil
 }
 
-const columns = `tenant_id, app, host, owner, repo, branch, workflow_path, image_repository, created_at, updated_at`
+const columns = `tenant_id, app, host, owner, repo, branch, workflow_path, image_repository, ` +
+	`first_signature_at, created_at, updated_at`
 
 func scan(rows interface{ Scan(...any) error }) (forge.Connection, error) {
 	var c forge.Connection
-	var created, updated string
+	var firstSig, created, updated string
 	if err := rows.Scan(&c.TenantID, &c.App, &c.Host, &c.Owner, &c.Repo, &c.Branch,
-		&c.WorkflowPath, &c.ImageRepository, &created, &updated); err != nil {
+		&c.WorkflowPath, &c.ImageRepository, &firstSig, &created, &updated); err != nil {
 		return forge.Connection{}, err
 	}
 	var err error
+	if c.FirstSignatureAt, err = fromText(firstSig); err != nil {
+		return forge.Connection{}, err
+	}
 	if c.CreatedAt, err = fromText(created); err != nil {
 		return forge.Connection{}, err
 	}
@@ -252,6 +257,16 @@ func (s *Store) IdentityOwner(ctx context.Context, identity string) (string, err
 		return "", fmt.Errorf("%w: %s", forge.ErrNotFound, identity)
 	}
 	return owner, err
+}
+
+// firstSignature is the zero time as the empty string, so an unverified
+// connection stores what the schema defaults to rather than a year-1 timestamp
+// that sorts before everything and reads as a real observation.
+func firstSignature(c forge.Connection) string {
+	if c.FirstSignatureAt.IsZero() {
+		return ""
+	}
+	return asText(c.FirstSignatureAt)
 }
 
 // Close is forge.Store.Close.

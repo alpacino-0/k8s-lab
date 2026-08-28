@@ -27,6 +27,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/damgahq/damga/forge"
 )
@@ -58,6 +59,7 @@ func Run(t *testing.T, newStore Factory) {
 		{"MovingRepositoryReleasesTheOldIdentity", testMovingRepositoryReleasesTheOldIdentity},
 		{"DeletingReleasesTheIdentity", testDeletingReleasesTheIdentity},
 		{"AnUnusableConnectionIsRefused", testAnUnusableConnectionIsRefused},
+		{"TheFirstSignatureSurvivesTheRoundTrip", testTheFirstSignatureSurvivesTheRoundTrip},
 		{"MissingThingsAreNotFound", testMissingThingsAreNotFound},
 	}
 	for _, c := range cases {
@@ -350,5 +352,54 @@ func testMissingThingsAreNotFound(t *testing.T, newStore Factory) {
 	}
 	if len(got) != 0 {
 		t.Errorf("List for an unknown tenant returned %d rows", len(got))
+	}
+}
+
+// The field that decides whether the rendered policy rejects or records, so a
+// store that drops it turns every enforcing connection back into an auditing
+// one — silently, and in the direction where nothing fails and the guarantee is
+// simply absent.
+func testTheFirstSignatureSurvivesTheRoundTrip(t *testing.T, newStore Factory) {
+	ctx := context.Background()
+	s := newStore(t)
+
+	// Unverified is the state everything starts in, and the zero time is how it
+	// is spelled. A store that reads it back as anything else — a year-1
+	// timestamp, say — reports a connection as verified that nothing has ever
+	// verified.
+	fresh, err := s.Put(ctx, conn(tenantA, appA))
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if fresh.Verified() {
+		t.Error("a connection nothing has observed reports as verified, so its policy " +
+			"would reject the tenant's next deploy for a workflow that has not run")
+	}
+	got, err := s.Get(ctx, fresh.Key())
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Verified() {
+		t.Error("unverified on the way in, verified on the way out")
+	}
+
+	seen := time.Date(2026, 8, 28, 9, 30, 0, 0, time.UTC)
+	if _, err := s.Put(ctx, conn(tenantA, appA, func(c *forge.Connection) {
+		c.FirstSignatureAt = seen
+	})); err != nil {
+		t.Fatalf("recording the first signature: %v", err)
+	}
+
+	got, err = s.Get(ctx, fresh.Key())
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.Verified() {
+		t.Fatal("the first signature was dropped, so the policy stays in audit mode " +
+			"for ever and records what it was installed to prevent")
+	}
+	if !got.FirstSignatureAt.Equal(seen) {
+		t.Errorf("firstSignatureAt = %s, want %s — it is written onto the policy as "+
+			"the reason it enforces", got.FirstSignatureAt, seen)
 	}
 }

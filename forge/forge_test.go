@@ -20,6 +20,7 @@ package forge
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"sigs.k8s.io/yaml"
 )
@@ -257,9 +258,10 @@ func TestThePolicyIsScopedToOneTenant(t *testing.T) {
 	if p.Metadata.Namespace != testNamespace {
 		t.Errorf("namespace = %q, want %q", p.Metadata.Namespace, testNamespace)
 	}
-	if p.Spec.ValidationFailureAction != "Enforce" {
-		t.Errorf("action = %q; an audit-only signature rule records the thing it was "+
-			"installed to prevent", p.Spec.ValidationFailureAction)
+	if p.Spec.ValidationFailureAction != actionAudit {
+		t.Errorf("action = %q; this connection has never produced a signature, and "+
+			"enforcing on it refuses the tenant's next deploy for a workflow that "+
+			"has not run", p.Spec.ValidationFailureAction)
 	}
 
 	vi := p.Spec.Rules[0].VerifyImages[0]
@@ -416,4 +418,67 @@ func TestAPolicyNeedsSomewhereToLive(t *testing.T) {
 		t.Error("rendered a namespace-scoped policy with no namespace, which applies " +
 			"nowhere while looking like a rule that is in force")
 	}
+}
+
+// The one transition in this package, and it only runs one way.
+//
+// Both ends are wrong on their own. A policy that enforces before the workflow
+// has ever produced a signed image refuses the tenant's next deploy — they
+// connected a repository and their deploys stopped, which is the platform
+// breaking them in the name of protecting them. A policy that only ever audits
+// records the thing it was installed to prevent. What makes the first state
+// acceptable is that it ends, and what ends it is evidence rather than a
+// timer or somebody remembering.
+func TestThePolicyStartsRecordingAndEndsRejecting(t *testing.T) {
+	before, err := conn().Policy(testNamespace)
+	if err != nil {
+		t.Fatalf("rendering: %v", err)
+	}
+
+	verified := conn(func(c *Connection) {
+		c.FirstSignatureAt = time.Date(2026, 8, 28, 9, 0, 0, 0, time.UTC)
+	})
+	if !verified.Verified() {
+		t.Fatal("a connection with a first signature does not report as verified")
+	}
+	after, err := verified.Policy(testNamespace)
+	if err != nil {
+		t.Fatalf("rendering: %v", err)
+	}
+
+	if got := action(t, before); got != actionAudit {
+		t.Errorf("unverified connection renders %q, want Audit", got)
+	}
+	if got := action(t, after); got != actionEnforce {
+		t.Errorf("verified connection renders %q, want Enforce — the recording state "+
+			"has to end, or the rule never does the job it was installed for", got)
+	}
+
+	// And the reason is on the object, because the person asking why their
+	// image was or was not rejected reads this and not the source.
+	if !strings.Contains(string(before), "no signature") {
+		t.Error("nothing on the audit-mode policy says why it is not rejecting")
+	}
+	if !strings.Contains(string(after), "2026-08-28") {
+		t.Error("nothing on the enforcing policy says what proved the chain works")
+	}
+
+	// The identity does not move across the transition. Enforcement is a
+	// different question from who is trusted.
+	if keylessSubject(t, before) != keylessSubject(t, after) {
+		t.Error("the accepted identity changed when enforcement did")
+	}
+}
+
+func action(t *testing.T, policy []byte) string {
+	t.Helper()
+	var p struct {
+		Spec struct {
+			ValidationFailureAction string `json:"validationFailureAction"`
+		} `json:"spec"`
+	}
+	if err := yaml.Unmarshal(policy, &p); err != nil {
+		t.Fatalf("parsing policy: %v", err)
+	}
+	return p.Spec.ValidationFailureAction
 }
