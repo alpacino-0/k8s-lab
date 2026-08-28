@@ -19,6 +19,27 @@ const $ = (id) => document.getElementById(id);
 // whether anybody said. A record carrying no reason, not allowed, and not in
 // the rejected state is one nothing has observed — and saying "refused" about
 // it would be the panel reaching a conclusion the API never gave it.
+// What the page shows when there is no running deploy, as a value rather than
+// an expression buried in a render function.
+//
+// Pulled out because this is the one place the page decides something, and the
+// one time it decided wrongly nothing could have caught it: the panel has no
+// test tier, and the bug — every deploy that had not finished syncing rendering
+// as "was refused", under a banner explaining the refusal — sat in an inline
+// ternary for as long as the page existed.
+//
+// A deploy admission refused never becomes current, so the page would otherwise
+// say "nothing is running" and stop, with the reason sitting in the very next
+// record down. Refusal is read from the state, which is somewhere a record
+// arrives because something moved it there. It used to be read from
+// !latest.admission.allowed, and nothing wrote that field — so it was false on
+// every record ever created, and the absence of an observation was shown as the
+// worst thing that could have happened.
+const whatToShow = (current, latest) => {
+  const blocked = Boolean(!current && latest && latest.state === "rejected");
+  return { blocked, shown: current || (blocked ? latest : null) };
+};
+
 const admissionKnown = (r) =>
   Boolean(r.admission.allowed || r.admission.reason || r.state === "rejected");
 
@@ -50,6 +71,7 @@ function showSignIn() {
   $("signin").hidden = false;
 }
 
+function wireSignIn() {
 $("signin-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const form = e.target;
@@ -82,6 +104,9 @@ $("signin-form").addEventListener("submit", async (e) => {
   }
 });
 
+}
+
+function wireSignOut() {
 $("signout").addEventListener("click", async () => {
   try {
     await fetch("/api/v1/logout", { method: "POST", credentials: "same-origin" });
@@ -89,6 +114,7 @@ $("signout").addEventListener("click", async () => {
     location.reload();
   }
 });
+}
 
 // ---------------------------------------------------------------- shell
 
@@ -119,7 +145,9 @@ async function start() {
   await pickTenant(select.value);
 }
 
-$("tenant").addEventListener("change", (e) => pickTenant(e.target.value));
+function wireTenant() {
+  $("tenant").addEventListener("change", (e) => pickTenant(e.target.value));
+}
 
 async function pickTenant(tenantId) {
   state.tenant = tenantId;
@@ -181,20 +209,7 @@ async function showEvidence() {
   // next record down. On a product whose entire claim is that it can tell you
   // why, that is the wrong place to go quiet.
   const latest = history.records[0] || null;
-  // Read from the state, not inferred from a boolean nobody sets.
-  //
-  // This was `!latest.admission.allowed`, and nothing in the product writes
-  // that field — so it was false on every record ever created, and every
-  // deploy that had not finished syncing yet rendered as "was refused" with a
-  // banner explaining the refusal. On the page whose entire claim is that it
-  // can tell you what happened, the absence of an observation was being shown
-  // as the worst thing that could have happened.
-  //
-  // "rejected" is a state the record reaches because something moved it there.
-  // A record that is merely pending has not been refused; it has not been
-  // looked at, and those are different sentences.
-  const blocked = !current && latest && latest.state === "rejected";
-  const shown = current || (blocked ? latest : null);
+  const { blocked, shown } = whatToShow(current, latest);
 
   const parts = [
     el("h2", {}, `${app} · ${env}`),
@@ -338,8 +353,6 @@ function when(stamp) {
 // Only a 401 becomes the sign-in form. Anything else is shown as what it is,
 // because a bug that renders as "please sign in" is a bug nobody reports
 // accurately — they say the login is broken, and it is not.
-start().catch(fail);
-
 function fail(err) {
   if (err instanceof NotSignedIn) {
     showSignIn();
@@ -353,4 +366,27 @@ function fail(err) {
     el("p", { class: "error" }, String(err && err.message ? err.message : err)),
     el("p", { class: "muted" }, "The session is fine. This is a fault in the panel or the API behind it."),
   );
+}
+
+// Wiring, and the two guards that let this file be both a page and a module.
+//
+// The page loads it in a browser, where document exists and module does not.
+// panel/app_test.js requires it under node --test, where the reverse is true —
+// no DOM, no npm, nothing installed. Without the first guard the file throws on
+// import at the first getElementById; without the second the browser throws on
+// an undefined module.
+//
+// The alternative was a fourth file in a package whose whole argument is that it
+// has three, or leaving the one place this page decides anything as the one
+// place nothing can check. It was the second of those for as long as the page
+// existed, and it cost a bug that told every visitor their deploy was refused.
+if (typeof document !== "undefined") {
+  wireSignIn();
+  wireSignOut();
+  wireTenant();
+  start().catch(fail);
+}
+
+if (typeof module !== "undefined") {
+  module.exports = { whatToShow, admissionKnown, short, when };
 }

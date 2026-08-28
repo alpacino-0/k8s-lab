@@ -15,7 +15,8 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-// Package panel is the free front end: three files, embedded in the binary.
+// Package panel is the free front end: three files embedded in the binary, and
+// a fourth beside them that is not.
 //
 // There is no build step, no framework and no CDN, and that is a decision
 // rather than a stage this has not reached yet.
@@ -29,6 +30,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //     but a free install that silently stops working without a route to the
 //     internet is not a free install, it is a hosted product with extra steps.
 //     Everything the page needs is in the binary.
+//   - There are tests, and they need nothing installed. app_test.js runs under
+//     node --test, which is built in — so the argument against a build step
+//     holds without extending to an argument against being checked. It exists
+//     because the one place this page decides anything decided wrongly for as
+//     long as the page had existed, and nothing could have caught it: every
+//     deploy that had not finished syncing rendered as refused, under a banner
+//     explaining a refusal that had not happened.
 //   - The panel decides nothing. It does not compute whether a chain is valid,
 //     whether an image was signed, or whether a policy passed; it shows what
 //     the API said. The moment it computes any of that, the panel and the CLI

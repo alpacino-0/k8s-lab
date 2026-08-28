@@ -43,6 +43,13 @@ jobs:
       - run: npm test
         working-directory: app
 
+      # The panel, in the same runner and with nothing installed. It has no
+      # package.json and needs none: node --test is built in, which is what
+      # lets the package keep its argument against a build step while still
+      # having tests. It had none until the one place it decides anything was
+      # found deciding wrongly.
+      - run: node --test panel/app_test.js
+
   # ------------------------------------------------------- static analysis
   manifests:
     name: Validate manifests
