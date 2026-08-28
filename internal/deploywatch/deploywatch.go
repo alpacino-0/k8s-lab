@@ -38,7 +38,6 @@ package deploywatch
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -51,7 +50,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/damgahq/damga/evidence"
-	"github.com/damgahq/damga/forge"
 )
 
 const (
@@ -64,50 +62,17 @@ const (
 	// which is itself an object annotation the controller rewrites on every
 	// rollout, would be an infinite rollout loop.
 	RolloutAnnotation = "damga.co/rollout"
-
-	// VerifyImagesAnnotation is Kyverno's, not ours. It binds the digest that
-	// was admitted to the verdict on it, in one field:
-	//
-	//	{"ghcr.io/damgahq/damga@sha256:f8b41ad0…":"pass"}
-	//
-	// Read off the Deployment, and that is measured rather than assumed. The
-	// policy matches Pods and Kyverno autogenerates the rule that covers pod
-	// controllers, so where the annotation lands is upstream's decision. On the
-	// installed version, with a signed image and an auditing policy:
-	//
-	//	deployment metadata : {"ghcr.io/…@sha256:83b4496a…":"pass"}
-	//	pod template        : <absent>
-	//	pod metadata        : {"ghcr.io/…@sha256:83b4496a…":"pass"}
-	//
-	// The Deployment and the Pod carry it; the pod template does not — which is
-	// the one that would have mattered, because a template annotation is part
-	// of the hash the deployment controller rolls on. scripts/verdict-probe.sh
-	// is where that comes from and it runs in CI, so a version of Kyverno that
-	// moves it fails there rather than here.
-	//
-	// Its ABSENCE is a signal in its own right, and the one this project got
-	// wrong once already: an image no rule matched produces no annotation, and
-	// rendering that the same as "verified" is how an evidence page lies.
-	VerifyImagesAnnotation = "kyverno.io/verify-images"
 )
 
 // Reconciler observes Deployments and moves the record they name.
 type Reconciler struct {
 	client.Client
 	Evidence evidence.Store
-
-	// Connections is where the signing identity for an app lives, and it is
-	// optional. Without it the verdict still reaches the record — the digest
-	// and the pass are on the Deployment — but with no subject or issuer
-	// attached, and nothing ever leaves audit mode. An installation that
-	// connects no repositories is exactly that installation.
-	Connections forge.Store
 }
 
-// SetupWithManager registers the reconciler. It watches Deployments only.
-// Pods carry the same Kyverno verdict, but a Deployment is the object a rollout
-// is, and a per-pod watch would multiply the work by the replica count to learn
-// nothing the Deployment does not already say.
+// SetupWithManager registers the reconciler. It watches Deployments only: a
+// Deployment is the object a rollout is, and a per-pod watch would multiply the
+// work by the replica count to learn nothing the Deployment does not say.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&appsv1.Deployment{}).
@@ -182,22 +147,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
-	// The connection, if this app has one. Read before the transition so the
-	// verdict can name the identity, and a failure to read it is not a failure
-	// to record what was observed: the pass on the object is true whether or
-	// not the control plane can say whose signature it was.
-	var conn *forge.Connection
-	if r.Connections != nil {
-		got, cErr := r.Connections.Get(ctx, forge.Key{TenantID: rec.Ref.TenantID, App: rec.Ref.App})
-		if cErr == nil {
-			conn = &got
-		} else if !errors.Is(cErr, forge.ErrNotFound) {
-			log.V(1).Info("could not read the connection; recording the verdict without it",
-				"app", rec.Ref.App, "error", cErr)
-		}
-	}
-	verdict := signatureVerdict(&deploy, conn)
-
 	// Fenced on the version the derivation was made from. Without this, a
 	// write computed before a leader handover can land after it and set a
 	// state on the strength of an observation that is already stale — and the
@@ -212,7 +161,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			At:     time.Now().UTC(),
 		},
 		Image:        admittedImage(&deploy),
-		Signature:    verdict,
 		Admission:    admissionOutcome(&deploy, want),
 		ExpectEvents: &version,
 	})
@@ -230,30 +178,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{Requeue: true}, nil
 	case err != nil:
 		return ctrl.Result{}, fmt.Errorf("transitioning the record to %s: %w", want, err)
-	}
-
-	// The first signature is what ends the policy's recording state, and this
-	// is the only place that ever learns of one. Written after the transition
-	// rather than before: the record is the evidence, and marking a connection
-	// verified on the strength of an observation that then failed to record
-	// would enforce a policy against a chain nothing can show working.
-	//
-	// Once, and never moved. A later deploy is another signature, not a
-	// different first one, and rewriting it would make "since when has this
-	// been enforcing" unanswerable.
-	if conn != nil && verdict != nil && verdict.Verified && !conn.Verified() {
-		conn.FirstSignatureAt = time.Now().UTC()
-		if _, err := r.Connections.Put(ctx, *conn); err != nil {
-			// Not fatal, and not retried here. The record moved, which is the
-			// thing that had to happen; the next deploy sees the same pass and
-			// tries again. Failing the reconcile would roll back nothing and
-			// requeue an observation that has already been written.
-			log.Error(err, "could not mark the connection verified",
-				"app", rec.Ref.App)
-		} else {
-			log.Info("first signature seen; the signature policy will enforce from the next deploy",
-				"app", rec.Ref.App, "identity", conn.Identity())
-		}
 	}
 
 	log.Info("evidence record moved", "rollout", id, "to", want, "reason", reason)
@@ -349,40 +273,20 @@ func allowedFrom(to evidence.State) []evidence.State {
 	}
 }
 
-// admittedImage reports what actually ran, taken from the field Kyverno
-// rewrote, together with the verdict it recorded.
+// admittedImage reports what is actually running, taken from the Deployment's
+// own container spec.
 //
-// nil when the object carries no verdict, which is not the same as a failure:
-// it is an image no rule matched. Reporting the two identically is the defect
-// this project already measured once, in a namespace that claimed to enforce.
+// This is what git wrote and the API server accepted. It is a reference and not
+// necessarily a digest: a tag says "whatever that name pointed at when the
+// kubelet pulled it", which is a weaker claim and is recorded as the weaker
+// claim rather than dressed up as a digest.
 func admittedImage(d *appsv1.Deployment) *evidence.Image {
-	if ref, ok := passedDigest(d); ok {
-		return &evidence.Image{AdmittedDigest: ref}
-	}
-	return nil
-}
-
-// passedDigest is the digest the admission controller says it verified.
-//
-// Only a pass counts. Kyverno's own helper treats "skip" as verified, and a
-// record that has to survive an auditor must not — an image no rule matched
-// produces no annotation at all, and rendering that the same as verified is how
-// an evidence page lies.
-func passedDigest(d *appsv1.Deployment) (string, bool) {
-	raw := d.Annotations[VerifyImagesAnnotation]
-	if raw == "" {
-		return "", false
-	}
-	verdicts := map[string]string{}
-	if err := json.Unmarshal([]byte(raw), &verdicts); err != nil {
-		return "", false
-	}
-	for ref, verdict := range verdicts {
-		if verdict == "pass" {
-			return ref, true
+	for _, c := range d.Spec.Template.Spec.Containers {
+		if c.Image != "" {
+			return &evidence.Image{RequestedRef: c.Image}
 		}
 	}
-	return "", false
+	return nil
 }
 
 // admissionRefused returns the condition saying pods could not be created, or
@@ -400,12 +304,10 @@ func passedDigest(d *appsv1.Deployment) (string, bool) {
 //	controllers that make them, so the Deployment is admitted and the refusal
 //	surfaces here. This is that path.
 //
-//	Deployment-level. The ValidatingAdmissionPolicies bind to deployments,
-//	statefulsets, daemonsets and jobs as well as pods, and Kyverno
-//	autogenerates rules over the same controllers — so a violation they catch
-//	fails the apply itself. No Deployment is created, no condition exists, and
-//	nothing that watches Deployments can ever learn of it. That is most of the
-//	refusals this platform issues, including an unsigned image.
+//	Deployment-level. Anything that refuses the Deployment itself — a quota,
+//	a webhook, a future policy bound to controllers rather than pods — fails
+//	the apply. No Deployment is created, no condition exists, and nothing that
+//	watches Deployments can ever learn of it.
 //
 // The second path is a real gap and it is not closable from here. damga writes
 // to git; Argo CD applies, so Argo CD is what receives the refusal, and its
@@ -454,34 +356,4 @@ func admissionOutcome(d *appsv1.Deployment, state evidence.State) *evidence.Admi
 		// is the same lie in the other direction.
 		return nil
 	}
-}
-
-// signatureVerdict is what the record gets to say about the supply chain.
-//
-// The pass and the digest come off the live object, from the controller that
-// actually did the checking. The issuer and the subject come from the
-// connection, and they have to: the annotation records that a rule passed and
-// not which identity satisfied it. That is sound only because the rule in that
-// namespace is the one rendered from this connection, pinned to this subject
-// and scoped to this image repository — so a pass on a matching image is a pass
-// against that identity and no other.
-//
-// Without a connection there is still a verdict, carrying the digest and the
-// pass and nothing about who signed. Weaker, and said as such rather than left
-// out: a record with no verdict at all is indistinguishable from a deploy
-// nothing checked.
-func signatureVerdict(d *appsv1.Deployment, conn *forge.Connection) *evidence.SignatureVerdict {
-	digest, ok := passedDigest(d)
-	if !ok {
-		return nil
-	}
-	v := &evidence.SignatureVerdict{
-		Verified: true, Digest: digest,
-		Message: "admission verified the signature on this digest",
-	}
-	if conn != nil {
-		v.Issuer = forge.OIDCIssuer
-		v.Subject = conn.Identity()
-	}
-	return v
 }

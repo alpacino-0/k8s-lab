@@ -7,7 +7,7 @@ IMAGE       ?= damga-app
 IMAGE_TAG   ?= 1.0.0
 
 .DEFAULT_GOAL := help
-.PHONY: help test lint build up down deploy smoke policies policy-test alert-test report-test operator-test operator-install operator-deploy seal platform platform-plan tls logs logging gitops monitoring port-forward clean
+.PHONY: help test lint build up down deploy smoke policies alert-test report-test operator-test operator-install operator-deploy seal platform platform-plan tls logs logging gitops monitoring port-forward clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -45,13 +45,9 @@ deploy: build ## Rebuild the image and upgrade the release
 smoke: ## Run the end-to-end smoke test against the deployed release
 	NAMESPACE=$(NAMESPACE) RELEASE=$(RELEASE) ./scripts/smoke-test.sh
 
-policies: ## Apply Pod Security Admission labels and the admission policies
+policies: ## Apply Pod Security Admission labels and the tenant quota
 	kubectl apply -f policies/namespace.yaml
-	kubectl apply -f policies/admission-policies.yaml -f policies/admission-bindings.yaml
 	kubectl apply -f policies/tenant-quota.yaml
-
-policy-test: ## Prove each policy rejects what it is supposed to
-	NAMESPACE=$(NAMESPACE) ./scripts/policy-test.sh
 
 logs: ## Tail application logs
 	kubectl -n $(NAMESPACE) logs -l app.kubernetes.io/name=damga-app -f --tail=50
@@ -146,7 +142,6 @@ platform: ## Apply the platform layer with Terraform (ingress, cert-manager, Arg
 	terraform -chdir=terraform init -input=false
 	terraform -chdir=terraform apply -input=false -var kube_context=kind-$(CLUSTER)
 	kubectl apply -f cluster/issuers.yaml
-	kubectl apply -f policies/kyverno-image-signatures.yaml
 
 platform-plan: ## Show what Terraform would change, without changing it
 	terraform -chdir=terraform init -input=false -backend=false

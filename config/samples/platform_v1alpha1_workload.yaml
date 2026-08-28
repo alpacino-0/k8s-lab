@@ -1,10 +1,4 @@
-# The smallest Workload that reaches Ready with the admission policies active.
-#
-# The image is the published, signed one rather than a local build on purpose.
-# A locally built `damga-*` image is admitted by the registry allowlist in
-# policies/admission-policies.yaml on the strength of its name, and never
-# matches the Kyverno glob, so nothing verifies its signature. This reference
-# matches both, so both layers actually run.
+# The smallest Workload that reaches Ready.
 #
 # port is set because the API defaults to 8080 and this image listens on 3000.
 # No `domain`: the rendered Ingress asks for the letsencrypt-prod issuer, which

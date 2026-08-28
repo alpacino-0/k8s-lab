@@ -11,15 +11,15 @@ IMG ?= controller:latest
 #
 # This was a hand-written list of directories, inherited from the kubebuilder
 # scaffold, and it did what hand-written lists do. `placement` was added on
-# 2026-08-27 and `forge` on 2026-08-28, and neither was ever added here — so
-# both shipped with green CI while their tests, including two PostgreSQL
+# 2026-08-27 and a second package the day after, and neither was ever added
+# here — so both shipped with green CI while their tests, including PostgreSQL
 # conformance suites that only run in CI, had never once been executed there.
 # Nothing failed, because nothing ran.
 #
 # It was invisible for a specific reason worth naming: `golangci-lint run`
 # covers the whole module regardless of this variable, so lint was reporting on
-# packages the test step could not see. A lint failure in `forge` and a passing
-# test run for `forge` looked like the same package being handled.
+# packages the test step could not see. A lint failure in a package and a
+# passing test run for it looked like the same package being handled.
 #
 # ./... has no such gap and needs no maintenance. The e2e tag is still excluded
 # below, which is the only exclusion that was ever doing work.

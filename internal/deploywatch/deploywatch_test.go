@@ -19,7 +19,6 @@ package deploywatch_test
 
 import (
 	"context"
-	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -39,8 +38,6 @@ import (
 
 	"github.com/damgahq/damga/evidence"
 	"github.com/damgahq/damga/evidence/memory"
-	"github.com/damgahq/damga/forge"
-	forgemem "github.com/damgahq/damga/forge/memory"
 	"github.com/damgahq/damga/internal/deploywatch"
 )
 
@@ -146,7 +143,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 }
 
-// deploy creates a Deployment carrying the annotations Damga and Kyverno put on
+// deploy creates a Deployment carrying the annotations Damga puts on
 // it, and returns it. Status is written separately: the apiserver strips any
 // status supplied on create.
 func (f *fixture) deploy(t *testing.T, annotations map[string]string) *appsv1.Deployment {
@@ -218,15 +215,17 @@ func (f *fixture) state(t *testing.T) evidence.Record {
 	return got
 }
 
-const liveVerdict = `{"ghcr.io/damgahq/damga@sha256:f8b41ad0b0d4ae565dc0abbeca841ec3d91d4c1325db26beb4fbb9296abadba0":"pass"}`
-
 // The happy path, and the two things it has to carry: the record moves to
-// running, and it learns the digest that was actually admitted.
+// running, and it learns the image reference that is actually running.
+//
+// The reference and not a digest, and the difference is recorded rather than
+// papered over: this is what the Deployment's own spec says, which is what git
+// wrote. A tag means "whatever that name pointed at when the kubelet pulled
+// it", and claiming a digest here would be claiming something nothing checked.
 func TestFinishedRolloutBecomesRunning(t *testing.T) {
 	f := newFixture(t)
 	d := f.deploy(t, map[string]string{
-		deploywatch.RolloutAnnotation:      string(f.record.ID),
-		deploywatch.VerifyImagesAnnotation: liveVerdict,
+		deploywatch.RolloutAnnotation: string(f.record.ID),
 	})
 	f.settled(t, d, 2)
 	f.reconcile(t)
@@ -235,8 +234,8 @@ func TestFinishedRolloutBecomesRunning(t *testing.T) {
 	if got.State != evidence.StateRunning {
 		t.Fatalf("state = %q, want running", got.State)
 	}
-	if !strings.Contains(got.Image.AdmittedDigest, "@sha256:f8b41ad0") {
-		t.Errorf("admitted digest = %q, want the one Kyverno verified", got.Image.AdmittedDigest)
+	if got.Image.RequestedRef != "ghcr.io/damgahq/damga:1.0.0" {
+		t.Errorf("image = %+v, want the reference the Deployment carries", got.Image)
 	}
 }
 
@@ -382,42 +381,6 @@ func TestUnknownRecordIsNotAnError(t *testing.T) {
 	f.reconcile(t) // Reconcile fatals the test if it errors
 }
 
-// No verdict is not a failed verdict. This is the defect this project already
-// measured once in a namespace that claimed to enforce: an image no rule matched
-// produces no annotation, and recording it as verified is how the page lies.
-func TestAbsentVerdictIsNotRecordedAsVerified(t *testing.T) {
-	f := newFixture(t)
-	d := f.deploy(t, map[string]string{
-		deploywatch.RolloutAnnotation: string(f.record.ID),
-	})
-	f.settled(t, d, 2)
-	f.reconcile(t)
-
-	if got := f.state(t); got.Image.AdmittedDigest != "" {
-		t.Errorf("admitted digest = %q with no Kyverno verdict present, want empty",
-			got.Image.AdmittedDigest)
-	}
-}
-
-// Kyverno's own helper counts "skip" as verified. A record that has to survive
-// an auditor must not.
-func TestSkippedVerdictIsNotVerified(t *testing.T) {
-	f := newFixture(t)
-	d := f.deploy(t, map[string]string{
-		deploywatch.RolloutAnnotation:      string(f.record.ID),
-		deploywatch.VerifyImagesAnnotation: `{"ghcr.io/damgahq/damga:1.0.0":"skip"}`,
-	})
-	f.settled(t, d, 2)
-	f.reconcile(t)
-
-	if got := f.state(t); got.Image.AdmittedDigest != "" {
-		t.Errorf("admitted digest = %q for a skipped verification, want empty",
-			got.Image.AdmittedDigest)
-	}
-}
-
-// A deleted Deployment is not a state change. What ran, ran; the evidence of it
-// does not become false because someone ran kubectl delete.
 func TestDeletedDeploymentLeavesTheRecordAlone(t *testing.T) {
 	f := newFixture(t)
 	d := f.deploy(t, map[string]string{
@@ -468,155 +431,6 @@ func TestObserverCanCorrectASweptRecord(t *testing.T) {
 	}
 }
 
-// testConnection is the app under test, connected. The image repository matches
-// the one the fixture's Deployment runs, because a policy scoped anywhere else
-// would not have been the rule that passed.
-func testConnection() forge.Connection {
-	return forge.Connection{
-		TenantID: testRef.TenantID, App: testRef.App,
-		Host: "github.com", Owner: "acme", Repo: "shop", Branch: "main",
-		WorkflowPath:    ".github/workflows/damga-sign.yml",
-		ImageRepository: "ghcr.io/damgahq/damga",
-	}
-}
-
-// The loop the whole signing chain hangs off, closed.
-//
-// A connection renders a policy that records rather than rejects until a
-// signature carrying its identity has been seen. Nothing ever saw one, so every
-// connection stayed in audit mode for ever — the safe end of the wrong answer,
-// but still the wrong one. This is the only place that learns of a signature:
-// the admission controller's own verdict, on the live object.
-func TestTheFirstSignatureMarksTheConnectionVerified(t *testing.T) {
-	f := newFixture(t)
-	conns := forgemem.New()
-	conn := testConnection()
-	if _, err := conns.Put(context.Background(), conn); err != nil {
-		t.Fatalf("seeding the connection: %v", err)
-	}
-	f.r.Connections = conns
-
-	before, err := conns.Get(context.Background(), conn.Key())
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if before.Verified() {
-		t.Fatal("the fixture starts verified, so this test would pass without the code")
-	}
-
-	d := f.deploy(t, map[string]string{
-		deploywatch.RolloutAnnotation:      string(f.record.ID),
-		deploywatch.VerifyImagesAnnotation: liveVerdict,
-	})
-	f.settled(t, d, 2)
-	f.reconcile(t)
-
-	after, err := conns.Get(context.Background(), conn.Key())
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if !after.Verified() {
-		t.Fatal("a verified signature was observed and the connection is still recording; " +
-			"the policy it renders will never start rejecting anything")
-	}
-
-	// And the verdict reached the record, naming who was allowed to sign.
-	// The digest and the pass come off the object; the identity can only come
-	// from the connection, because the annotation says a rule passed and not
-	// which identity satisfied it.
-	got := f.state(t)
-	if !got.Signature.Verified {
-		t.Error("the record carries no signature verdict, so the evidence page cannot " +
-			"tell a verified deploy from one nothing checked")
-	}
-	if got.Signature.Subject != conn.Identity() {
-		t.Errorf("verdict subject = %q, want %q", got.Signature.Subject, conn.Identity())
-	}
-	if got.Signature.Issuer != forge.OIDCIssuer {
-		t.Errorf("verdict issuer = %q", got.Signature.Issuer)
-	}
-}
-
-// A second deploy is another signature, not a different first one. Moving the
-// timestamp would make "since when has this been enforcing" unanswerable, and
-// that question is the reason the field exists.
-func TestTheFirstSignatureIsNotMovedByLaterOnes(t *testing.T) {
-	f := newFixture(t)
-	conns := forgemem.New()
-	conn := forge.Connection{
-		TenantID: testRef.TenantID, App: testRef.App,
-		Host: "github.com", Owner: "acme", Repo: "shop", Branch: "main",
-		WorkflowPath:     ".github/workflows/damga-sign.yml",
-		ImageRepository:  "ghcr.io/damgahq/damga",
-		FirstSignatureAt: time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC),
-	}
-	if _, err := conns.Put(context.Background(), conn); err != nil {
-		t.Fatalf("seeding: %v", err)
-	}
-	f.r.Connections = conns
-
-	d := f.deploy(t, map[string]string{
-		deploywatch.RolloutAnnotation:      string(f.record.ID),
-		deploywatch.VerifyImagesAnnotation: liveVerdict,
-	})
-	f.settled(t, d, 2)
-	f.reconcile(t)
-
-	after, err := conns.Get(context.Background(), conn.Key())
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if !after.FirstSignatureAt.Equal(conn.FirstSignatureAt) {
-		t.Errorf("firstSignatureAt moved from %s to %s", conn.FirstSignatureAt, after.FirstSignatureAt)
-	}
-}
-
-// An image no rule matched carries no annotation, and one Kyverno skipped
-// carries "skip". Neither is a signature, and treating either as one would mark
-// a connection verified on the strength of nothing — which then enforces a
-// policy against a chain that has never been shown to work.
-func TestOnlyAPassMarksAConnectionVerified(t *testing.T) {
-	for name, annotations := range map[string]map[string]string{
-		"no-verdict-at-all": {},
-		"a-skipped-image":   {deploywatch.VerifyImagesAnnotation: `{"ghcr.io/damgahq/damga:1.0.0":"skip"}`},
-		"a-failed-image":    {deploywatch.VerifyImagesAnnotation: `{"ghcr.io/damgahq/damga:1.0.0":"fail"}`},
-	} {
-		t.Run(name, func(t *testing.T) {
-			f := newFixture(t)
-			conns := forgemem.New()
-			conn := testConnection()
-			if _, err := conns.Put(context.Background(), conn); err != nil {
-				t.Fatalf("seeding: %v", err)
-			}
-			f.r.Connections = conns
-
-			ann := map[string]string{deploywatch.RolloutAnnotation: string(f.record.ID)}
-			maps.Copy(ann, annotations)
-			d := f.deploy(t, ann)
-			f.settled(t, d, 2)
-			f.reconcile(t)
-
-			after, err := conns.Get(context.Background(), conn.Key())
-			if err != nil {
-				t.Fatalf("Get: %v", err)
-			}
-			if after.Verified() {
-				t.Error("the connection was marked verified without a passing signature, " +
-					"so its policy will start rejecting on the strength of nothing")
-			}
-		})
-	}
-}
-
-// refused writes the status a Deployment carries when admission would not let
-// its pods exist.
-//
-// envtest runs no ReplicaSet controller, so the condition has to be written by
-// hand — the same arrangement as seeding another controller's annotation. The
-// shape is Kubernetes': the ReplicaSet controller sets ReplicaFailure when it
-// cannot create pods, the deployment controller copies it up, and the webhook's
-// own sentence arrives in Message. That the real thing does this is proved in
-// CI against a cluster with admission policies, not here.
 func (f *fixture) refused(t *testing.T, d *appsv1.Deployment, reason, message string) {
 	t.Helper()
 	d.Status = appsv1.DeploymentStatus{
@@ -640,7 +454,7 @@ func (f *fixture) refused(t *testing.T, d *appsv1.Deployment, reason, message st
 // could not say why, on a page whose entire reason to exist is saying why.
 func TestARefusedDeployIsRecordedAsRejectedWithTheReason(t *testing.T) {
 	f := newFixture(t)
-	const msg = `admission webhook "kyverno-resource-validating-webhook-cfg" denied ` +
+	const msg = `admission webhook "validation.example.com" denied ` +
 		`the request: image ghcr.io/acme/api:1.0.0 is not signed`
 
 	d := f.deploy(t, map[string]string{deploywatch.RolloutAnnotation: string(f.record.ID)})

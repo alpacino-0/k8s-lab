@@ -267,20 +267,13 @@ async function showEvidence() {
   if (blocked) {
     parts.push(el("div", { class: "box banner" },
       el("h3", {}, "Refused"),
-      el("p", {}, latest.admission.reason || "Admission refused this deploy."),
-      latest.signature.message
-        ? el("p", { class: "muted" }, latest.signature.message)
-        : []));
+      el("p", {}, latest.admission.reason || "Admission refused this deploy.")));
   }
 
   if (shown) {
     parts.push(el("div", { class: "grid" },
       box("Image", dl([
-        ["Requested", el("span", { class: "mono" }, shown.image.requestedRef || "—")],
-        ["Admitted digest", el("span", { class: "mono" }, shown.image.admittedDigest || "—")],
-        ["Signature", verdict(shown.signature.verified,
-          shown.signature.verified ? "verified" : "not verified")],
-        ["Issuer", el("span", { class: "mono" }, shown.signature.issuer || "—")],
+        ["Running", el("span", { class: "mono" }, shown.image.requestedRef || "—")],
       ])),
       box("Source", dl([
         ["Repository", shown.source.repoUrl || "—"],
@@ -300,15 +293,6 @@ async function showEvidence() {
         ["Reason", shown.admission.reason || "—"],
       ])),
     ));
-
-    parts.push(el("div", { class: "box", style: "margin-top:1rem" },
-      el("h3", {}, "Policies"),
-      shown.policies.length
-        ? table(["Policy", "Source", "Result", "Severity"],
-            shown.policies.map((p) => [
-              p.name, p.source, verdict(p.result === "pass", p.result), p.severity || "—",
-            ]))
-        : el("p", { class: "muted" }, "No policy results were recorded for this deploy.")));
   }
 
   if (backup && backup.backup) {

@@ -15,12 +15,11 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-// Command damga is the free control plane: a thin main over the server package.
+// Command damga is the control plane: a thin main over the server package.
 //
-// It is thin on purpose. Everything it does, a second repository's main also
-// does — the difference is which implementations it passes — so anything that
-// accumulates here is something the enterprise build would have to duplicate or
-// fork to get.
+// It is thin on purpose. Wiring belongs in server.Options, where it can be
+// tested and substituted; logic that accumulates in a main is logic no test
+// reaches.
 package main
 
 import (

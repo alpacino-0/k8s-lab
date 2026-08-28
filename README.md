@@ -5,37 +5,60 @@
 ![Kubernetes](https://img.shields.io/badge/kubernetes-1.36-326ce5?logo=kubernetes&logoColor=white)
 ![Helm](https://img.shields.io/badge/helm-3-0f1689?logo=helm&logoColor=white)
 
-**Damga is a Kubernetes application platform, built in the open.** *Damga* is
-Turkish for a seal — the mark that says a thing is genuine, and says who put it
-there. That is the whole idea: a deploy should be able to prove itself. Which
-commit, which signature, which policies passed, when the backup was last
-checked.
+**A one-button Coolify that runs on Kubernetes.** Deploy your own code, or a
+ready-made application like n8n, without knowing what a Deployment is.
 
-**What is here today is the foundation, not the product.** A `Workload` custom
-resource and the operator that renders it into a Deployment, Service, Ingress,
-HorizontalPodAutoscaler, PodDisruptionBudget and NetworkPolicy — with no field
-that turns the hardening off, because none is defined. Admission policies the
-API server enforces, each with a test proving it rejects what it should. Images
-signed with keyless cosign and verified at admission rather than at build time.
-Nightly backups, checked for readability. The release reconciled from git by
-Argo CD.
+Coolify manages **servers** — it talks SSH to a box and runs Docker on it. Damga
+manages a **cluster**. For one application on one machine Coolify is easier, and
+pretending otherwise would be dishonest. The difference shows up on the second
+machine:
 
-Running alongside it is a Node.js + PostgreSQL service: non-root containers on
-a read-only root filesystem, default-deny network policies, a schema migration
-that runs once per release, autoscaling, disruption budgets and Prometheus
-metrics. It is not the product. It is the tenant everything else is measured
-against, and it is what makes the numbers below real — zero-downtime upgrades,
-network isolation, rate limits that bind across replicas, all exercised on a
-real cluster on every push.
+> In Coolify a second server is a second box you deploy to. In Damga a second
+> node is just somewhere the same application can already go — nothing in the
+> application's definition changes.
 
-**Not here yet:** a user interface, multi-tenancy, an installer, or any way to
-deploy an application without knowing Kubernetes. That is the product. This is
-what it gets built on.
+The other difference is backups. Everyone in this space takes them. This one
+restores each backup into a scratch database, counts the rows against the
+source, and puts the answer on the page — so *"we have backups"* and *"the
+backup works"* stop being the same sentence. Of eighteen platforms surveyed,
+none does this.
 
-Every number in this README was measured on the cluster this repository builds.
-The bugs found along the way are written up where the mechanism they broke is
-explained, rather than collected in one place. Turkish readme:
-[README.tr.md](README.tr.md).
+**Everything is free and open source.** There is no paid tier, no enterprise
+module and no private repository holding features back.
+
+## What is here today
+
+A control plane (panel, API, deploy history), an operator that renders a
+`Workload` custom resource into a Deployment, Service, Ingress,
+HorizontalPodAutoscaler, PodDisruptionBudget and NetworkPolicy, a `Database`
+resource with nightly backups and the restore rehearsal above, identity with
+teams and roles, and a GitOps write path — every change is a commit that Argo CD
+applies, so a rollback is a revert.
+
+**Not here yet:** the template catalogue (one-click n8n, Ghost, Plausible), live
+log streaming, custom domains from the UI, a CLI, and a one-command installer.
+Those are the next block of work.
+
+## What was removed, and why
+
+Until 2026-08-29 this project also verified image signatures at admission and
+enforced a set of ValidatingAdmissionPolicies. Both are gone.
+
+They were removed because they made the product impossible rather than because
+they were wrong. A one-click install brings a third-party image that is
+unsigned, often needs to write to its own filesystem, and needs to reach the
+internet — and the signing flow asked the user to merge a pull request into a
+repository they may not even own. Six rules, and each of them was a rejection.
+
+What stayed guards neighbours rather than constraining the owner: **Pod Security
+Admission** at `restricted` and a **ResourceQuota** per tenant. The operator
+still renders a hardened pod — non-root, read-only root filesystem, all
+capabilities dropped, no service-account token — but that is now a convention
+rather than a rule, and this paragraph exists so nobody discovers it by
+surprise.
+
+Every number below was measured on the cluster this repository builds. Turkish
+readme: [README.tr.md](README.tr.md).
 
 ```
 Kubernetes 1.36 · kind · Helm 3 · containerd · ingress-nginx · Prometheus · Grafana · GitHub Actions
@@ -102,7 +125,7 @@ go build -o damga ./cmd/damga
 ./damga -evidence-dsn ./damga.db -listen-address 127.0.0.1:8080
 ```
 
-`bootstrap` prints a password once. See [CONTROL-PLANE.md](CONTROL-PLANE.md)
+`bootstrap` prints a password once. See [docs/CONTROL-PLANE.md](docs/CONTROL-PLANE.md)
 for the flags that are easy to get wrong, what is on the API, and what is not
 built yet.
 
@@ -124,7 +147,6 @@ variables the kubelet injects.
 | `make deploy` | Rebuild the image and upgrade the release |
 | `make smoke` | End-to-end checks against the running deployment |
 | `make policies` | Apply the admission policies |
-| `make policy-test` | Prove each policy rejects what it is supposed to |
 | `make alert-test` | Break the service and prove the alert reaches Alertmanager |
 | `make report-test` | Prove policy results reach a report, failures included |
 | `make operator-test` | The operator's unit and envtest suites |
@@ -207,7 +229,6 @@ made *never checked* look exactly like *verified*.
 | npm removed from the runtime image | `app/Dockerfile` | eliminated **every** Node.js package CVE (see below) |
 | No secrets in git | `.gitignore` + chart values | password is a required chart value |
 | TLS, the redirect and the Secure cookie | cert-manager + explicit Certificate | verified on every push against a certificate a real CA issued |
-| Security settings are enforced, not just set | Pod Security Admission + ValidatingAdmissionPolicy | 15 policy tests: three compliant manifests admitted, twelve broken ones each rejected |
 | Notes isolated per visitor | anonymous cookie, owner-scoped queries | a second visitor cannot read or delete the first one's notes |
 | Writes bounded | ingress `limit-rps` + a shared window + a note cap | oversized and over-quota writes are rejected |
 | Rate limits bind across replicas | Redis sliding window | 60 requests against a limit of 30: **29 allowed** shared, **60 allowed** per replica |
@@ -219,128 +240,45 @@ and every outbound call times out with no obvious cause.
 
 ### Enforcement
 
-The chart sets a careful security context on every workload. Until recently
-nothing stopped a careless one from being deployed next to it — the settings
-were a convention, not a rule.
-
-Two layers close that, both built into Kubernetes:
-
-- **Pod Security Admission** at `restricted` on the namespace: no root, no
-  privilege escalation, no capabilities, no host namespaces, no hostPath, seccomp
-  required. Everything here already passed it, including PostgreSQL and every
-  hook Job.
-- **ValidatingAdmissionPolicy** for what PSA has no opinion about: resource
-  requests and limits, pinned image tags, a registry allowlist, read-only root
-  filesystems, no service-account tokens, and probes on anything long-running.
-
-Turning them on found two real gaps in this repository on the first apply: the
-PostgreSQL StatefulSet was not disabling its service-account token, and none of
-the migration or backup Jobs had resource bounds. Both are fixed; the policies
-are what would have caught them earlier.
-
-These began as Kyverno policies and were rewritten. Kyverno had deprecated the
-API in question, and every rule turned out to be expressible in the built-in
-engine, which runs in the API server:
-
-| | Kyverno | ValidatingAdmissionPolicy |
-|---|---|---|
-| Pods to run | 3 | 0 |
-| Memory, measured | 174 Mi | none |
-| API status | `ClusterPolicy` deprecated | GA since 1.30 |
-
-A policy engine earns its keep for mutation, cross-namespace generation, or
-image signature verification. Kyverno is back for one of those — see
-[Supply chain](#supply-chain) below and [policies/README.md](policies/README.md).
-
-It is also back for something the table above does not price. A
-`ValidatingAdmissionPolicy` decides and forgets: its `.status` records nothing
-about any resource it judged, and the `Audit` action on its binding writes into
-the API server's audit log, which this cluster does not configure. Moving the
-rules into the API server therefore reclaimed the pods in that table and gave
-up every answer to *which workloads satisfy them* — leaving only the rejection
-at the moment one did not. Kyverno's reports controller reads native policies it does
-not own and writes their results as `PolicyReport`s, which is the third pod and
-the only in-cluster answer:
-
-```console
-$ kubectl get policyreports -A -o json | jq -r '.items[].results[]
-    | select(.source=="ValidatingAdmissionPolicy") | [.policy,.result,.severity] | @tsv'
-damga-image-provenance   pass  high
-damga-resource-bounds    pass  medium
-damga-workload-hygiene   pass  medium
-```
-
-`make report-test` proves that path, and proves the part a passing cluster
-cannot show: it puts a deployment with no resource bounds into a namespace the
-bindings do not select yet, then labels the namespace, because a rule that says
-`Deny` never lets a violation exist long enough to be reported.
+> **Removed 2026-08-29.** Three ValidatingAdmissionPolicies used to enforce
+> resource bounds, a read-only root filesystem, probes and an image allowlist
+> across every namespace labelled for them, with fifteen tests proving each rule
+> rejected what it was meant to.
+>
+> They were removed because they made the product impossible. A one-click
+> catalogue install — n8n, Ghost, Plausible — brings a third-party image that is
+> unsigned, may need to write to its own filesystem, and needs to reach the
+> internet. Every one of those was a rejection. The rules were not wrong; they
+> were incompatible with what this is for.
+>
+> What stayed, because it protects neighbours rather than constraining the
+> owner: **Pod Security Admission** at `restricted` and a **ResourceQuota** per
+> tenant. Without the quota one tenant can take a node's whole memory and take
+> everyone else down with it.
+>
+> The chart and the operator still render a hardened pod — non-root, read-only
+> root filesystem, all capabilities dropped, no service-account token. It is
+> once again a convention rather than a rule, and this paragraph exists so that
+> is not discovered by surprise.
 
 ### Supply chain
 
-Everything above answers *is this workload configured safely*. None of it answers
-*is this the image we built*. A registry credential, a compromised action, or a
-moved tag all produce a pod that passes every policy on this page.
+Images published from this repository are built per architecture, signed with
+keyless cosign in CI, and carry SLSA provenance and an SBOM as signed
+attestations. Every image is scanned by Trivy, and a CRITICAL or HIGH finding
+fails the build.
 
-The pipeline signs each published image with keyless cosign — no key to store,
-rotate or leak. It exchanges the workflow's OIDC token for a short-lived Fulcio
-certificate and records the signature in the Rekor transparency log, so what is
-verified later is not "someone held the key" but "this workflow, in this
-repository, produced this digest".
-
-The cluster refuses anything else. Kyverno's `verifyImages` is the one rule the
-built-in engine cannot express, because checking a signature means reaching a
-registry and a transparency log — work an admission plugin does not do. It is
-the reason Kyverno was installed, though no longer the only one:
-
-```yaml
-attestors:
-  - entries:
-      - keyless:
-          subject: "https://github.com/damgahq/damga/*"
-          issuer:  "https://token.actions.githubusercontent.com"
-mutateDigest: true      # the tag is rewritten to the digest that was verified
-```
-
-`mutateDigest` is what closes the gap between verification and execution. Without
-it a tag is checked and then resolved again at pull time, and those are not
-guaranteed to be the same image.
-
-| | |
-|---|---|
-| Signed image | admitted, and rewritten to `…@sha256:…` in the pod spec |
-| Unsigned image published beside the release | rejected: **`no signatures found`** |
-
-The negative case deliberately uses an image that *exists* and carries no
-signature: `…/damga:unsigned-fixture`, which the publish job builds and pushes
-after the signing step and never signs. A tag that was never pushed would be
-rejected too — with `manifest unknown`, a different failure wearing the same
-colour.
-
-**cosign 3 and Kyverno do not agree yet.** cosign 3 writes signatures as a
-Sigstore bundle (`application/vnd.dev.sigstore.bundle.v0.3+json`) and gives no
-way to opt out. Kyverno cannot read that layer, and what it reports is not
-"unsupported format" but **`no signatures found`** — a valid signature the
-enforcer cannot see, indistinguishable from no signature at all. So the signer
-is pinned to cosign 2.x until the verifier catches up. An upgrade of the signing
-action alone was enough to break enforcement, and the pipeline stayed green
-while it did, because the check was reading an image signed before the upgrade.
-
-**The bug this found.** The pipeline signed each image's index digest. A
-multi-arch tag is an index pointing at one manifest per platform, and an
-admission controller resolves the tag to the child for its own platform — then
-looks for a signature on *that* digest and finds none. Verified afterwards:
-
-```
-index  sha256:dcda008f…  signed
-  ├─ linux/amd64  sha256:4ca43c01…  unsigned
-  └─ linux/arm64  sha256:a993151c…  unsigned
-```
-
-So a correctly signed image was rejected by a correctly working policy. The CI
-check missed it for the reason such checks usually do: it verified the same
-digest the previous step had just signed, which is a test that cannot fail for
-the reason it exists. `cosign sign --recursive` signs the children too, and the
-check now verifies every platform a cluster could resolve to.
+> **Removed 2026-08-29.** The cluster used to *verify* those signatures at
+> admission through Kyverno, and the platform used to open a pull request into
+> the user's own repository carrying a workflow that signed their images with
+> their own OIDC identity.
+>
+> Both were removed for the same reason as the policies above: verification
+> makes a one-click third-party install impossible, and the workflow PR asked
+> the user to merge something into a repository they may not even own.
+>
+> Signing our own releases stayed. It costs a user nothing and keeps this
+> project's own artifacts verifiable.
 
 ### TLS
 
@@ -478,8 +416,7 @@ calls Terraform.
 
 **`kubernetes_manifest` cannot plan against a CRD that does not exist yet.** It
 resolves a schema at plan time, so cert-manager's `ClusterIssuer`s and the Argo
-CD `Application` stay as plain YAML applied afterwards. The admission policies
-do not have the problem: `ValidatingAdmissionPolicy` is a built-in API.
+CD `Application` stay as plain YAML applied afterwards.
 
 A side effect worth having: the ingress NodePorts are chart values now instead
 of a `kubectl patch` applied after install. The patch worked and left nothing
@@ -534,9 +471,8 @@ every push, three more on `main`:
 | `manifests` | `helm lint`, renders all values profiles, kubeconform schema validation, `terraform fmt -check` and `validate`, hadolint on every Dockerfile |
 | `image` | Builds each image, asserts each is non-root, boots the API image read-only, Trivy scan (fails on CRITICAL/HIGH) |
 | `operator` | The Go suite, plus a check that the committed generated code matches what the types produce |
-| `e2e` | Creates a real kind cluster, applies the policies **before** the chart so the release has to satisfy them, runs the 13 policy checks that need no Kyverno and the 30-check smoke test, proves an upgrade drops zero requests, then deploys the operator and takes a `Workload` to Ready through admission |
+| `e2e` | Creates a real kind cluster, applies the namespace and quota, installs the chart, runs the 30-check smoke test, proves an upgrade drops zero requests, then deploys the operator and takes a `Workload` to Ready |
 | `build` · `publish` | Builds each architecture natively, pushes to GHCR with SBOM and provenance attestation, signs with keyless cosign (main only) |
-| `supply-chain` | Installs Kyverno in a fresh cluster and proves the image this run signed is admitted while a deliberately unsigned one published beside it is rejected (main only) |
 
 ---
 
@@ -553,7 +489,7 @@ chart/                Helm chart — the single deployment path
   values-dev.yaml     minimal footprint, demo endpoints on
   values-prod.yaml    autoscaling, backups, monitoring, network policies
   values-public.yaml  GHCR image, TLS, external secret — for a public address
-go.mod                one module, github.com/damgahq/damga — see OPERATOR.md
+go.mod                one module, github.com/damgahq/damga
 api/v1alpha1/         the Workload types — there is no field that disables hardening
 cmd/operator/         the controller's main, kept thin
 internal/controller/  the reconciler and the resources it renders
@@ -561,7 +497,7 @@ config/               the operator's kustomize manifests, including the CRD
 Dockerfile.operator   builds cmd/operator; context is the repository root
 Makefile.operator     the kubebuilder targets, kept apart because `test`,
                       `build`, `lint` and `deploy` mean something else above
-terraform/            the platform layer: ingress, cert-manager, Argo CD, Kyverno, metrics-server, sealed-secrets, policies
+terraform/            the platform layer: ingress, cert-manager, Argo CD, metrics-server, sealed-secrets
 gitops/               the Argo CD Applications: the release, and the operator
 cluster/              cluster-scoped add-ons, kept out of the chart
   issuers.yaml        a local CA, so the TLS path is exercised not assumed
@@ -573,16 +509,13 @@ cluster/              cluster-scoped add-ons, kept out of the chart
   sealed-secrets-values.yaml  the controller that lets a secret live in git
 policies/             cluster policy, kept out of the chart on purpose
   namespace.yaml      Pod Security Admission labels
-  admission-*.yaml    ValidatingAdmissionPolicy rules and their bindings
   tenant-quota.yaml   the ceiling on what one namespace may take
-  kyverno-*.yaml      the image signature policy, applied by `make platform`
 scripts/
   bootstrap.sh        idempotent cluster + ingress + policies + deploy
   approve-kubelet-certs.sh  so metrics-server has a certificate to verify
   seal-secret.sh      a Secret in, a SealedSecret out, kubeseal in a container
   alert-test.sh       causes a real outage and waits for the alert to arrive
   report-test.sh      forces a violation into scope to prove failures are reported
-  policy-test.sh      15 checks that each rule rejects what it should
   smoke-test.sh       30 end-to-end checks including security posture and isolation
   teardown.sh         destroy the cluster
 ```
@@ -699,9 +632,10 @@ off-cluster backups, and someone who gets paged.
 
 ## Known limitations
 
-This runs on a local kind cluster. TLS, admission enforcement and signature
-verification are real and exercised on every push — they are not on this list.
-What is still missing:
+This runs on a local kind cluster. TLS is real and exercised on every push, and
+so is the restore rehearsal — they are not on this list. Admission enforcement
+and signature verification used to be here; they were removed, and why is at the
+top of this file. What is still missing:
 
 - **The sealing key is the secret now.** `SealedSecret` objects are safe to
   commit, so the database password stopped being the one thing GitOps could not
@@ -724,17 +658,12 @@ What is still missing:
   and that a critical silences the warnings describing the same failure. The
   receiver is `null`. Where an alert should go is a property of whoever runs the
   cluster, and every real option needs a credential nobody cloning this has.
-- **Policy reports are a live view, not a record.** Every `PolicyReport` is
-  owner-referenced to the resource it describes, so it is collected the moment
-  that pod is replaced, and a controller's report is overwritten in place with
-  no history. There is no retention, no archive and no TTL anywhere in this
-  configuration. It answers *what is true now*, and cannot answer *what was
-  true at the deploy before last* — which is the question an audit actually
-  asks. A durable per-deploy record has to be written by something else, at
-  deploy time, and does not exist yet.
-- **One quota, hand-written.** The namespace has a ceiling and containers have
-  one, but both are sized by hand for this namespace. Nothing derives them per
-  tenant, because there is only one tenant.
+- **One quota, hand-written, and no per-container ceiling.** The namespace has a
+  ceiling, sized by hand. Nothing derives it per tenant, because there is only
+  one tenant yet. The per-container ceiling went with the admission policies, so
+  a single tenant can now spend its whole quota on one pod.
+- **Nothing verifies an image.** Including anything installed from a catalogue.
+  A deliberate trade for one-click installs, recorded rather than hidden.
 - **No distributed tracing.** Metrics and logs only.
 
 ---

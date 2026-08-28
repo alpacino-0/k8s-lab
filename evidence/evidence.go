@@ -15,13 +15,18 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-// Package evidence is the record of what was deployed, by whom, and what the
-// gates said at the moment it happened. It is the only place history lives:
-// admission never reads it, PolicyReport cannot hold it, and the Argo CD
-// Application status is a live view rather than a record.
+// Package evidence is the record of what was deployed, by whom, and what
+// happened to it. It is the only place history lives: the Argo CD Application
+// status is a live view rather than a record, and it keeps ten entries.
 //
-// This package declares types and one interface. It performs no I/O, so that
-// damga-ee can implement Store without linking any of the free storage code.
+// What that record is for changed on 2026-08-29. It was the foundation of a
+// claim about supply-chain provenance, and the layer that produced that claim
+// was removed. What remains — who, when, which commit, which image, admitted or
+// refused — is a deploy history, which is what a rollback needs and what
+// "who deployed this" is answered from. Smaller, and still load-bearing.
+//
+// This package declares types and one interface and performs no I/O, so an
+// alternative store can satisfy it without linking any of the storage code.
 package evidence
 
 import (
@@ -32,7 +37,7 @@ import (
 )
 
 // Errors a Store returns. Callers branch on these, so they are part of the
-// contract damga-ee has to honour.
+// contract any implementation has to honour.
 var (
 	// ErrNotFound is returned by Current and Get when nothing matches.
 	ErrNotFound = errors.New("evidence: not found")

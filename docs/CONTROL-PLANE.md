@@ -116,7 +116,9 @@ same endpoints; there is no private API.
 | `…/history` | The deploy log, newest first, keyset-paged. |
 | `…/verify` | Recomputes the hash chain and reports whether it holds. |
 | `…/retention` | What the store promises to keep. |
+| `…/backup` | The app's database, and when its backup was last restored. |
 | `…/export` | Every record, oldest first, as JSONL. |
+| `POST …/deploys` | The only endpoint that writes. It writes to git and to nothing else. |
 
 Every endpoint under `/tenants/{tenant}` resolves the caller from the session
 cookie and the membership row, and from nothing the request carries. A tenant

@@ -20,11 +20,12 @@ irrevocable licence to reproduce, modify, publicly display, sublicense and
 distribute your contribution and works derived from it, **under any licence
 terms, including proprietary ones.**
 
-This is the clause that matters. It is what allows the project to be released
-under AGPL-3.0 to everyone while a separately licensed enterprise build stays
-possible alongside it — and a commercial licence stays available to
-organisations the AGPL does not suit. [CONTRIBUTING.md](CONTRIBUTING.md) states
-that plan plainly and lists what will never be sold. It does not require you to
+This is the clause that matters, and the plan it was written for no longer
+exists: the open-core model was dropped on 2026-08-29, and there is no
+enterprise build and no paid tier — see [CONTRIBUTING.md](CONTRIBUTING.md).
+What the clause still does is keep the project's licence changeable later
+without having to find and ask every past contributor. Whether that is worth
+asking you to sign anything is an open question. It does not require you to
 give anything up: you keep the copyright to your contribution and may use it
 however you like, elsewhere.
 

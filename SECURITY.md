@@ -51,14 +51,16 @@ So you can tell a gap from a deliberate design decision:
     ghcr.io/damgahq/damga@sha256:<digest>
   ```
 
-- `policies/kyverno-image-signatures.yaml` runs at `validationFailureAction:
-  Enforce`. An unsigned image is rejected by the API server, not merely flagged.
-- Every `ValidatingAdmissionPolicy`, Pod Security Admission rule and the Kyverno
-  signature rule has a matching test in `scripts/policy-test.sh` proving it
-  rejects what it should and admits what it should. The signature rule's reject
-  half runs against `ghcr.io/damgahq/damga:unsigned-fixture`, published beside
-  the release and deliberately never signed, so a rejection can only mean the
-  signature was missing.
+- Signing is what this project does to its own releases. **The cluster does not
+  verify them.** Image signature verification and three
+  ValidatingAdmissionPolicies were removed on 2026-08-29: they made a one-click
+  install of a third-party application impossible, since a catalogue image is
+  unsigned, may need to write to its filesystem, and needs to reach the
+  internet. Treat any claim that this platform enforces image provenance as out
+  of date.
+- What still runs at the API server: **Pod Security Admission** at `restricted`
+  and a per-tenant **ResourceQuota**. Both guard neighbours rather than
+  constrain the workload's owner.
 
 A report showing that one of these can be bypassed is exactly what this project
 wants to receive.

@@ -17,7 +17,7 @@ public address yet.
 | Server | 1 vCPU / 2 GB RAM is comfortable; 1 GB works. Hetzner CX22 or similar, ~€4-5/month |
 | Domain | A record pointing at the server's IP. A subdomain is fine |
 | Local tools | `kubectl`, `helm` |
-| Images | Already published: `ghcr.io/damgahq/damga`, public, amd64 + arm64. If you fork this and publish your own, note that a new organisation's GHCR packages start private and the visibility has to be flipped once by hand, or Kyverno cannot fetch the signature |
+| Images | Already published: `ghcr.io/damgahq/damga`, public, amd64 + arm64. If you fork this and publish your own, note that a new organisation's GHCR packages start private and the visibility has to be flipped once by hand |
 
 ---
 
@@ -93,60 +93,34 @@ confirm a certificate is issued, then switch to `letsencrypt-prod`.
 > server and confirm it resolves *before* creating the issuer, and use
 > `https://acme-staging-v02.api.letsencrypt.org/directory` while testing.
 
-## 4. Namespace and admission policies
+## 4. Namespace and the tenant fence
 
 Create the namespace from the manifest, not with `kubectl create namespace`. The
 labels are the whole point of the file:
 
 ```bash
 kubectl apply -f policies/namespace.yaml
-kubectl apply -f policies/admission-policies.yaml -f policies/admission-bindings.yaml
 kubectl apply -f policies/tenant-quota.yaml
 ```
 
-Four of those labels put the namespace under Pod Security Admission at
-`restricted`; the fifth, `damga.co/policies: enforced`, is what the
-ValidatingAdmissionPolicy bindings select on. A namespace created without them
-is not a namespace with weaker rules — it is a namespace with **no** rules, and
-nothing says so. The release installs, every pod starts, and the enforcement
-layer this project is built around is silently absent.
+The labels put the namespace under Pod Security Admission at `restricted`. The
+quota is the neighbour guard: without it one tenant can take a node's whole
+memory and bring down everybody else's apps on it. A namespace created without
+either is not a namespace with weaker rules — it is one with **no** rules, and
+nothing says so.
 
-Confirm it is on before going further:
+Confirm the labels landed:
 
 ```bash
 kubectl get namespace damga -o jsonpath='{.metadata.labels}' | tr ',' '\n'
-NAMESPACE=damga ./scripts/policy-test.sh     # each rule must reject what it should
 ```
 
-Optionally, image signature verification. It is the one rule the built-in
-admission engine cannot express, because verifying a signature means reaching a
-registry and a transparency log. The same install also brings the reports
-controller, which is what records the results of the policies above — a
-ValidatingAdmissionPolicy keeps none of its own. Three pods, 174 Mi measured:
-
-```bash
-helm repo add kyverno https://kyverno.github.io/kyverno/
-helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace \
-  --version 3.5.2 --wait \
-  --set admissionController.replicas=1 \
-  --set backgroundController.replicas=1 \
-  --set cleanupController.enabled=false \
-  --set admissionController.container.resources.requests.memory=128Mi \
-  --set admissionController.container.resources.limits.memory=384Mi \
-  --set reportsController.enabled=true \
-  --set reportsController.replicas=1 \
-  --set reportsController.resources.requests.cpu=100m \
-  --set reportsController.resources.requests.memory=64Mi \
-  --set reportsController.resources.limits.memory=256Mi
-kubectl apply -f policies/kyverno-image-signatures.yaml
-```
-
-If that last line returns `connection refused`, wait a few seconds and run it
-again: `--wait` returns when the pods are Ready, which is slightly before
-Kyverno's own webhook starts accepting the policy you are applying through it.
-
-After this, only images signed by this repository's pipeline can run, and each
-is rewritten to its digest on admission so a moved tag cannot change what runs.
+> **What is deliberately not here.** Until 2026-08-29 this step also installed
+> three ValidatingAdmissionPolicies and Kyverno for image signature
+> verification. Both were removed: they made it impossible to install a
+> third-party application — a catalogue image is unsigned, may need to write to
+> its filesystem, and needs to reach the internet. Nothing verifies an image
+> now. That is a deliberate trade, recorded rather than quietly dropped.
 
 ## 5. Database credentials
 
@@ -253,11 +227,18 @@ kubectl delete namespace damga
 
 ## Why not Coolify
 
-Coolify runs Docker, not Kubernetes. The application itself would deploy there
-happily — and TLS and the deploy pipeline would be easier. What would not
-survive: multiple replicas behind one Service, autoscaling, network policies,
-disruption budgets and the Prometheus integration. Roughly everything this
-project exists to show.
+Coolify manages **servers**: it talks SSH to a box and runs Docker there. Damga
+manages a **cluster**. For one application on one machine Coolify is easier, and
+saying otherwise would be dishonest.
 
-Docker Swarm mode with `deploy.replicas: 3` would restore multi-replica
-routing, at the cost of everything else on that list.
+The difference shows up on the second machine. In Coolify a second server is a
+second box you deploy to; in Damga a second node is just somewhere the same
+application can go — nothing in the application's definition changes. Everything
+in this guide that a single node cannot demonstrate (replicas spread across
+nodes, autoscaling, disruption budgets, rescheduling on node loss) is waiting
+for that second machine rather than needing to be rebuilt for it.
+
+The other difference is backups. Every platform in this space takes them. This
+one restores each backup into a scratch database and counts the rows, and puts
+the result on the page — so "we have backups" and "the backup works" stop being
+the same sentence.

@@ -45,7 +45,6 @@ import (
 
 	"github.com/damgahq/damga/authz"
 	"github.com/damgahq/damga/evidence"
-	"github.com/damgahq/damga/forge"
 	"github.com/damgahq/damga/identity"
 	"github.com/damgahq/damga/placement"
 )
@@ -193,27 +192,6 @@ type Options struct {
 	// for the same reason Evidence is: a paid build may hold this somewhere
 	// else, and nothing above it needs to know.
 	Placement placement.Store
-
-	// Forge is where each app's source repository and signing identity live.
-	// Replaceable for the same reason the others are, and with one of its own:
-	// which forges can be connected is an open phase-2 question, and a paid
-	// build reaching a forge this one cannot is exactly the seam that answers
-	// it.
-	//
-	// nil is a build with no connection endpoints rather than a build that
-	// crashes on one — an installation that never connects a repository is a
-	// working installation, just one whose images nothing verifies.
-	Forge forge.Store
-
-	// Proposer opens the pull request that carries the signing workflow into a
-	// tenant's own repository.
-	//
-	// Separate from Forge, and separately optional, because they fail
-	// differently: the store is local and the proposer is a call into somebody
-	// else's forge. An install can hold connections and render policies with no
-	// proposer at all — the workflow is on screen and can be added by hand,
-	// which is the fallback for every forge this build cannot reach.
-	Proposer forge.Proposer
 
 	// Backups reads what the cluster knows about an app's database.
 	//

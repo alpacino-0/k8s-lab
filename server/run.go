@@ -34,10 +34,6 @@ import (
 	"github.com/damgahq/damga/evidence/memory"
 	"github.com/damgahq/damga/evidence/postgres"
 	"github.com/damgahq/damga/evidence/sqlite"
-	"github.com/damgahq/damga/forge"
-	forgemem "github.com/damgahq/damga/forge/memory"
-	forgepg "github.com/damgahq/damga/forge/postgres"
-	forgesqlite "github.com/damgahq/damga/forge/sqlite"
 	"github.com/damgahq/damga/identity"
 	identitymem "github.com/damgahq/damga/identity/memory"
 	identitypg "github.com/damgahq/damga/identity/postgres"
@@ -88,21 +84,6 @@ func Run(ctx context.Context, o Options) error {
 		}()
 	}
 	o.Placement = places
-
-	conns := o.Forge
-	if conns == nil {
-		var err error
-		conns, err = openForge(ctx, o.Config)
-		if err != nil {
-			return err
-		}
-		defer func() {
-			if err := conns.Close(); err != nil {
-				log.Error("closing the forge store", "error", err)
-			}
-		}()
-	}
-	o.Forge = conns
 
 	if o.GitAuth == nil {
 		gitCreds, err := readGitAuth(o.Config.GitTokenFile)
@@ -216,8 +197,6 @@ const tenantScope = "/api/v1/tenants/{tenant}"
 type stores struct {
 	evidence  evidence.Store
 	placement placement.Store
-	forge     forge.Store
-	proposer  forge.Proposer
 	backups   BackupReader
 	writer    *gitwrite.Writer
 	gitAuth   GitAuth
@@ -235,15 +214,6 @@ var tenantRoutes = []struct {
 	handler func(guard, stores) http.Handler
 }{
 	{http.MethodGet, "/apps", apps},
-	// Per app and not per environment: an app has one source repository and one
-	// signing identity, and deploys to several environments out of it.
-	{http.MethodPut, "/apps/{app}/connection", connectRoute},
-	{http.MethodGet, "/apps/{app}/connection", connectionRoute},
-	// Opening the pull request is its own call and not part of connecting.
-	// Storing the connection is local and must not fail because a forge is
-	// down, and this one is safe to repeat: it finds the pull request a
-	// previous attempt opened rather than opening a second.
-	{http.MethodPost, "/apps/{app}/connection/proposal", proposeRoute},
 	{http.MethodGet, "/apps/{app}/envs/{env}/evidence", currentEvidence},
 	{http.MethodGet, "/apps/{app}/envs/{env}/history", history},
 	{http.MethodGet, "/apps/{app}/envs/{env}/verify", verify},
@@ -290,10 +260,8 @@ func (o Options) handler(store evidence.Store, idStore identity.Store) (http.Han
 	g := guard{authorizer: o.Authorizer, identity: idStore, sessions: sess}
 	st := stores{
 		evidence: store, placement: o.Placement,
-		forge:    o.Forge,
-		proposer: o.Proposer,
-		backups:  o.Backups,
-		writer:   &gitwrite.Writer{Evidence: store}, gitAuth: o.GitAuth,
+		backups: o.Backups,
+		writer:  &gitwrite.Writer{Evidence: store}, gitAuth: o.GitAuth,
 	}
 	for _, rt := range tenantRoutes {
 		mux.Handle(rt.method+" "+tenantScope+rt.suffix, rt.handler(g, st))
@@ -365,22 +333,6 @@ func openPlacement(ctx context.Context, c Config) (placement.Store, error) {
 		return placementpg.Open(ctx, dsn)
 	default:
 		return placementsqlite.Open(ctx, dsn)
-	}
-}
-
-// openForge picks an engine from the DSN, the same way the other three do, and
-// shares the same database for the same reason: one install, one place its
-// state lives.
-func openForge(ctx context.Context, c Config) (forge.Store, error) {
-	switch dsn := c.EvidenceDSN; {
-	case dsn == "":
-		return forgemem.New(), nil
-	case strings.HasPrefix(dsn, "postgres://"),
-		strings.HasPrefix(dsn, "postgresql://"),
-		strings.HasPrefix(dsn, "pgx://"):
-		return forgepg.Open(ctx, dsn)
-	default:
-		return forgesqlite.Open(ctx, dsn)
 	}
 }
 

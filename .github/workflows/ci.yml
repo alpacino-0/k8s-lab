@@ -73,7 +73,7 @@ jobs:
           done
 
       # The CRD catalog is given explicitly rather than reaching for
-      # -ignore-missing-schemas. That flag would make the Kyverno policy pass by
+      # -ignore-missing-schemas. That flag would make a CRD-backed manifest pass by
       # not being checked at all, and quietly do the same for the next custom
       # resource added here.
       - name: Validate the policy manifests
@@ -283,13 +283,6 @@ jobs:
           docker build -t "damga-app:${IMAGE_TAG}" ./app
           kind load docker-image "damga-app:${IMAGE_TAG}" --name ci
 
-      # No Kyverno here, so policy-test skips its signature block. Signatures are
-      # checked in the supply-chain job instead, against the image this run just
-      # published — testing a previously published tag made the pipeline unable
-      # to land a change to signing, because publish needs this job to pass.
-      - name: Policies must reject what they are meant to
-        run: NAMESPACE=damga IMAGE="damga-app:${IMAGE_TAG}" ./scripts/policy-test.sh
-
       - name: Install the chart
         run: |
           helm upgrade --install app ./chart \
@@ -487,15 +480,6 @@ jobs:
 
       # Reading the rendered pod back rather than the operator's own source. The
       # unit tests already prove the renderer intends this; this proves the API
-      # server accepted it, which is a different claim.
-      # The observer reads ReplicaFailure off a Deployment and quotes its message
-      # as the reason a deploy was refused. Both halves are Kubernetes' doing,
-      # and envtest runs neither the ReplicaSet controller nor an admission
-      # webhook — so the unit tests write the condition by hand and prove the
-      # reading, and this proves there is something to read.
-      - name: A refused deploy says so on the Deployment
-        run: NS=damga IMAGE="damga-app:${IMAGE_TAG}" ./scripts/refusal-probe.sh
-
       - name: The rendered pod must actually carry the hardening
         run: |
           pod=$(kubectl -n damga get pod -l app.kubernetes.io/instance=ci-probe \
@@ -701,9 +685,8 @@ jobs:
       - uses: docker/setup-buildx-action@v4
       # Pinned to cosign 2.x on purpose. cosign 3 writes signatures as a Sigstore
       # bundle (application/vnd.dev.sigstore.bundle.v0.3+json) and offers no way
-      # to opt out; Kyverno cannot read that layer yet and reports the image as
+      # to opt out; a verifier reading only the manifest cannot see that layer
       # having "no signatures found" — a valid signature the enforcer cannot see.
-      # The signer has to stay behind the verifier until Kyverno catches up.
       - uses: sigstore/cosign-installer@v4.1.2
         with:
           cosign-release: v2.6.5
@@ -786,162 +769,3 @@ jobs:
               echo "verified: ${repo}@${digest}"
             done
           done
-
-      # Deliberately never signed, and built after the signing step so it cannot
-      # be caught by it. policy-test.sh needs an image that exists, clears the
-      # registry allowlist and reaches the Kyverno rule, so that a rejection can
-      # only mean "no signatures found". A tag that was never pushed would be
-      # rejected too, with "manifest unknown" — a different failure wearing the
-      # same colour, which would prove nothing about the rule.
-      #
-      # Built rather than retagged from a published image on purpose: Kyverno
-      # verifies by digest, so an identical digest would carry that image's
-      # signature and be admitted.
-      #
-      # buildx is the builder here, and its default driver does not load what it
-      # builds into the local image store — so this pushes directly rather than
-      # building and then pushing something that would not be there. Provenance
-      # and SBOM are off on purpose: they would wrap the image in an index, and
-      # the point is the plainest possible artifact carrying no signature.
-      - name: Publish the unsigned fixture
-        run: |
-          mkdir -p "${RUNNER_TEMP}/fixture"
-          echo 'Deliberately unsigned. Exists so policy-test.sh can prove the signature rule rejects.' \
-            > "${RUNNER_TEMP}/fixture/fixture.txt"
-          printf 'FROM scratch\nCOPY fixture.txt /\nLABEL org.opencontainers.image.description="Deliberately unsigned. Exists so the signature policy test has something that must be rejected."\n' \
-            > "${RUNNER_TEMP}/fixture/Dockerfile"
-          docker buildx build --push --provenance=false --sbom=false \
-            -t "${IMAGE_NAME}:unsigned-fixture" "${RUNNER_TEMP}/fixture"
-
-  # The signature rule, proved against the image this run just signed rather than
-  # one published earlier. Kept out of e2e deliberately: publish needs e2e, so a
-  # signature check inside e2e can only ever test the *previous* run's artifact —
-  # which meant a fix to signing could never reach the registry, because the
-  # broken signature it was fixing kept the pipeline red.
-  supply-chain:
-    name: Enforce signatures in a cluster
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [publish]
-    steps:
-      - uses: actions/checkout@v7
-
-      # A package created by the first publish under a new organisation starts
-      # private, and Kyverno fetches the manifest and the signature itself with
-      # no credentials. Checked here because otherwise that failure arrives
-      # twenty minutes later wearing the costume of a signature failure.
-      - name: The signed image must be anonymously pullable
-        run: |
-          token=$(curl -fsSL "https://ghcr.io/token?scope=repository:${{ github.repository }}:pull&service=ghcr.io" | jq -r .token)
-          curl -fsSL -o /dev/null \
-            -H "Authorization: Bearer $token" \
-            -H 'Accept: application/vnd.oci.image.index.v1+json' \
-            "https://ghcr.io/v2/${{ github.repository }}/manifests/${{ needs.publish.outputs.api_digest }}" \
-          || { echo "::error::the GHCR package is not public, so Kyverno cannot fetch the signature"; exit 1; }
-
-      - uses: azure/setup-helm@v5
-        with:
-          version: v3.16.3
-
-      - name: Create kind cluster
-        # Both the action and the node image are pinned, and the node image is
-        # the reason. `helm/kind-action@v1` is a moving tag whose default node
-        # image moves with it, so the Kubernetes version underneath this job
-        # could change with no commit in this repository — and a control plane
-        # that changes on its own turns a red build into a question nobody can
-        # answer from the diff. It cost hours once already: a genuine operator
-        # bug was suspected of being version drift, and ruling that out meant
-        # digging the node image out of three separate run logs to prove all
-        # three had been identical.
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
-        with:
-          cluster_name: signatures
-          config: kind-config.yaml
-          node_image: kindest/node:v1.35.0
-
-      # kind's config has the kubelets ask the cluster CA for serving
-      # certificates; nothing grants them without this, and a kubelet still
-      # waiting for one is a difference between CI and `make up`.
-      - name: Approve kubelet serving certificates
-        run: ./scripts/approve-kubelet-certs.sh
-
-      - name: Apply cluster policies
-        run: |
-          kubectl apply -f policies/namespace.yaml
-          kubectl apply -f policies/admission-policies.yaml -f policies/admission-bindings.yaml
-          kubectl apply -f policies/tenant-quota.yaml
-
-      - name: Install Kyverno
-        run: |
-          helm repo add kyverno https://kyverno.github.io/kyverno/
-          # Pinned to the chart version terraform installs, so this proves
-          # enforcement for the Kyverno a cluster actually runs. Unpinned, CI
-          # verified whatever released today: measured drift on 2026-08-23 was
-          # chart 3.9.0 / v1.19.0 here against 3.5.2 / v1.15.2 in terraform.
-          #
-          # The version is read from terraform; the flags below are copied by
-          # hand and so drift silently. They already had: the admissionController
-          # memory pins have been in terraform since it was written and never
-          # reached here, which means CI has been proving enforcement under a
-          # ceiling the real cluster does not use. Anything changed in
-          # terraform's set block belongs here in the same commit.
-          helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace \
-            --version "$(grep -A3 'variable "kyverno_version"' terraform/variables.tf \
-                         | sed -n 's/.*default *= *"\(.*\)"/\1/p')" \
-            --set admissionController.replicas=1 --set backgroundController.replicas=1 \
-            --set cleanupController.enabled=false \
-            --set admissionController.container.resources.requests.memory=128Mi \
-            --set admissionController.container.resources.limits.memory=384Mi \
-            --set reportsController.enabled=true --set reportsController.replicas=1 \
-            --set reportsController.resources.requests.cpu=100m \
-            --set reportsController.resources.requests.memory=64Mi \
-            --set reportsController.resources.limits.memory=256Mi \
-            --wait --timeout 10m
-
-          # helm --wait returns when the pods report Ready, which is earlier than
-          # the moment Kyverno's webhook starts accepting connections — and every
-          # ClusterPolicy apply travels through that webhook.
-          for attempt in $(seq 1 30); do
-            if kubectl apply -f policies/kyverno-image-signatures.yaml; then break; fi
-            if [ "$attempt" -eq 30 ]; then
-              echo "kyverno webhook never became reachable"
-              kubectl -n kyverno get pods,svc,endpoints
-              kubectl -n kyverno logs -l app.kubernetes.io/component=admission-controller --tail=50
-              exit 1
-            fi
-            sleep 2
-          done
-
-      - name: A signed image is admitted, an unsigned one is not
-        env:
-          SIGNED_IMAGE: ghcr.io/${{ github.repository }}@${{ needs.publish.outputs.api_digest }}
-          # Published by the job above, after signing, and never signed. It shares
-          # the product's package so it inherits that package's visibility —
-          # Kyverno fetches the manifest itself with no credentials, and an auth
-          # failure would be one more wrong reason to be rejected.
-          UNSIGNED_IMAGE: ghcr.io/${{ github.repository }}:unsigned-fixture
-        run: NAMESPACE=damga IMAGE="$SIGNED_IMAGE" ./scripts/policy-test.sh
-
-      # The step above proves enforcement. This one proves the thing the control
-      # plane reads, which is a different claim and was until now an assumption.
-      #
-      # deploywatch takes kyverno.io/verify-images off the Deployment and treats
-      # a pass as the signature it records — and as the event that ends a
-      # connection's audit-only period. Both halves are upstream behaviour: which
-      # object Kyverno annotates when a Pod rule is autogenerated for a
-      # controller, and whether it annotates at all when the policy is auditing
-      # rather than enforcing. envtest runs no admission controller, so nothing
-      # under go test can answer either.
-      #
-      # If it fails, the output names where the verdict actually landed, and the
-      # Go code is what changes.
-      - name: The verdict the control plane reads is where it reads it
-        env:
-          SIGNED_IMAGE: ghcr.io/${{ github.repository }}@${{ needs.publish.outputs.api_digest }}
-          # The identity this pipeline signs with, spelled out rather than
-          # derived from the image: a keyless subject is a claim about who built
-          # something, and reading it off the artefact under test would prove
-          # nothing. It is the same string policies/kyverno-image-signatures.yaml
-          # pins, and the two drifting apart is a failure worth having.
-          SIGNING_SUBJECT: https://github.com/${{ github.repository }}/.github/workflows/ci.yml@refs/heads/main
-        run: IMAGE="$SIGNED_IMAGE" SUBJECT="$SIGNING_SUBJECT" ./scripts/verdict-probe.sh
