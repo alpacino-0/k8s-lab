@@ -24,7 +24,10 @@ import (
 	"net/http"
 	"time"
 
+	platformv1alpha1 "github.com/damgahq/damga/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -144,4 +147,26 @@ func (o Options) shutdownTimeout() time.Duration {
 		sd = max
 	}
 	return sd
+}
+
+// clusterReader builds an uncached client for the one thing this server reads
+// from the cluster.
+//
+// Its own client rather than the manager's, and the reason is ordering: the
+// handler is built before the manager exists, and the manager's client reads a
+// cache that is empty until it starts. A reader taken from there would report
+// every app as having no database until something happened to warm it.
+func (o Options) clusterReader() (client.Reader, error) {
+	restCfg := o.RestConfig
+	if restCfg == nil {
+		var err error
+		if restCfg, err = ctrl.GetConfig(); err != nil {
+			return nil, fmt.Errorf("reading database status needs a cluster: %w", err)
+		}
+	}
+	scheme := runtime.NewScheme()
+	if err := platformv1alpha1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("scheme: %w", err)
+	}
+	return client.New(restCfg, client.Options{Scheme: scheme})
 }

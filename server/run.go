@@ -129,6 +129,22 @@ func Run(ctx context.Context, o Options) error {
 		}()
 	}
 
+	// Before the handler, because the handler captures it — and not from the
+	// manager's client, which reads a cache that is not populated until the
+	// manager starts. Using that one here would not be merely awkward; it would
+	// be reading an empty cache and reporting every app as having no database.
+	//
+	// Uncached, so every page load is two Gets against the API server. That is
+	// the right trade for a panel: a cache would need starting, watching and
+	// invalidating for two objects somebody looks at by hand.
+	if o.Config.ObserveDeploys && o.Backups == nil {
+		reader, err := o.clusterReader()
+		if err != nil {
+			return err
+		}
+		o.Backups = NewClusterBackups(reader)
+	}
+
 	handler, err := o.handler(store, idStore)
 	if err != nil {
 		return err
@@ -202,6 +218,7 @@ type stores struct {
 	placement placement.Store
 	forge     forge.Store
 	proposer  forge.Proposer
+	backups   BackupReader
 	writer    *gitwrite.Writer
 	gitAuth   GitAuth
 }
@@ -231,6 +248,10 @@ var tenantRoutes = []struct {
 	{http.MethodGet, "/apps/{app}/envs/{env}/history", history},
 	{http.MethodGet, "/apps/{app}/envs/{env}/verify", verify},
 	{http.MethodGet, "/apps/{app}/envs/{env}/retention", retention},
+	// Its own route and not part of the record: a record is one deploy, and
+	// a backup is a number that changes nightly inside an object whose
+	// whole value is that it does not change.
+	{http.MethodGet, "/apps/{app}/envs/{env}/backup", backupRoute},
 	{http.MethodGet, "/apps/{app}/envs/{env}/export", export},
 	// The only one that writes, and it writes to git and to nothing else.
 	{http.MethodPost, "/apps/{app}/envs/{env}/deploys", deployRoute},
@@ -271,6 +292,7 @@ func (o Options) handler(store evidence.Store, idStore identity.Store) (http.Han
 		evidence: store, placement: o.Placement,
 		forge:    o.Forge,
 		proposer: o.Proposer,
+		backups:  o.Backups,
 		writer:   &gitwrite.Writer{Evidence: store}, gitAuth: o.GitAuth,
 	}
 	for _, rt := range tenantRoutes {

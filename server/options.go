@@ -215,6 +215,15 @@ type Options struct {
 	// which is the fallback for every forge this build cannot reach.
 	Proposer forge.Proposer
 
+	// Backups reads what the cluster knows about an app's database.
+	//
+	// The first thing in this server that reads the cluster at all. Everything
+	// else writes to git and reads from a database, and that separation is
+	// deliberate — so the one place breaking it is behind an interface, where an
+	// install with no cluster to read leaves it nil and its page says so rather
+	// than reporting an app's backups as absent.
+	Backups BackupReader
+
 	// GitAuth answers how to authenticate to a repository. nil means the
 	// free build's answer, built from Config.GitTokenFile — and with no token
 	// configured, a deploy is refused with a message that says which flag is

@@ -118,3 +118,48 @@ test('a timestamp renders and an absent one does not pretend', () => {
   assert.strictEqual(when(''), '—');
   assert.strictEqual(when(null), '—');
 });
+
+// The line the restore rehearsal exists to put on a page, and the three answers
+// it has to be able to give.
+const { backupView } = require('./assets/app.js');
+
+test('a restored backup says when and how many out of how many', () => {
+  const v = backupView({
+    database: 'shop-db', state: 'restored',
+    finishedAt: '2026-08-29T02:04:11Z', rows: 1284, sourceRows: 1284, tables: 7,
+  });
+  assert.match(v.lastRun.text, /restored/);
+  assert.strictEqual(v.lastRun.ok, true);
+  // Against the source, not alone. "1,284 came back" and "1,284 came back out
+  // of 1,284" are different claims and only the second was measured.
+  assert.match(v.verified.text, /1284 of 1284/);
+  assert.match(v.verified.text, /7 tables/);
+});
+
+test('an archive nothing restored is not called restored', () => {
+  const v = backupView({
+    database: 'shop-db', state: 'backed up', finishedAt: '2026-08-29T02:00:00Z',
+  });
+  assert.doesNotMatch(v.lastRun.text, /restored/,
+    'a backup nobody restored was reported as restored, which is the claim the ' +
+    'whole rehearsal exists to make honestly');
+  assert.match(v.verified.text, /not restored/);
+  assert.strictEqual(v.lastRun.ok, false);
+});
+
+test('a database whose first backup has not run says exactly that', () => {
+  const v = backupView({ database: 'shop-db', state: 'none yet' });
+  assert.match(v.lastRun.text, /no backup has run yet/);
+  assert.strictEqual(v.lastRun.ok, null, 'a run that has not happened was given a verdict');
+  // And no count, because there is nothing to count. A zero here reads as a
+  // restore that produced nothing.
+  assert.strictEqual(v.verified, null);
+});
+
+test('one table is a table', () => {
+  const v = backupView({
+    database: 'db', state: 'restored', finishedAt: '2026-08-29T02:00:00Z',
+    rows: 3, sourceRows: 3, tables: 1,
+  });
+  assert.match(v.verified.text, /1 table\b/);
+});

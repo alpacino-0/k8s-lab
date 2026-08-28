@@ -40,6 +40,44 @@ const whatToShow = (current, latest) => {
   return { blocked, shown: current || (blocked ? latest : null) };
 };
 
+// What the backup box says, as plain values. No elements: the decision is which
+// sentence is true, and building it out of DOM nodes puts the one thing worth
+// testing behind a browser.
+//
+// Three states and not two. "Restored" is the claim the whole rehearsal exists
+// to support; "backed up" is the weaker one an install that turned the
+// rehearsal off is entitled to, and saying it is more honest than a blank line;
+// "none yet" is a database whose first run has not happened, which is neither a
+// success nor a failure and would otherwise have to be rendered as one.
+//
+// The count is given against the source and never alone. "1,284 rows came back"
+// and "1,284 came back out of 1,284" are different claims, and only the second
+// is what was measured.
+const backupView = (b) => {
+  if (b.state === "none yet") {
+    return {
+      database: b.database || "—",
+      lastRun: { text: "no backup has run yet", ok: null },
+      verified: null,
+    };
+  }
+  const restored = b.state === "restored";
+  return {
+    database: b.database || "—",
+    lastRun: {
+      text: `${restored ? "restored" : "backed up"} ${when(b.finishedAt)}`,
+      ok: restored,
+    },
+    verified: restored
+      ? {
+          text: `${b.rows} of ${b.sourceRows} rows across ` +
+            `${b.tables} ${b.tables === 1 ? "table" : "tables"}`,
+          ok: true,
+        }
+      : { text: "the archive was written and not restored", ok: null },
+  };
+};
+
 const admissionKnown = (r) =>
   Boolean(r.admission.allowed || r.admission.reason || r.state === "rejected");
 
@@ -194,11 +232,15 @@ async function showEvidence() {
 
   // Fetched together rather than in sequence. They are independent reads and
   // the page is not useful until all of them are in.
-  const [current, history, proof, retention] = await Promise.all([
+  const [current, history, proof, retention, backup] = await Promise.all([
     api(`${prefix}/evidence`).catch((err) => (err.status === 404 ? null : Promise.reject(err))),
     api(`${prefix}/history?limit=20`),
     api(`${prefix}/verify`),
     api(`${prefix}/retention`),
+    // Absent for an app with no database, and for an install with no cluster to
+    // read. Both are ordinary and neither is a reason to fail the page, so the
+    // whole block is left out rather than rendered as a failure.
+    api(`${prefix}/backup`).catch(() => null),
   ]);
 
   const { app, env } = state.ref;
@@ -267,6 +309,18 @@ async function showEvidence() {
               p.name, p.source, verdict(p.result === "pass", p.result), p.severity || "—",
             ]))
         : el("p", { class: "muted" }, "No policy results were recorded for this deploy.")));
+  }
+
+  if (backup && backup.backup) {
+    const view = backupView(backup.backup);
+    const cell = (v) =>
+      v.ok === null ? el("span", { class: "muted" }, v.text) : verdict(v.ok, v.text);
+    const rows = [["Database", view.database], ["Last run", cell(view.lastRun)]];
+    if (view.verified) {
+      rows.push(["Verified", cell(view.verified)]);
+    }
+    parts.push(el("div", { class: "box", style: "margin-top:1rem" },
+      el("h3", {}, "Backup"), dl(rows)));
   }
 
   parts.push(el("div", { class: "box", style: "margin-top:1rem" },
@@ -388,5 +442,5 @@ if (typeof document !== "undefined") {
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { whatToShow, admissionKnown, short, when };
+  module.exports = { whatToShow, admissionKnown, backupView, short, when };
 }
