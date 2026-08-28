@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -39,10 +40,7 @@ import (
 )
 
 var _ = Describe("Database Controller", func() {
-	const (
-		dbName    = "shop-db"
-		namespace = "default"
-	)
+	const namespace = "default"
 	ctx := context.Background()
 	key := types.NamespacedName{Name: dbName, Namespace: namespace}
 
@@ -230,10 +228,7 @@ var _ = Describe("Database Controller", func() {
 })
 
 var _ = Describe("Database backups", func() {
-	const (
-		dbName    = "shop-db"
-		namespace = "default"
-	)
+	const namespace = "default"
 	ctx := context.Background()
 	key := types.NamespacedName{Name: dbName, Namespace: namespace}
 	backupKey := types.NamespacedName{Name: dbName + "-backup", Namespace: namespace}
@@ -350,3 +345,95 @@ var _ = Describe("Database backups", func() {
 })
 
 func ptrBool(b bool) *bool { return &b }
+
+var _ = Describe("Restore rehearsal", func() {
+	const namespace = "default"
+	ctx := context.Background()
+
+	// The exact bytes backupScript prints. Copied rather than referenced,
+	// because the point is that the two sides agree and a shared constant would
+	// make them agree by construction while the real script drifted.
+	//
+	// Nothing type-checks across this joint: the shell writes JSON and Go reads
+	// it, so a field renamed on one side reads as a zero on the other and the
+	// page quietly says "0 rows verified" about a restore that worked.
+	const written = `{"startedAt":"2026-08-29T02:00:00Z","finishedAt":"2026-08-29T02:04:11Z",` +
+		`"archive":"/backup/app-20260829-020000.sql.gz","archiveBytes":48213,` +
+		`"tables":7,"rows":1284,"sourceRows":1284,"restored":true}`
+
+	backupPod := func(name, message string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: namespace,
+				Labels: map[string]string{
+					instanceLabel:  dbName,
+					componentLabel: backupComponent,
+				},
+			},
+			Spec: corev1.PodSpec{
+				RestartPolicy: corev1.RestartPolicyNever,
+				Containers:    []corev1.Container{{Name: backupContainer, Image: testPostgresImage}},
+			},
+			Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				Name: backupContainer,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					ExitCode: 0, Message: message,
+				}},
+			}}},
+		}
+	}
+
+	It("reads what the script actually writes", func() {
+		got := rehearsalFromPod(backupPod("p", written))
+		Expect(got).NotTo(BeNil(), "the operator could not parse the job's own output")
+		Expect(got.Rows).To(Equal(int64(1284)))
+		Expect(got.Tables).To(Equal(int32(7)))
+		// Both numbers. "1,284 rows came back" and "1,284 came back out of
+		// 1,284" are different claims and only the second is the one made.
+		Expect(got.SourceRows).To(Equal(int64(1284)))
+		Expect(got.Archive).To(ContainSubstring("app-20260829"))
+		Expect(got.FinishedAt.UTC().Format(time.RFC3339)).To(Equal("2026-08-29T02:04:11Z"))
+	})
+
+	It("ignores a run that took a backup without rehearsing it", func() {
+		const noRehearsal = `{"finishedAt":"2026-08-29T02:00:00Z",` +
+			`"archive":"/backup/app.sql.gz","archiveBytes":10,"restored":false}`
+		Expect(rehearsalFromPod(backupPod("p", noRehearsal))).To(BeNil(),
+			"a tenant who turned the rehearsal off would see \"restored\" on their page")
+	})
+
+	It("ignores a container that died before it wrote anything", func() {
+		Expect(rehearsalFromPod(backupPod("p", "pg_dump: error: connection failed"))).To(BeNil(),
+			"a log line was read as a rehearsal")
+		Expect(rehearsalFromPod(backupPod("p", ""))).To(BeNil())
+	})
+
+	// The history limit keeps three pods and a retry can overlap the next
+	// scheduled run, so the newest pod is not reliably the newest answer.
+	It("reports the latest run and not the latest pod", func() {
+		older := `{"finishedAt":"2026-08-28T02:00:00Z","archive":"/backup/old.sql.gz",` +
+			`"tables":7,"rows":900,"sourceRows":900,"restored":true}`
+		for name, msg := range map[string]string{"newer-pod": older, "older-pod": written} {
+			Expect(k8sClient.Create(ctx, backupPod(name, msg))).To(Succeed())
+			pod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, pod)).To(Succeed())
+			pod.Status = backupPod(name, msg).Status
+			Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		}
+		defer func() {
+			for _, n := range []string{"newer-pod", "older-pod"} {
+				p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: n, Namespace: namespace}}
+				_ = k8sClient.Delete(ctx, p)
+			}
+		}()
+
+		r := &DatabaseReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		got, err := r.latestRehearsal(ctx, &platformv1alpha1.Database{
+			ObjectMeta: metav1.ObjectMeta{Name: "shop-db", Namespace: namespace},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).NotTo(BeNil())
+		Expect(got.Rows).To(Equal(int64(1284)),
+			"an older rehearsal was reported as the latest")
+	})
+})

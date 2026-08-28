@@ -99,6 +99,26 @@ spec:
                 x-kubernetes-validations:
                 - message: maxReplicas must be greater than or equal to minReplicas
                   rule: self.maxReplicas >= self.minReplicas
+              database:
+                description: |-
+                  Database names a Database in this namespace whose credentials this
+                  workload should receive.
+
+                  A name and nothing else. There is no owner reference in either direction,
+                  which is the whole point of the two being separate kinds: an app is
+                  redeployed many times a day and its data outlives every one of those
+                  deploys, so deleting the app must not take the database with it.
+
+                  What arrives is the Secret the Database publishes, injected the way
+                  EnvFrom injects any other — host, port, user, password and database name.
+                  Referenced and never copied, so no credential appears in this object or in
+                  the git commit that produced it.
+
+                  Same namespace, deliberately. A Secret readable from another namespace is
+                  a tenant boundary with a hole in it, and the namespace-per-tenant
+                  arrangement is what makes this reference safe without a second check.
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
               domain:
                 description: |-
                   Domain publishes the workload at a hostname over HTTPS. Without it the

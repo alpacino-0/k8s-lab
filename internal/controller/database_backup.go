@@ -29,7 +29,15 @@ import (
 )
 
 // backupSuffix keeps the backup objects out of the way of the server's own.
-const backupSuffix = "-backup"
+const (
+	backupSuffix = "-backup"
+
+	// The label value that finds the pods a backup left behind, and the
+	// container inside them. Both are read back by latestRehearsal, so the
+	// renderer and the reader have to spell them the same way.
+	backupComponent = "database-backup"
+	backupContainer = "dump"
+)
 
 func backupName(db *platformv1alpha1.Database) string { return db.Name + backupSuffix }
 
@@ -186,7 +194,7 @@ func desiredBackupCronJob(db *platformv1alpha1.Database) *batchv1.CronJob {
 						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
 							nameLabel:      postgresPortName,
 							instanceLabel:  db.Name,
-							componentLabel: "database-backup",
+							componentLabel: backupComponent,
 						}},
 						Spec: corev1.PodSpec{
 							RestartPolicy:                corev1.RestartPolicyOnFailure,
@@ -199,7 +207,7 @@ func desiredBackupCronJob(db *platformv1alpha1.Database) *batchv1.CronJob {
 								SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 							},
 							Containers: []corev1.Container{{
-								Name:  "dump",
+								Name:  backupContainer,
 								Image: db.Spec.Image,
 								SecurityContext: &corev1.SecurityContext{
 									AllowPrivilegeEscalation: ptr.To(false),

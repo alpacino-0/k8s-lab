@@ -37,6 +37,10 @@ const (
 	// running data directory.
 	testPostgresImage = "postgres:17.2-alpine3.21"
 
+	// The Database every case here names, shared so the specs that render it
+	// and the specs that read it back cannot drift apart.
+	dbName = "shop-db"
+
 	// Two annotations named side by side, because telling them apart is the
 	// whole subject of the tests below: the first is this operator's to write
 	// and retract, the second belongs to the deployment controller and is only
@@ -540,5 +544,51 @@ func TestReconcileAnnotationsOwnsOnlyItsOwnPrefix(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A name and a Secret is the whole coupling between an app and its database.
+//
+// Deliberately no owner reference in either direction: an app is redeployed many
+// times a day and its data outlives every one of those deploys, so deleting the
+// app must not take the database with it. What crosses between them is the
+// Secret the Database publishes, injected the way any other is.
+func TestNamingADatabaseInjectsItsCredentials(t *testing.T) {
+	withDB := app(func(a *platformv1alpha1.Workload) {
+		a.Spec.Database = dbName
+		a.Spec.EnvFrom = []string{"extra-secrets"}
+	})
+	c := desiredDeployment(withDB).Spec.Template.Spec.Containers[0]
+
+	names := make([]string, 0, len(c.EnvFrom))
+	for _, e := range c.EnvFrom {
+		names = append(names, e.SecretRef.Name)
+	}
+	if len(names) != 2 || names[0] != dbName {
+		t.Fatalf("envFrom = %v, want the database first", names)
+	}
+	// Ordering matters and is not alphabetical. Later entries win in
+	// Kubernetes, so a variable the tenant sets explicitly overrides the
+	// platform's — somebody naming a database and then overriding DB_HOST is
+	// pointing the app elsewhere on purpose.
+	if names[1] != "extra-secrets" {
+		t.Errorf("envFrom = %v; the tenant's own secrets must come last or the "+
+			"platform silently overrules them", names)
+	}
+
+	// And no reference in the other direction. Nothing rendered here names the
+	// database as an owner or a dependency the garbage collector can follow.
+	for _, v := range desiredDeployment(withDB).Spec.Template.Spec.Volumes {
+		if v.PersistentVolumeClaim != nil {
+			t.Errorf("the workload mounts %s; a database attached by volume is one "+
+				"that cannot be redeployed independently", v.Name)
+		}
+	}
+}
+
+func TestNoDatabaseMeansNoInjectedSecret(t *testing.T) {
+	c := desiredDeployment(app()).Spec.Template.Spec.Containers[0]
+	if len(c.EnvFrom) != 0 {
+		t.Errorf("envFrom = %v for a workload that named no database", c.EnvFrom)
 	}
 }

@@ -46,6 +46,9 @@ type DatabaseReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets;persistentvolumeclaims,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
+// The pods a backup leaves behind carry the rehearsal's answer in their
+// terminated state, and read-only is all that takes.
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 
 func (r *DatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var db platformv1alpha1.Database
@@ -261,6 +264,14 @@ func (r *DatabaseReconciler) updateDatabaseStatus(
 	db.Status.SecretName = db.Name
 	db.Status.Host = databaseHost(db)
 
+	// Kept rather than cleared when the read fails or finds nothing. The last
+	// rehearsal happened whether or not this pass could see the pod that did
+	// it, and a page that blanks the line every time the history rolls over is
+	// a page that answers "when was the backup last restored" with silence.
+	if latest, err := r.latestRehearsal(ctx, db); err == nil && latest != nil {
+		db.Status.LastRestore = latest
+	}
+
 	ready := metav1.Condition{
 		Type: "Ready", ObservedGeneration: db.Generation, LastTransitionTime: metav1.Now(),
 	}
@@ -298,6 +309,9 @@ func (r *DatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.Secret{}).
 		Owns(&batchv1.CronJob{}).
+		// Not Owns: the backup pods belong to a Job, which belongs to the
+		// CronJob. Watching them would be three hops of ownership for an
+		// answer the next reconcile reads anyway.
 		Named("database").
 		Complete(r)
 }

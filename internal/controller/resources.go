@@ -322,7 +322,18 @@ func desiredDeployment(app *platformv1alpha1.Workload) *appsv1.Deployment {
 		env = append(env, corev1.EnvVar{Name: e.Name, Value: e.Value})
 	}
 
-	envFrom := make([]corev1.EnvFromSource, 0, len(app.Spec.EnvFrom))
+	// The database's Secret first, so a variable the tenant sets explicitly in
+	// EnvFrom below wins. Someone naming a database and then overriding
+	// DB_HOST is pointing the app somewhere else on purpose, and a platform
+	// that silently put its own value last would be overruling them.
+	envFrom := make([]corev1.EnvFromSource, 0, len(app.Spec.EnvFrom)+1)
+	if app.Spec.Database != "" {
+		envFrom = append(envFrom, corev1.EnvFromSource{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: app.Spec.Database},
+			},
+		})
+	}
 	for _, name := range app.Spec.EnvFrom {
 		envFrom = append(envFrom, corev1.EnvFromSource{
 			SecretRef: &corev1.SecretEnvSource{
