@@ -4,6 +4,7 @@
 resources:
 - bases/platform.damga.co_workloads.yaml
 - bases/platform.damga.co_databases.yaml
+- bases/platform.damga.co_builds.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
