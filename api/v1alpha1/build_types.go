@@ -57,8 +57,17 @@ type BuildSpec struct {
 	// Image is where the result is pushed, without a tag: the platform appends
 	// the revision, so an image reference always names the commit that produced
 	// it.
+	//
+	// The tag is looked for in the last path segment and not in the whole
+	// string, because a registry carries a port: this rule first read
+	// `!self.contains(':')` and refused `registry.damga-registry.svc:5000/ci/app`
+	// — the platform's own registry, on the first build that ever ran. The
+	// opposite half of the same trap is already written down in WorkloadSpec's
+	// Image, which had to look in the last segment for the tag rather than at
+	// the whole string. Same colon, both directions, and the note that existed
+	// did not stop the second one.
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:XValidation:rule="!self.contains(':')",message="image must not carry a tag; the revision is appended"
+	// +kubebuilder:validation:XValidation:rule="!self.split('/')[int(self.split('/').size()) - 1].contains(':')",message="image must not carry a tag; the revision is appended"
 	Image string `json:"image"`
 
 	// Builder chooses how the source becomes an image. Empty means detect:

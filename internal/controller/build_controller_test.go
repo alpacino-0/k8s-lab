@@ -255,6 +255,19 @@ var _ = Describe("Build Controller", func() {
 			Expect(err).To(HaveOccurred())
 		})
 
+		// The registry this platform installs carries a port, and the first
+		// rule written here read the colon in it as a tag — refusing every
+		// build on the first run against a real cluster.
+		It("accepts a registry that carries a port", func() {
+			Expect(k8sClient.Create(ctx, &platformv1alpha1.Build{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-port", Namespace: namespace},
+				Spec: platformv1alpha1.BuildSpec{
+					Repo: spec.Repo, Revision: rev,
+					Image: "registry.damga-registry.svc:5000/ci/app",
+				},
+			})).To(Succeed())
+		})
+
 		It("refuses an image reference that already carries a tag", func() {
 			err := k8sClient.Create(ctx, &platformv1alpha1.Build{
 				ObjectMeta: metav1.ObjectMeta{Name: name + "-b", Namespace: namespace},
