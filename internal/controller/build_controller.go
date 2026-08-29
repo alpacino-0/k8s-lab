@@ -132,10 +132,14 @@ func (r *BuildReconciler) observe(
 		build.Status.Method = res.Method
 		build.Status.Message = res.Message
 		if build.Status.Message == "" {
-			// The container died before it could write anything — killed for
-			// memory, or the image would not pull. Said plainly rather than
-			// left blank, so the page does not imply the compiler was silent.
-			build.Status.Message = "the build did not finish and left no message; check the job's pod"
+			// No message from the container, which usually means there was no
+			// container: a pod template admission refused, an image that would
+			// not pull, a deadline. The Job knows why and the pod does not
+			// exist to be asked, so the Job's own condition is quoted rather
+			// than replaced with a sentence about checking a pod that is not
+			// there — which is what this said first, and it sent the search to
+			// the wrong place.
+			build.Status.Message = jobFailureMessage(job)
 		}
 		setBuildCondition(build, metav1.ConditionFalse, "Failed", build.Status.Message)
 	}
@@ -168,6 +172,25 @@ func (r *BuildReconciler) resultFromPods(
 		}
 	}
 	return buildResult{}, false
+}
+
+// jobFailureMessage is what the Job says about itself when no pod could say
+// anything.
+func jobFailureMessage(job *batchv1.Job) string {
+	for _, c := range job.Status.Conditions {
+		if c.Type != batchv1.JobFailed || c.Status != corev1.ConditionTrue {
+			continue
+		}
+		switch {
+		case c.Message != "" && c.Reason != "":
+			return c.Reason + ": " + c.Message
+		case c.Message != "":
+			return c.Message
+		case c.Reason != "":
+			return c.Reason
+		}
+	}
+	return "the build produced no output and its job gave no reason"
 }
 
 func jobFinished(job *batchv1.Job) (done, failed bool) {

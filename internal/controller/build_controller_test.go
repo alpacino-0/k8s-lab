@@ -83,6 +83,25 @@ var _ = Describe("Build Controller", func() {
 	// The job's pods are what carry the result, and envtest runs no kubelet, so
 	// the pod and its terminated container state are written by hand — which is
 	// the only way to test the reading at all.
+	// finishWithReason drives the Job to a terminal condition carrying a reason
+	// of its own, which is what happens when no pod ever ran.
+	finishWithReason := func(jobCondition batchv1.JobConditionType, reason, jobMessage string) {
+		GinkgoHelper()
+		job := &batchv1.Job{}
+		Expect(k8sClient.Get(ctx, key, job)).To(Succeed())
+		now := metav1.Now()
+		job.Status.StartTime = &now
+		job.Status.Conditions = []batchv1.JobCondition{
+			{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, LastTransitionTime: now},
+			{
+				Type: jobCondition, Status: corev1.ConditionTrue, LastTransitionTime: now,
+				Reason: reason, Message: jobMessage,
+			},
+		}
+		job.Status.Failed = 1
+		Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+	}
+
 	finish := func(jobCondition batchv1.JobConditionType, message string) {
 		GinkgoHelper()
 		job := &batchv1.Job{}
@@ -211,16 +230,21 @@ var _ = Describe("Build Controller", func() {
 		Expect(b.Status.Message).To(Equal("npm ERR! missing script: build"))
 	})
 
-	It("says so when the container died before it could write anything", func() {
+	// The case that cost a CI round: admission refused the pod template, so
+	// there was never a container to write anything. The first version of this
+	// said "check the job's pod" — and there was no pod, which sent the search
+	// to the wrong place. The Job knows why, so the Job is quoted.
+	It("quotes the job when there was never a pod to speak", func() {
 		create(spec)
 		reconcileNow()
-		finish(batchv1.JobFailed, "")
+		finishWithReason(batchv1.JobFailed, "DeadlineExceeded", "Job was active longer than specified deadline")
 		reconcileNow()
 
 		b := &platformv1alpha1.Build{}
 		Expect(k8sClient.Get(ctx, key, b)).To(Succeed())
 		Expect(b.Status.Phase).To(Equal(platformv1alpha1.BuildFailed))
-		Expect(b.Status.Message).To(ContainSubstring("left no message"))
+		Expect(b.Status.Message).To(ContainSubstring("DeadlineExceeded"))
+		Expect(b.Status.Message).To(ContainSubstring("longer than specified deadline"))
 	})
 
 	// A recorded digest must survive a controller restart. Reconciling a

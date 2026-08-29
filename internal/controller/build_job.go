@@ -149,6 +149,19 @@ func desiredBuildJob(b *platformv1alpha1.Build) *batchv1.Job {
 			// compile error three times turns a ten-second answer into a
 			// thirty-second one while producing the same message.
 			BackoffLimit: ptr.To(int32(0)),
+
+			// And a wall clock, which BackoffLimit does not provide.
+			//
+			// Measured the hard way: a pod template that admission refuses is
+			// not a pod failure, so it does not count against BackoffLimit at
+			// all. The job controller retried the create twenty times in
+			// fifteen minutes, the Job never reached a terminal condition, and
+			// the Build sat in Running for ever — a build that cannot start
+			// looked exactly like a build that is slow.
+			//
+			// activeDeadlineSeconds is measured from the Job's start rather
+			// than from a pod's, so it bounds that case too.
+			ActiveDeadlineSeconds: ptr.To(int64(30 * 60)),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
@@ -179,13 +192,29 @@ func desiredBuildJob(b *platformv1alpha1.Build) *batchv1.Job {
 							AllowPrivilegeEscalation: ptr.To(false),
 							ReadOnlyRootFilesystem:   ptr.To(true),
 							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{capabilityAll}},
-							// Rootless buildkit still needs unprivileged user
-							// namespaces, which the default seccomp and
-							// AppArmor profiles restrict. Named here so that a
-							// cluster which refuses it fails at admission with
-							// a reason rather than at build time with a
-							// permission error nobody can place.
-							SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
+							// RuntimeDefault, and this field is the interesting
+							// one. It first read Unconfined, because rootless
+							// BuildKit needs unprivileged user namespaces and
+							// the usual advice is to unconfine seccomp for it.
+							// Pod Security Admission at `restricted` refuses
+							// exactly that, so every build pod was rejected at
+							// creation.
+							//
+							// The comment beside it had predicted this — "so a
+							// cluster which refuses it fails at admission with a
+							// reason" — and predicting a failure is not the same
+							// as deciding what to do about it. The choice was
+							// between weakening the namespace and finding out
+							// whether the exception is needed at all:
+							// containerd's default profile permits unshare, and
+							// --oci-worker-no-process-sandbox exists so rootless
+							// BuildKit can run without a second sandbox.
+							//
+							// If a kernel or an AppArmor profile refuses this,
+							// the answer is a separate namespace for builds at
+							// the `baseline` level — not an exemption inside a
+							// tenant's.
+							SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 						},
 						TerminationMessagePath:   BuildResultPath,
 						TerminationMessagePolicy: corev1.TerminationMessageReadFile,
