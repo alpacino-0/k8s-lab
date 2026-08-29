@@ -14,6 +14,23 @@ kubeadmConfigPatches:
   - |
     kind: KubeletConfiguration
     serverTLSBootstrap: true
+# The one node-level thing the in-cluster registry needs, and the reason it
+# cannot be avoided: containerd runs on the host and cannot resolve cluster DNS,
+# so the name a build pod pushes to is a name the kubelet cannot look up. This
+# points containerd at a directory of per-registry configuration; bootstrap.sh
+# writes the file that redirects the registry's cluster name to the NodePort,
+# which every node answers on. One image reference then works from both
+# networks.
+#
+# Naming the registry `localhost:30500` everywhere fails in the other direction:
+# inside a pod, localhost is the pod.
+#
+# docs/DEPLOY.md carries the k3s equivalent, which is a single file rather than
+# a cluster flag.
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
 nodes:
   - role: control-plane
     extraPortMappings:

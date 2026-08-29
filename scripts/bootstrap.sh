@@ -3,6 +3,10 @@
 # Idempotent: safe to re-run.
 set -euo pipefail
 
+# The registry's name as every image reference spells it. One string, because
+# the build pod and the kubelet have to agree on it — see cluster/registry.yaml.
+REGISTRY_HOST="registry.damga-registry.svc:5000"
+
 CLUSTER="${CLUSTER:-damga}"
 NAMESPACE="${NAMESPACE:-damga}"
 RELEASE="${RELEASE:-app}"
@@ -47,26 +51,34 @@ log "applying certificate issuers"
 kubectl apply -f "$ROOT/cluster/issuers.yaml"
 kubectl wait --for=condition=Ready clusterissuer/selfsigned-ca --timeout=180s
 
-# The signature rule belongs to the same category and had been left out of it.
-# Terraform installs the Kyverno engine and cannot install this, so a cluster
-# built by the documented path ran its Kyverno pods enforcing nothing at all —
-# the one capability the engine is here for, switched off by omission.
+# The registry builds push to and the kubelet pulls from.
 #
-# Guarded rather than unconditional: install_kyverno can be turned off, and a
-# missing CRD should skip the rule, not fail the bootstrap.
-if kubectl get crd clusterpolicies.kyverno.io >/dev/null 2>&1; then
-  log "applying the image signature policy"
-  # helm --wait returns when the pods report Ready, which is earlier than the
-  # moment Kyverno's webhook accepts connections — and this policy travels
-  # through that webhook.
-  for attempt in $(seq 1 30); do
-    kubectl apply -f "$ROOT/policies/kyverno-image-signatures.yaml" && break
-    [ "$attempt" -eq 30 ] && { echo "kyverno webhook never became reachable" >&2; exit 1; }
-    sleep 2
-  done
-else
-  log "kyverno not installed — skipping the image signature policy"
-fi
+# Applied here rather than by Terraform for the same reason the issuers are:
+# it is a plain manifest and Terraform's kubernetes_manifest wants a schema at
+# plan time. The wait is on the deployment rather than the release, because a
+# registry that is not serving yet turns the first build into a push timeout.
+log "installing the image registry"
+kubectl apply -f "$ROOT/cluster/registry.yaml"
+kubectl -n damga-registry rollout status deployment/registry --timeout=300s
+
+# The half of the registry that lives on the nodes, and the half that is easy to
+# forget: containerd cannot resolve cluster DNS, so without this file the
+# kubelet answers every pull with "no such host" while the build that produced
+# the image succeeded. kind-config.yaml points containerd at this directory; the
+# file itself has to be written per node, because kind has no way to place it.
+#
+# Written on every reconcile of this script rather than once at creation, so a
+# node added later gets it by re-running bootstrap.
+log "teaching containerd where the registry is"
+for node in $(kind get nodes --name "$CLUSTER"); do
+  docker exec "$node" mkdir -p "/etc/containerd/certs.d/${REGISTRY_HOST}"
+  docker exec -i "$node" tee "/etc/containerd/certs.d/${REGISTRY_HOST}/hosts.toml" >/dev/null <<TOML
+server = "http://${REGISTRY_HOST}"
+
+[host."http://localhost:30500"]
+  capabilities = ["pull", "resolve"]
+TOML
+done
 
 log "deploying release '$RELEASE' to namespace '$NAMESPACE'"
 # Deliberately no --wait: it also waits for the backup PVC, which stays Pending

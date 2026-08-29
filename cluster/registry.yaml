@@ -1,0 +1,137 @@
+# The image store builds push to and the kubelet pulls from.
+#
+# Coolify needs none of this: the daemon that builds an image is the daemon that
+# runs it, so the image never leaves the machine. That shortcut is also why
+# Coolify cannot spread a deploy across two machines. Paying for a registry is
+# what buys "start on one node, add a second, change nothing".
+#
+# ## Why one name has to work from two networks
+#
+# The build pod pushes from inside the cluster and the kubelet pulls from the
+# node, outside it — and the image reference recorded in the Workload has to be
+# the same string in both places, or the digest names something the kubelet
+# cannot fetch.
+#
+# Those two networks do not share a resolver. containerd runs on the host and
+# cannot see cluster DNS, so `registry.damga-registry.svc:5000` resolves for the
+# build and not for the kubelet. The fix is on the node rather than here: a
+# containerd hosts.toml that redirects that exact name to the NodePort below.
+# kind-config.yaml sets it for CI; docs/DEPLOY.md has the k3s line.
+#
+# The alternative — naming the registry `localhost:30500` everywhere — fails in
+# the other direction: inside a pod, localhost is the pod.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: damga-registry
+  labels:
+    # The same restricted baseline every tenant namespace carries. The registry
+    # is platform infrastructure and gets no exemption; the deployment below is
+    # written to satisfy it rather than to be excused from it.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    app.kubernetes.io/managed-by: damga
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-data
+  namespace: damga-registry
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      # Every image ever built lands here and nothing removes them yet. Sized
+      # for a demonstration rather than for a year of deploys; garbage
+      # collection is an open item and this number is the reason it cannot stay
+      # open indefinitely.
+      storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: damga-registry
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: registry
+  ports:
+    - name: registry
+      port: 5000
+      targetPort: 5000
+      # Fixed rather than allocated. containerd's redirect names this port in a
+      # file written when the node is created, so a port that moved on
+      # reinstall would break every pull with "connection refused" and nothing
+      # would connect that to the reinstall.
+      nodePort: 30500
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: damga-registry
+  labels:
+    app.kubernetes.io/name: registry
+    app.kubernetes.io/managed-by: damga
+spec:
+  replicas: 1
+  # The claim is ReadWriteOnce, so two replicas cannot both mount it and a
+  # rolling update would deadlock on the volume — the same trap Workload's own
+  # volumes hit, and the same answer.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: registry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: registry
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: registry
+          image: registry:3.0.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
+              value: /var/lib/registry
+            # Deletes have to be on for garbage collection to have anything to
+            # collect. Off by default, and turning it on later means the images
+            # written before the change can never be removed.
+            - name: REGISTRY_STORAGE_DELETE_ENABLED
+              value: "true"
+          ports:
+            - containerPort: 5000
+          readinessProbe:
+            httpGet: { path: /v2/, port: 5000 }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /v2/, port: 5000 }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/registry
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: registry-data
+        - name: tmp
+          emptyDir: {}

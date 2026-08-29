@@ -12,6 +12,11 @@ permissions:
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}
   IMAGE_TAG: 1.0.0
+  # One string, because the build pod and the kubelet have to agree on it: the
+  # image reference recorded in a Workload is what the kubelet pulls, and it is
+  # the same reference the build pushed. cluster/registry.yaml explains why that
+  # takes a node-side redirect.
+  REGISTRY_HOST: registry.damga-registry.svc:5000
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -76,7 +81,7 @@ jobs:
       # -ignore-missing-schemas. That flag would make a CRD-backed manifest pass by
       # not being checked at all, and quietly do the same for the next custom
       # resource added here.
-      - name: Validate the policy manifests
+      - name: Validate the hand-written manifests
         run: |
           curl -sSLo kubeconform.tar.gz \
             https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
@@ -84,7 +89,7 @@ jobs:
           ./kubeconform -strict -summary \
             -schema-location default \
             -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
-            policies/ gitops/
+            policies/ gitops/ cluster/registry.yaml
 
       - name: Validate rendered manifests against the Kubernetes schema
         run: |
@@ -268,6 +273,24 @@ jobs:
       # The zero-downtime check below measures through the ingress controller,
       # the same path a real user takes. `kubectl port-forward` is bound to one
       # pod, so a rollout kills the tunnel and the measurement, not the service.
+      # The registry, and the node-side file without which the kubelet answers
+      # every pull with "no such host" while the build that produced the image
+      # succeeded. kind-config.yaml points containerd at the directory; the file
+      # has to be written per node because kind cannot place it.
+      - name: Install the image registry
+        run: |
+          kubectl apply -f cluster/registry.yaml
+          kubectl -n damga-registry rollout status deployment/registry --timeout=300s
+          for node in $(kind get nodes --name ci); do
+            docker exec "$node" mkdir -p "/etc/containerd/certs.d/${REGISTRY_HOST}"
+            docker exec -i "$node" tee "/etc/containerd/certs.d/${REGISTRY_HOST}/hosts.toml" >/dev/null <<TOML
+          server = "http://${REGISTRY_HOST}"
+
+          [host."http://localhost:30500"]
+            capabilities = ["pull", "resolve"]
+          TOML
+          done
+
       - name: Install ingress-nginx
         run: |
           kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.13.0/deploy/static/provider/baremetal/deploy.yaml
@@ -540,6 +563,68 @@ jobs:
           [ "$(kubectl -n damga get pvc ci-stateful-data -o jsonpath='{.status.phase}')" = Bound ] \
             || { echo "deleting the workload deleted its data"; exit 1; }
           kubectl -n damga delete pvc ci-stateful-data
+
+      # The whole build path, against a real repository: clone from GitHub,
+      # build the Dockerfile with rootless BuildKit, push to the in-cluster
+      # registry, and report the digest back through the termination log.
+      #
+      # This repository at this commit, and app/ inside it, because a fixture
+      # repository would be a Dockerfile written to make the build pass. The
+      # thing being tested is whether an ordinary repository builds.
+      - name: A Build must produce an image the cluster can pull
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: platform.damga.co/v1alpha1
+          kind: Build
+          metadata:
+            name: ci-build
+            namespace: damga
+          spec:
+            repo: https://github.com/${{ github.repository }}.git
+            revision: ${{ github.sha }}
+            path: app
+            image: ${REGISTRY_HOST}/ci/app
+            builder: dockerfile
+          EOF
+
+          # Waited on the phase rather than a condition, because a build that
+          # fails is a normal outcome of this test and has to be reported with
+          # its own message rather than as a timeout.
+          for i in $(seq 1 90); do
+            phase=$(kubectl -n damga get build ci-build -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            [ "$phase" = Succeeded ] && break
+            if [ "$phase" = Failed ]; then
+              echo "the build failed:"
+              kubectl -n damga get build ci-build -o jsonpath='{.status.message}'; echo
+              kubectl -n damga logs job/ci-build --tail=60 || true
+              exit 1
+            fi
+            sleep 10
+          done
+          [ "$phase" = Succeeded ] || {
+            echo "the build never finished; phase=$phase"
+            kubectl -n damga describe job ci-build | tail -30
+            kubectl -n damga logs job/ci-build --tail=60 || true
+            exit 1
+          }
+
+          digest=$(kubectl -n damga get build ci-build -o jsonpath='{.status.digest}')
+          case "$digest" in sha256:*) ;; *) echo "no digest recorded"; exit 1 ;; esac
+          echo "built ${digest}"
+
+          # The half that the digest alone does not prove: the kubelet, on the
+          # node's network, can resolve and pull the name the build pushed. That
+          # is the redirect this registry exists to make work, and it fails
+          # separately from the build.
+          kubectl -n damga run pull-probe --restart=Never \
+            --image="${REGISTRY_HOST}/ci/app@${digest}" \
+            --command -- sleep 30
+          kubectl -n damga wait --for=condition=Ready pod/pull-probe --timeout=180s || {
+            kubectl -n damga describe pod pull-probe | tail -25
+            exit 1
+          }
+          kubectl -n damga delete pod pull-probe --wait=false
+          kubectl -n damga delete build ci-build
 
       - name: Deleting the Workload must leave nothing behind
         run: |
