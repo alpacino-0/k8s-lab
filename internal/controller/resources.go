@@ -74,6 +74,11 @@ const (
 	// the database's data directory. Shared so the two never drift.
 	dataVolume = "data"
 
+	// readyCondition is the one condition every kind here reports. Named once
+	// so a page that reads .status.conditions[?(@.type=="Ready")] works against
+	// all of them.
+	readyCondition = "Ready"
+
 	// preStop buys the endpoint removal a head start. Without it, a pod is
 	// removed from the Service and its process is killed at the same moment,
 	// and whichever loses that race drops requests that were already in flight.

@@ -273,7 +273,7 @@ func (r *DatabaseReconciler) updateDatabaseStatus(
 	}
 
 	ready := metav1.Condition{
-		Type: "Ready", ObservedGeneration: db.Generation, LastTransitionTime: metav1.Now(),
+		Type: readyCondition, ObservedGeneration: db.Generation, LastTransitionTime: metav1.Now(),
 	}
 	switch {
 	case reconcileErr != nil:

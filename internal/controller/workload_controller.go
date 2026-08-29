@@ -386,7 +386,7 @@ func (r *WorkloadReconciler) updateStatus(
 	}
 
 	ready := metav1.Condition{
-		Type:               "Ready",
+		Type:               readyCondition,
 		ObservedGeneration: app.Generation,
 		LastTransitionTime: metav1.Now(),
 	}
