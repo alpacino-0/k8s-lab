@@ -20,6 +20,18 @@
 #
 # The alternative — naming the registry `localhost:30500` everywhere — fails in
 # the other direction: inside a pod, localhost is the pod.
+#
+# ## Why something has to delete images
+#
+# A registry only ever grows. A push adds blobs, a tag that is moved leaves the
+# old ones behind, and nothing in the registry removes either — deletion is a
+# request somebody has to make. So a store with no reaper does not run out of
+# space because it was sized wrong; it runs out on a date nobody wrote down, and
+# the first symptom is that a deploy stops working.
+#
+# The CronJob at the bottom of this file is that reaper, and it lives here
+# rather than in a runbook because an operator who has to remember it is an
+# operator who will remember it once.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -41,10 +53,10 @@ spec:
   accessModes: [ReadWriteOnce]
   resources:
     requests:
-      # Every image ever built lands here and nothing removes them yet. Sized
-      # for a demonstration rather than for a year of deploys; garbage
-      # collection is an open item and this number is the reason it cannot stay
-      # open indefinitely.
+      # What bounds this is the CronJob below, not the number: it keeps the
+      # newest RETAIN tags of each repository and collects everything else.
+      # The bound is per repository, so the total still rises with the number
+      # of applications — a demonstration size, not a capacity plan.
       storage: 10Gi
 ---
 apiVersion: v1
@@ -135,3 +147,160 @@ spec:
             claimName: registry-data
         - name: tmp
           emptyDir: {}
+---
+# The only thing that removes an image.
+#
+# Two steps, because the registry splits them and only exposes one. Deleting a
+# manifest through the API unlinks it and frees nothing; the blobs go when
+# `garbage-collect` sweeps whatever no manifest still references. And the API
+# cannot delete a *tag* at all — only a manifest by digest — so the tag would
+# survive its own image. Both halves are done here on the volume instead, which
+# this job has mounted anyway.
+#
+# **Ordered by the tag link's mtime, because the tag is a commit SHA.** A SHA
+# sorts into nonsense and carries no date, and the only record of when an image
+# arrived is the file the store wrote when it accepted the push. Two pushes
+# inside the same second tie, and the tie is broken arbitrarily — a build every
+# second is not a case this is written for, but it is the case where the wrong
+# tag goes.
+#
+# **RETAIN is a count, and it is not "what is deployed".** This job cannot see
+# the cluster and is not given a token to. It keeps the newest N tags of each
+# repository, so rolling back further than N builds finds nothing to pull. That
+# fails as an ImagePullBackOff on the rolled-back Deployment — loud, and the
+# image can be rebuilt from the commit it was named after.
+#
+# **The registry keeps serving while this runs.** Stopping it first is what
+# upstream advises, and it would need this job to hold permission to scale the
+# deployment — which also buys a new failure: a job killed between the scale
+# down and the scale up leaves the registry off, at 3am, until somebody notices.
+# The race that is accepted instead: a blob pushed after the mark phase and
+# before the sweep is collected. Both of its outcomes are loud — the manifest
+# PUT is refused because a layer it names has gone, or the pull of that image
+# fails when it asks for the layer. Neither one produces an image that runs and
+# is wrong.
+#
+# That second failure is uglier than it sounds and was measured rather than
+# assumed: a registry that is still running answers 200 for a blob this job
+# deleted underneath it, because the descriptor is in its in-memory cache, and
+# the transfer then stops short. scripts/registry-gc-test.sh asks by downloading
+# the blob for exactly that reason.
+#
+# Abandoned uploads are not this job's business; the registry expires those on
+# its own.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: registry-gc
+  namespace: damga-registry
+  labels:
+    app.kubernetes.io/name: registry-gc
+    app.kubernetes.io/managed-by: damga
+spec:
+  # Off-peak, and on a minute nothing else in this repository uses, so a run
+  # that costs something is attributable to this job and not to whatever else
+  # fires at the top of the hour.
+  schedule: "17 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # A second attempt after a real failure is worth having; a third is a
+      # sweep that keeps racing whatever made the first one fail.
+      backoffLimit: 1
+      # Forbid means a wedged job blocks every run after it, for ever, in
+      # silence. This is the ceiling that turns that into a failed job.
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: registry-gc
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          # The claim is ReadWriteOnce: one node, not one pod. Landing on the
+          # registry's node is what makes the mount legal — anywhere else the
+          # pod waits on a volume that cannot follow it, and says so only in an
+          # event nobody is reading. When the registry is down there is nothing
+          # to schedule beside and this job stays Pending, which is the right
+          # answer: a store that is not serving is not a store to sweep.
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: registry
+                  topologyKey: kubernetes.io/hostname
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: gc
+              # The registry's own image, because `garbage-collect` is the
+              # registry binary. A second image would be a second thing to pin,
+              # scan and keep in step with the store's format.
+              image: registry:3.0.0
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              env:
+                - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
+                  value: /var/lib/registry
+                # Ten builds of an application, kept. Deep enough that an
+                # ordinary rollback finds its image, shallow enough that the
+                # claim above bounds a repository rather than a week.
+                - name: RETAIN
+                  value: "10"
+                # The image ships a debug logger, and at that level the sweep's
+                # own report is buried in a line per link it touches. The job's
+                # log is the record of what it freed; it has to be readable.
+                - name: REGISTRY_LOG_LEVEL
+                  value: warn
+              command: [/bin/sh, -eu, -c]
+              args:
+                - |
+                  ROOT="$REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY"
+                  REPOS="$ROOT/docker/registry/v2/repositories"
+                  before=$(du -sk "$ROOT" | cut -f1)
+
+                  # mtime, repository, tag — one line per tag, newest first
+                  # within a repository, and everything past RETAIN removed.
+                  if [ -d "$REPOS" ]; then
+                    find "$REPOS" -type f -path '*/_manifests/tags/*/current/link' -exec stat -c '%Y %n' {} + |
+                      sed 's|/_manifests/tags/| |; s|/current/link$||' |
+                      sort -k2,2 -k1,1nr |
+                      awk -v keep="$RETAIN" '{ if ($2 != r) { r = $2; n = 0 } if (++n > keep) print $2 "/_manifests/tags/" $3 }' |
+                      while read -r tag; do
+                        echo "pruning ${tag#"$REPOS/"}"
+                        rm -rf "$tag"
+                      done
+                  fi
+
+                  # Without --delete-untagged the manifests just unlinked stay,
+                  # and so does every blob they name: the prune above would
+                  # free nothing at all.
+                  registry garbage-collect --delete-untagged /etc/distribution/config.yml
+
+                  after=$(du -sk "$ROOT" | cut -f1)
+                  echo "registry store: ${before} KiB -> ${after} KiB"
+              resources:
+                requests: { cpu: 50m, memory: 128Mi }
+                limits: { memory: 512Mi }
+              volumeMounts:
+                - name: data
+                  mountPath: /var/lib/registry
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: registry-data
+            - name: tmp
+              emptyDir: {}
