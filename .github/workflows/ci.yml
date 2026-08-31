@@ -302,7 +302,24 @@ jobs:
             damga="damga-control-plane:${IMAGE_TAG}"
           kubectl -n damga-system patch deployment damga --type=json \
             -p '[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"Never"}]'
-          kubectl -n damga-system rollout status deployment/damga --timeout=300s
+          # Diagnostics on the failure rather than after it. A rollout that
+          # times out says "0 of 1 updated replicas are available" and nothing
+          # else — true of a pod that will not schedule, will not pull, will not
+          # start and will not pass a probe, which are four different problems
+          # with four different fixes. This session has already lost four CI
+          # rounds to messages that named the symptom and not the cause.
+          kubectl -n damga-system rollout status deployment/damga --timeout=300s || {
+            echo "::group::why the control plane did not start"
+            kubectl -n damga-system get pod,pvc -o wide
+            kubectl -n damga-system describe pod -l app.kubernetes.io/name=damga | tail -40
+            echo "--- logs (the container may never have run) ---"
+            kubectl -n damga-system logs -l app.kubernetes.io/name=damga --tail=60 --all-containers || true
+            kubectl -n damga-system logs -l app.kubernetes.io/name=damga --previous --tail=60 || true
+            echo "--- events, newest last ---"
+            kubectl -n damga-system get events --sort-by=.lastTimestamp | tail -25
+            echo "::endgroup::"
+            exit 1
+          }
 
       - name: The control plane serves, and its identity is scoped
         run: |
