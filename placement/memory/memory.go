@@ -39,15 +39,21 @@ type Store struct {
 	// repository URL to the tenant that holds it. Under one mutex here, which
 	// gives the atomicity the primary key gives there.
 	owners map[string]string
-	now    func() time.Time
+	// nsOwners is the second claim, keyed by namespace. A separate map rather
+	// than a wider value on the first: the two are released independently,
+	// because an app that moves to another repository keeps its namespace and
+	// an app that moves to another namespace keeps its repository.
+	nsOwners map[string]string
+	now      func() time.Time
 }
 
 // New returns an empty store.
 func New() *Store {
 	return &Store{
-		byKey:  map[string]placement.Placement{},
-		owners: map[string]string{},
-		now:    time.Now,
+		byKey:    map[string]placement.Placement{},
+		owners:   map[string]string{},
+		nsOwners: map[string]string{},
+		now:      time.Now,
 	}
 }
 
@@ -67,6 +73,13 @@ func (s *Store) Put(_ context.Context, p placement.Placement) (placement.Placeme
 		return placement.Placement{}, fmt.Errorf(
 			"%w: repository %q belongs to another tenant", placement.ErrConflict, p.RepoURL)
 	}
+	// Both claims are checked before either is written, so a placement refused
+	// on its namespace does not leave the repository claimed by a tenant whose
+	// row was never stored.
+	if owner, claimed := s.nsOwners[p.Namespace]; claimed && owner != p.TenantID {
+		return placement.Placement{}, fmt.Errorf(
+			"%w: namespace %q belongs to another tenant", placement.ErrConflict, p.Namespace)
+	}
 
 	now := s.now().UTC().Truncate(time.Microsecond)
 	p.UpdatedAt = now
@@ -79,6 +92,7 @@ func (s *Store) Put(_ context.Context, p placement.Placement) (placement.Placeme
 	}
 
 	s.owners[p.RepoURL] = p.TenantID
+	s.nsOwners[p.Namespace] = p.TenantID
 	s.byKey[key(p.TenantID, p.App, p.Env)] = p
 	s.releaseUnused()
 	return p, nil
@@ -140,17 +154,24 @@ func (s *Store) RepoOwner(_ context.Context, repoURL string) (string, error) {
 // Close is a no-op: there is nothing to release.
 func (s *Store) Close() error { return nil }
 
-// releaseUnused drops the claim on any repository nothing points at any more.
-// Called with the mutex held, from the same critical section as the write that
-// may have orphaned it.
+// releaseUnused drops the claim on any repository or namespace nothing points
+// at any more. Called with the mutex held, from the same critical section as
+// the write that may have orphaned it.
 func (s *Store) releaseUnused() {
-	inUse := make(map[string]bool, len(s.byKey))
+	repos := make(map[string]bool, len(s.byKey))
+	namespaces := make(map[string]bool, len(s.byKey))
 	for _, p := range s.byKey {
-		inUse[p.RepoURL] = true
+		repos[p.RepoURL] = true
+		namespaces[p.Namespace] = true
 	}
 	for repo := range s.owners {
-		if !inUse[repo] {
+		if !repos[repo] {
 			delete(s.owners, repo)
+		}
+	}
+	for ns := range s.nsOwners {
+		if !namespaces[ns] {
+			delete(s.nsOwners, ns)
 		}
 	}
 }

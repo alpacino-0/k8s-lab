@@ -58,6 +58,14 @@ func (a *Authorizer) Authorize(
 		return authz.Decision{Allow: true, Reason: role + " may read"}, nil
 	case authz.ActionAppDeploy, authz.ActionAppRollback, authz.ActionEnvCreate, authz.ActionEvidenceExport:
 		return authz.Decision{Allow: role != roleViewer, Reason: role + " deploy right"}, nil
+	case authz.ActionAppDelete:
+		// Grouped with deploying rather than with administration, and it was
+		// tenant:admin for one release because this action did not exist yet.
+		// What a delete removes is a row: the manifests stay committed, what is
+		// running keeps running, and the deploy history stays readable. There is
+		// no reason somebody who may create an app and ship to it may not also
+		// unregister one. A viewer still may not.
+		return authz.Decision{Allow: role != roleViewer, Reason: role + " may unregister an app"}, nil
 	case authz.ActionAppConnect:
 		// Owner only, and named here rather than left to the default, because
 		// the reason is not obvious from the verb. Deploying ships an image;

@@ -22,7 +22,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/damgahq/damga/auth"
 	"github.com/damgahq/damga/authz"
@@ -320,21 +322,67 @@ func export(g guard, st stores) http.Handler {
 	})
 }
 
-// apps lists what this tenant has evidence for, which is how the panel knows
-// where to look without being told.
+// The three things this list can find, spelled out because the difference is
+// the point rather than an inconsistency to smooth over.
+const (
+	// Placed and deployed to: the ordinary case.
+	appDeployed = "deployed"
+	// Placed and never deployed to. This is what an app looks like between
+	// POST /apps and the first deploy, and it is why this endpoint reads the
+	// placement store at all.
+	appNeverDeployed = "never deployed"
+	// Deployed to, and no longer placed. DELETE /apps/{app} removes the record
+	// and not the app, so its history outlives its registration — and something
+	// is running that the control plane can no longer deploy to.
+	appRecordRemoved = "record removed"
+)
+
+// wireApp is one app environment as this list reports it.
+type wireApp struct {
+	App string `json:"app"`
+	Env string `json:"env"`
+
+	// State is the sentence the page renders, decided here rather than in the
+	// panel — the same arrangement wireBackup uses, and for the same reason:
+	// which of the two stores knows about an app is a fact about the platform,
+	// not a rendering choice.
+	State string `json:"state"`
+
+	// The placement, when there is one. Omitted rather than empty for an app
+	// only the deploy log remembers, so "there is no placement" and "the
+	// placement has an empty path" are not the same JSON.
+	RepoURL   string `json:"repoUrl,omitempty"`
+	Branch    string `json:"branch,omitempty"`
+	Path      string `json:"path,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// apps lists this tenant's app environments, from both places that know about
+// one, and says which of them knew.
 //
-// It answers with what has been deployed, not with what has been configured.
-// Those differ — an app declared and never rolled out is absent here — and
-// this is the evidence API, so the honest answer is the one drawn from the
-// evidence rather than from an intention recorded somewhere else.
+// It used to answer from the evidence store alone, and the comment here argued
+// that this was the honest answer because this is the evidence API. That
+// argument stopped holding the moment POST /apps existed: an app that has been
+// created and not yet deployed is exactly the app whose owner is looking for
+// it, and answering "nothing here" made a working endpoint invisible — the
+// user creates something, the page stays empty, and nothing anywhere says why.
+//
+// The two sources can disagree, and both disagreements are reported rather than
+// reconciled. Placed with no history is an app waiting for its first deploy;
+// history with no placement is one whose record was deleted while its objects
+// and its log carry on. Neither is an error and neither is the other, so the
+// list says which it is and lets the reader act on it.
 func apps(g guard, st stores) http.Handler {
-	type entry struct {
-		App string `json:"app"`
-		Env string `json:"env"`
-	}
+	type key struct{ app, env string }
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, ref, ok := g.admit(w, r, authz.ActionAppView)
 		if !ok {
+			return
+		}
+
+		placed, err := st.placement.List(r.Context(), ref.TenantID)
+		if err != nil {
+			problem(w, http.StatusInternalServerError, "reading the placements failed")
 			return
 		}
 		refs, err := st.evidence.Refs(r.Context(), ref.TenantID)
@@ -342,10 +390,37 @@ func apps(g guard, st stores) http.Handler {
 			problem(w, http.StatusInternalServerError, "reading the evidence store failed")
 			return
 		}
-		out := make([]entry, 0, len(refs))
-		for _, got := range refs {
-			out = append(out, entry{App: got.App, Env: got.Env})
+
+		merged := make(map[key]wireApp, len(placed)+len(refs))
+		for _, p := range placed {
+			merged[key{p.App, p.Env}] = wireApp{
+				App: p.App, Env: p.Env, State: appNeverDeployed,
+				RepoURL: p.RepoURL, Branch: p.Branch, Path: p.Path, Namespace: p.Namespace,
+			}
 		}
+		for _, got := range refs {
+			k := key{got.App, got.Env}
+			if entry, placed := merged[k]; placed {
+				entry.State = appDeployed
+				merged[k] = entry
+				continue
+			}
+			merged[k] = wireApp{App: got.App, Env: got.Env, State: appRecordRemoved}
+		}
+
+		out := make([]wireApp, 0, len(merged))
+		for _, entry := range merged {
+			out = append(out, entry)
+		}
+		// Map iteration is deliberately unordered in Go, and both sources
+		// arrive sorted, so the merge has to sort or the panel's list would
+		// reshuffle on every load.
+		slices.SortFunc(out, func(a, b wireApp) int {
+			if c := strings.Compare(a.App, b.App); c != 0 {
+				return c
+			}
+			return strings.Compare(a.Env, b.Env)
+		})
 		writeJSON(w, map[string]any{"apps": out})
 	})
 }

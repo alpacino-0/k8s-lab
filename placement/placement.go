@@ -29,6 +29,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // tenants. That is not something the write path can check — by the time it has
 // a worktree it has already decided where to write — so it is enforced here,
 // as a constraint rather than as a rule everyone remembers.
+//
+// The third is the same shape one layer further out: one namespace never holds
+// two tenants. A repository is where a tenant's desired state is written; a
+// namespace is where it runs, and it is what the quota, the Pod Security level
+// and the NetworkPolicy are attached to. Both claims exist because the caller
+// that would breach them is an ordinary member of an ordinary tenant asking a
+// perfectly well-formed question.
 package placement
 
 import (
@@ -98,6 +105,17 @@ type Store interface {
 	// It fails with ErrConflict if RepoURL is already owned by a different
 	// tenant. A repository is claimed by the first tenant to place anything in
 	// it and stays theirs until every placement pointing at it is deleted.
+	//
+	// Namespace is claimed the same way and for a sharper reason. A namespace
+	// is the boundary the rendered manifest actually lands in: quota, Pod
+	// Security Admission and NetworkPolicy are all attached to it, so a tenant
+	// that could name a namespace another tenant is using would be deploying
+	// inside somebody else's fence. Nothing above this store can refuse that —
+	// by the time a manifest is rendered the namespace is already in it — so it
+	// is refused here, as a constraint rather than as a rule everyone
+	// remembers. One tenant may hold as many namespaces as it likes, and may
+	// put as many apps in one as it likes; what it may not do is take one that
+	// is in use elsewhere.
 	Put(ctx context.Context, p Placement) (Placement, error)
 
 	// Get returns one placement.
@@ -109,7 +127,7 @@ type Store interface {
 	List(ctx context.Context, tenantID string) ([]Placement, error)
 
 	// Delete removes one placement. Removing the last one that points at a
-	// repository releases that repository's claim.
+	// repository — or at a namespace — releases that claim.
 	Delete(ctx context.Context, tenantID, app, env string) error
 
 	// RepoOwner reports which tenant holds a repository, if any. The write
