@@ -1,0 +1,46 @@
+# A stand-in for cert-manager's Certificate CRD, installed by the TLS specs and
+# by nothing else.
+#
+# envtest is an API server and an etcd and nothing more, so cert-manager is not
+# here and could not be made to matter if it were: no controller would issue
+# anything. What these specs need from the cluster is the kind existing — that
+# the operator creates the right object, points the Ingress at the secret it
+# names, retracts it when the domain goes, and reads back a status somebody else
+# wrote.
+#
+# Deliberately schema-less below spec and status. Vendoring cert-manager's own
+# CRD would be several thousand lines that change on their release schedule and
+# would still issue nothing; the one thing it would buy is rejecting a misspelt
+# field. So that is precisely what these specs cannot claim, and the cluster job
+# is where it has to be proved.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: certificates.cert-manager.io
+spec:
+  group: cert-manager.io
+  names:
+    kind: Certificate
+    listKind: CertificateList
+    plural: certificates
+    singular: certificate
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        # cert-manager's own has one, and these specs write through it: a status
+        # reached by an ordinary update would be a status this operator could
+        # have written itself.
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true

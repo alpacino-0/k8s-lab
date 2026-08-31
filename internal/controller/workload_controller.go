@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -28,7 +29,9 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -44,6 +47,47 @@ import (
 type WorkloadReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// ClusterIssuer names the cert-manager ClusterIssuer that signs the
+	// certificate for a Workload's domain. Empty means defaultClusterIssuer.
+	//
+	// A property of the installation and not of the workload, which is why it
+	// is here rather than on the spec: a kind cluster issues from the local CA
+	// in cluster/issuers.yaml, a public install from Let's Encrypt, and the
+	// workload's author has no way to know which and no business choosing. The
+	// chart has treated the issuer as a value since the Certificate was written
+	// there, and this is the same value one layer down.
+	//
+	// Nothing sets it yet, so the behaviour is exactly what it was before this
+	// field existed. Wiring it is a flag in cmd/operator/main.go and an argument
+	// in config/manager, neither of which this change owns.
+	ClusterIssuer string
+}
+
+// certificatePollInterval is how long to wait before looking again at a
+// certificate that has not been issued.
+//
+// A poll and not a watch, deliberately. Owns(&Certificate{}) would open an
+// informer for a kind that does not exist on a cluster without cert-manager,
+// and a watch that cannot be established stops the manager from starting — so
+// watching would turn "this workload has no certificate yet" into "the operator
+// does not run". Nothing else in this reconcile hears about the certificate, so
+// without this the status would go on saying Pending long after cert-manager
+// had finished.
+//
+// Thirty seconds is chosen rather than measured: short enough that a
+// certificate from a local CA, which is immediate, shows up while somebody is
+// still watching the terminal, and long enough that a published workload costs
+// two reads a minute rather than sixty.
+const certificatePollInterval = 30 * time.Second
+
+// clusterIssuer is the issuer to ask, which is ClusterIssuer unless nothing
+// configured one.
+func (r *WorkloadReconciler) clusterIssuer() string {
+	if r.ClusterIssuer == "" {
+		return defaultClusterIssuer
+	}
+	return r.ClusterIssuer
 }
 
 // +kubebuilder:rbac:groups=platform.damga.co,resources=workloads,verbs=get;list;watch;create;update;patch;delete
@@ -54,6 +98,7 @@ type WorkloadReconciler struct {
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies;ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -76,7 +121,17 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{}, r.updateStatus(ctx, &app, nil)
+	if err := r.updateStatus(ctx, &app, nil); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Nothing watches the Certificate, so nothing would wake this controller
+	// when cert-manager issues one. See certificatePollInterval for why the
+	// watch is not there to be had.
+	if app.Spec.Domain != "" && !apimeta.IsStatusConditionTrue(app.Status.Conditions, tlsCondition) {
+		return ctrl.Result{RequeueAfter: certificatePollInterval}, nil
+	}
+	return ctrl.Result{}, nil
 }
 
 // normalise fills in what the CRD's defaults would have supplied. An Workload
@@ -242,19 +297,52 @@ func (r *WorkloadReconciler) reconcileOwned(ctx context.Context, app *platformv1
 			d := desired.(*networkingv1.Ingress)
 			e.Spec = d.Spec
 			e.Labels = reconcileLabels(e.Labels, d.Labels)
-			// Merged, not assigned. The three keys rendered here are the
+			// Merged, not assigned. The two keys rendered here are the
 			// only ones this operator has an opinion about; a proxy-body-size,
-			// a rate limit, an auth-url or a cert-manager override that an
-			// administrator added is not expressible in the Workload spec, so
-			// assigning the map deleted it on the next pass with nothing said.
-			// reconcileAnnotations fits unchanged: with no damga.co/ key in the
-			// desired map its delete pass is inert and it degrades to a merge.
+			// a rate limit or an auth-url that an administrator added is not
+			// expressible in the Workload spec, so assigning the map deleted it
+			// on the next pass with nothing said. reconcileAnnotations fits
+			// unchanged: with no damga.co/ key in the desired map its delete
+			// pass is inert and it degrades to a merge.
 			e.Annotations = reconcileAnnotations(e.Annotations, d.Annotations)
+			// And one key retracted by name, because a merge cannot retract
+			// outside its own prefix and this is a key the operator itself used
+			// to write. Left in place it would still be asking cert-manager's
+			// ingress-shim for a second Certificate over the secret the
+			// Certificate rendered below already owns, and the two would take
+			// turns writing it. Only this one key: the shim also answers to
+			// cert-manager.io/issuer and kubernetes.io/tls-acme, and those are
+			// somebody's deliberate act rather than this operator's leftovers.
+			delete(e.Annotations, shimAnnotation)
 		}); err != nil {
 			return fmt.Errorf("ingress: %w", err)
 		}
 	} else if err := r.deleteIfPresent(ctx, app, &networkingv1.Ingress{}); err != nil {
 		return fmt.Errorf("removing ingress: %w", err)
+	}
+
+	// After the Ingress, and tolerant of cert-manager not being installed.
+	//
+	// The Ingress is what serves the domain; the certificate is what makes a
+	// browser accept it. A cluster with no cert-manager still runs the
+	// workload — the ingress controller answers with its own certificate — so
+	// a missing kind is reported on the TLS condition rather than failed here.
+	// Failing would put every published workload at Ready=False/RenderFailed,
+	// which is where a workload that cannot start also sits, and the two would
+	// stop being distinguishable.
+	if cert := desiredCertificate(app, r.clusterIssuer()); cert != nil {
+		err := r.apply(ctx, app, cert, func(existing, desired client.Object) {
+			e := existing.(*unstructured.Unstructured)
+			d := desired.(*unstructured.Unstructured)
+			mergeSpec(e, d)
+			e.SetLabels(reconcileLabels(e.GetLabels(), d.GetLabels()))
+		})
+		if err != nil && !apimeta.IsNoMatchError(err) {
+			return fmt.Errorf("certificate: %w", err)
+		}
+	} else if err := r.deleteIfPresent(ctx, app, certificateFor(app)); err != nil &&
+		!apimeta.IsNoMatchError(err) {
+		return fmt.Errorf("removing certificate: %w", err)
 	}
 
 	return nil
@@ -385,6 +473,19 @@ func (r *WorkloadReconciler) updateStatus(
 		app.Status.URL = ""
 	}
 
+	if app.Spec.Domain == "" {
+		// Removed rather than left saying something about a domain that is
+		// gone. A stale TLS=True beside an empty URL is a claim about nothing.
+		apimeta.RemoveStatusCondition(&app.Status.Conditions, tlsCondition)
+	} else {
+		cert := certificateFor(app)
+		certErr := r.Get(ctx, client.ObjectKeyFromObject(cert), cert)
+		tls := certificateCondition(app.Spec.Domain, cert, certErr)
+		tls.ObservedGeneration = app.Generation
+		tls.LastTransitionTime = metav1.Now()
+		setCondition(&app.Status.Conditions, tls)
+	}
+
 	ready := metav1.Condition{
 		Type:               readyCondition,
 		ObservedGeneration: app.Generation,
@@ -421,6 +522,61 @@ func (r *WorkloadReconciler) updateStatus(
 	setCondition(meta, ready)
 
 	return r.Status().Update(ctx, app)
+}
+
+// certificateCondition turns whatever was found where the certificate should be
+// into the TLS condition.
+//
+// A condition of its own rather than a term in Ready, because the two answer
+// different questions and folding them together gets one of them wrong either
+// way. A workload whose certificate is still pending is serving: its pods are
+// up and the Ingress routes to them, over the ingress controller's own
+// certificate — reporting Ready=False for that says the same thing as a
+// workload that cannot start. And the opposite, Ready=True with nothing said
+// about TLS, is a green light next to a URL the browser refuses.
+//
+// Every reason here names something a different person can act on, which is the
+// only thing a status is for: install cert-manager, wait, read what cert-manager
+// said, or fix the operator's own access.
+func certificateCondition(
+	domain string,
+	cert *unstructured.Unstructured,
+	err error,
+) metav1.Condition {
+	c := metav1.Condition{Type: tlsCondition, Status: metav1.ConditionFalse}
+	switch {
+	case apimeta.IsNoMatchError(err):
+		c.Reason = reasonCertManagerAbsent
+		c.Message = "cert-manager is not installed, so nothing can issue a certificate for " +
+			domain + "; the ingress controller answers with its own until it is"
+	case apierrors.IsNotFound(err):
+		c.Reason = reasonAwaitingCert
+		c.Message = "the certificate has not been observed yet"
+	case err != nil:
+		// Forbidden belongs here rather than on the render path: the workload
+		// is running and this is the operator's own installation being wrong.
+		c.Reason = reasonUnreadable
+		c.Message = err.Error()
+	default:
+		status, message := certificateReady(cert)
+		if status == metav1.ConditionTrue {
+			c.Status = metav1.ConditionTrue
+			c.Reason = reasonIssued
+			c.Message = "a certificate for " + domain + " has been issued"
+			break
+		}
+		c.Reason = reasonPending
+		// cert-manager's own message, verbatim, because that is where the
+		// diagnosis is: a challenge that cannot be solved, an issuer that does
+		// not exist, a rate limit, a name that does not resolve. Any sentence
+		// written here instead would say that something is wrong without ever
+		// saying what.
+		c.Message = message
+		if c.Message == "" {
+			c.Message = "cert-manager has not issued the certificate yet"
+		}
+	}
+	return c
 }
 
 // setCondition keeps LastTransitionTime honest: it only moves when the status

@@ -223,13 +223,28 @@ type Volume struct {
 // for. A field here that merely echoes the spec would make an Workload look
 // healthy before anything had happened.
 type WorkloadStatus struct {
-	// Conditions follows the standard Kubernetes convention: Ready says whether
-	// the workload is serving, Progressing says whether it is still rolling.
+	// Conditions follows the standard Kubernetes convention. Two are reported:
+	//
+	//   Ready  whether the workload is serving.
+	//   TLS    whether a certificate has been issued for spec.domain. Present
+	//          only while there is a domain, and removed with it.
+	//
+	// The two are deliberately independent rather than one condition. A
+	// workload whose certificate is still pending is serving — its pods are up
+	// and the ingress routes to them, over the ingress controller's own
+	// certificate — so folding TLS into Ready would report it the same way as a
+	// workload that cannot start at all.
+	//
+	// There is no Progressing condition. This said there was one for as long as
+	// the field has existed and nothing ever wrote it.
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// URL is where the workload answers, once an ingress exists for it.
+	// URL is where the workload answers, once an ingress exists for it. It is
+	// https:// from the moment a domain is set, which is what the address will
+	// be — whether a browser accepts it yet is the TLS condition's answer, not
+	// this field's.
 	URL string `json:"url,omitempty"`
 
 	Replicas int32 `json:"replicas,omitempty"`
