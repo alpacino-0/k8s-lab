@@ -291,6 +291,25 @@ jobs:
           TOML
           done
 
+      # Built immediately before it is deployed, and the adjacency is the
+      # point: the first version of this sat further down beside the reference
+      # tenant's build, so the Deployment referred to an image that was not on
+      # any node yet and the pod sat in ErrImageNeverPull until the rollout
+      # timed out. imagePullPolicy: Never turns a missing local image into a
+      # permanent failure rather than a slow one, which is what makes the
+      # ordering load-bearing rather than merely tidy.
+      #
+      # The control plane had no Dockerfile until 2026-09-01 and was
+      # therefore never built by anything. The first attempt failed at once:
+      # .dockerignore re-includes only *.go, so the SQL the stores embed and the
+      # panel assets were not in the build context. That is the good version of
+      # the failure — go:embed reads at compile time and the build stops — but
+      # nothing had ever run it.
+      - name: Build and load the control plane
+        run: |
+          docker build -t "damga-control-plane:${IMAGE_TAG}" .
+          kind load docker-image "damga-control-plane:${IMAGE_TAG}" --name ci
+
       # The platform's own control plane, in the cluster it manages. Proves
       # three things a unit test cannot: the image starts under `restricted`,
       # the panel is served from inside the binary, and the ServiceAccount can
@@ -357,16 +376,6 @@ jobs:
           docker build -t "damga-app:${IMAGE_TAG}" ./app
           kind load docker-image "damga-app:${IMAGE_TAG}" --name ci
 
-      # The control plane, which had no Dockerfile until 2026-09-01 and was
-      # therefore never built by anything. The first attempt failed at once:
-      # .dockerignore re-includes only *.go, so the SQL the stores embed and the
-      # panel assets were not in the build context. That is the good version of
-      # the failure — go:embed reads at compile time and the build stops — but
-      # nothing had ever run it.
-      - name: Build and load the control plane
-        run: |
-          docker build -t "damga-control-plane:${IMAGE_TAG}" .
-          kind load docker-image "damga-control-plane:${IMAGE_TAG}" --name ci
 
       - name: Install the chart
         run: |
