@@ -42,17 +42,66 @@ type Result struct {
 	// credentials are allowed to live.
 	Generated []Generated
 
+	// DatabaseSources are the generated variables declared by a service that
+	// became a Database.
+	//
+	// Named separately because they must not be minted. A Database publishes
+	// its own credentials in its own Secret, and a second value produced under
+	// the same name is a password the application holds and the server has
+	// never heard of — which fails at the first connection and looks like a
+	// configuration mistake in the application.
+	//
+	// Anything else naming one of these is asking for a value it cannot be
+	// given. There are 109 templates with a postgres service and this is how a
+	// caller tells that case apart from a credential it may freely invent.
+	DatabaseSources []Source
+
 	// Notes is what did not convert. Never empty for a non-trivial template,
 	// and the reason this type exists: a conversion that reports nothing is
 	// indistinguishable from one that understood everything.
 	Notes []Note
 }
 
-// Generated is one value the platform has to produce for the workload to start.
+// Generated is one environment variable the platform has to fill in.
+//
+// It is a request and not a value: this package mints nothing. What it carries
+// is enough for whatever does to produce the same variable twice and get the
+// same answer, which is the part that is easy to get wrong — see Sources.
 type Generated struct {
 	Service string
-	Key     string // the environment variable name
-	Kind    string // "password" | "user" | "hex" | "base64" | "unknown"
+
+	// Key is the environment variable the container reads.
+	Key string
+
+	// Sources are the variables whose values have to be minted, in the order
+	// they appear in Value and without repeats.
+	//
+	// The name is what identifies a value, not the key. Two keys naming one
+	// source must receive one value: n8n declares N8N_RUNNERS_AUTH_TOKEN twice,
+	// once in each of its two services, both as ${SERVICE_PASSWORD_N8N}, and a
+	// caller that mints per key gives the task runner a token the broker does
+	// not accept. 111 of the 369 templates that parse share a source between
+	// services this way.
+	Sources []Source
+
+	// Value is what Key becomes once every source has a value: the template's
+	// text with each source left in place as ${NAME} and everything else
+	// already resolved.
+	//
+	// Usually just "${NAME}". It is a whole string for the 51 templates that
+	// build one around a credential — a connection string is a user and a
+	// password inside a URL — and those are the reason this is a template
+	// rather than a bare source name. Resolving them to their defaults, which
+	// is what happens to every other interpolation here, writes the empty
+	// string where the password goes and produces a workload that starts,
+	// serves, and cannot authenticate.
+	Value string
+}
+
+// Source is one value to mint, and what kind of value it is.
+type Source struct {
+	Name string // SERVICE_PASSWORD_N8N — the identity of the value
+	Kind string // "password" | "user" | "hex" | "base64" | "unknown"
 }
 
 // Note is one thing compose said that this platform cannot say back.
@@ -95,6 +144,15 @@ var databaseImages = []string{"postgres", "postgis/postgis", "pgvector/pgvector"
 // tell what it is allowed to replace.
 const managedByCompose = "damga.co/from-compose"
 
+// ServiceAnnotation records which compose service an object came from.
+//
+// An annotation and not a label because a compose service name is free text and
+// a label value is not. It exists because the object's name is derived — the
+// template's name, the service's, and a DNS cleanup — and the derivation cannot
+// be run backwards. Anything holding a Generated, whose Service is the compose
+// name, needs this to find the object it belongs to.
+const ServiceAnnotation = "damga.co/compose-service"
+
 var (
 	// SERVICE_PASSWORD_FOO, SERVICE_USER_FOO — Coolify's convention for "the
 	// platform generates this". Recognised rather than passed through: sending
@@ -108,8 +166,9 @@ var (
 	interpolation = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-([^}]*))?\}`)
 	// A healthcheck that is an HTTP GET, which is the only kind a probe path
 	// can be recovered from.
-	healthURL = regexp.MustCompile(`https?://[^/\s"']+(/[^\s"']*)`)
-	notDNS    = regexp.MustCompile(`[^a-z0-9-]+`)
+	healthURL  = regexp.MustCompile(`https?://[^/\s"']+(/[^\s"']*)`)
+	notDNS     = regexp.MustCompile(`[^a-z0-9-]+`)
+	notPGIdent = regexp.MustCompile(`[^a-z0-9_]+`)
 )
 
 // Convert turns one template into the objects that run it.
@@ -134,18 +193,24 @@ func Convert(t Template, o Options) (Result, error) {
 
 	primary := primaryService(t, names)
 
+	front := -1
 	for _, name := range names {
 		svc := t.Services[name]
-		if db, ok := asDatabase(t, name, svc, o); ok {
+		if db, notes, ok := asDatabase(t, name, svc, o); ok {
 			res.Databases = append(res.Databases, db)
+			res.DatabaseSources = append(res.DatabaseSources, declaredSources(svc)...)
 			res.Notes = append(res.Notes, Note{
 				Service: name, Field: "image",
 				Detail: "converted to a Database, which brings backups and the restore " +
 					"rehearsal; its compose settings other than the image are not carried over",
 			})
+			res.Notes = append(res.Notes, notes...)
 			continue
 		}
 		w, notes, gen := asWorkload(t, name, svc, o, name == primary)
+		if name == primary {
+			front = len(res.Workloads)
+		}
 		res.Workloads = append(res.Workloads, w)
 		res.Notes = append(res.Notes, notes...)
 		res.Generated = append(res.Generated, gen...)
@@ -154,7 +219,50 @@ func Convert(t Template, o Options) (Result, error) {
 	if len(res.Workloads) == 0 {
 		return Result{}, fmt.Errorf("compose: %s: every service is a database; nothing to run", t.Name)
 	}
+	if front < 0 {
+		// The template's front door is the database itself. Rare, and the
+		// remaining services still have to name it.
+		front = 0
+	}
+	linkDatabase(&res, front)
 	return res, nil
+}
+
+// linkDatabase points one workload at the Database, which is the whole coupling
+// between the two: a name, and the Secret the Database publishes.
+//
+// Without it the conversion produces both objects and nothing joins them — the
+// state every one of the 109 templates with a postgres service was in. The app
+// then has no credentials at all, which at least fails loudly.
+//
+// Only when there is exactly one. Compose says nothing about which service
+// talks to which database, and a template with two of them is a guess this
+// package will not make silently.
+func linkDatabase(res *Result, front int) {
+	switch len(res.Databases) {
+	case 0:
+		return
+	case 1:
+		res.Workloads[front].Spec.Database = res.Databases[0].Name
+		res.Notes = append(res.Notes, Note{
+			Service: res.Workloads[front].Name, Field: "database",
+			Detail: fmt.Sprintf(
+				"pointed at %s, so it receives POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, "+
+					"DB_HOST and DB_PORT. A template that builds its own connection string from "+
+					"those has to be given one built from these names instead",
+				res.Databases[0].Name),
+		})
+	default:
+		names := make([]string, 0, len(res.Databases))
+		for _, db := range res.Databases {
+			names = append(names, db.Name)
+		}
+		res.Notes = append(res.Notes, Note{
+			Field: "database",
+			Detail: "more than one database (" + strings.Join(names, ", ") +
+				"); compose does not say which service uses which, so none was attached",
+		})
+	}
 }
 
 // primaryService is the one that gets the domain: the service the template's
@@ -185,7 +293,7 @@ func primaryService(t Template, sorted []string) string {
 }
 
 // asDatabase recognises a service this platform would rather run as a Database.
-func asDatabase(t Template, name string, svc Service, o Options) (platformv1alpha1.Database, bool) {
+func asDatabase(t Template, name string, svc Service, o Options) (platformv1alpha1.Database, []Note, bool) {
 	repo := imageRepo(svc.Image)
 	matched := false
 	for _, prefix := range databaseImages {
@@ -195,26 +303,86 @@ func asDatabase(t Template, name string, svc Service, o Options) (platformv1alph
 		}
 	}
 	if !matched {
-		return platformv1alpha1.Database{}, false
+		return platformv1alpha1.Database{}, nil, false
 	}
+	var notes []Note
+	note := func(field, detail string) { notes = append(notes, Note{Service: name, Field: field, Detail: detail}) }
+
 	db := platformv1alpha1.Database{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      objectName(t.Name + "-" + name),
-			Namespace: o.Namespace,
-			Labels:    map[string]string{managedByCompose: t.Name},
+			Name:        objectName(t.Name + "-" + name),
+			Namespace:   o.Namespace,
+			Labels:      map[string]string{managedByCompose: t.Name},
+			Annotations: map[string]string{ServiceAnnotation: name},
 		},
 		Spec: platformv1alpha1.DatabaseSpec{
 			Image:   svc.Image,
 			Storage: o.VolumeSize,
 		},
 	}
-	if v, ok := svc.Environment["POSTGRES_DB"]; ok {
-		db.Spec.Database = literal(v)
+	// Both fields are PostgreSQL identifiers and the API refuses anything else,
+	// so a value that cannot be one is left out and defaulted rather than
+	// written. Measured: of the 369 templates that parse, 61 name a database
+	// the API would reject — `plausible-db`, because a hyphen is legal in
+	// compose and not in an unquoted identifier — and 75 name a user that is a
+	// generated variable, which resolved to the empty string.
+	db.Spec.Database = identifier(svc.Environment["POSTGRES_DB"], "database", note)
+	db.Spec.Username = identifier(svc.Environment["POSTGRES_USER"], "username", note)
+	return db, notes, true
+}
+
+// declaredSources lists every generated variable a service's environment names,
+// in key order and without repeats.
+func declaredSources(svc Service) []Source {
+	keys := make([]string, 0, len(svc.Environment))
+	for k := range svc.Environment {
+		keys = append(keys, k)
 	}
-	if v, ok := svc.Environment["POSTGRES_USER"]; ok {
-		db.Spec.Username = literal(v)
+	slices.Sort(keys)
+
+	var out []Source
+	add := func(s Source) {
+		if !slices.ContainsFunc(out, func(o Source) bool { return o.Name == s.Name }) {
+			out = append(out, s)
+		}
 	}
-	return db, true
+	for _, k := range keys {
+		v := svc.Environment[k]
+		if v == "" && magicVar.MatchString(k) {
+			add(Source{Name: k, Kind: magicKind(k)})
+			continue
+		}
+		for _, s := range sources(v) {
+			add(s)
+		}
+	}
+	return out
+}
+
+// identifier turns a compose value into something the Database API accepts, or
+// into nothing, which lets the CRD's own default stand.
+func identifier(v, field string, note func(field, detail string)) string {
+	if v == "" {
+		return ""
+	}
+	if len(sources(v)) > 0 {
+		// The platform mints this database's own credentials and publishes them
+		// in its Secret. A generated name from the template would be a second
+		// answer to a question already answered.
+		note(field, "names a generated value; the platform mints this database's credentials itself")
+		return ""
+	}
+	resolved := literal(v)
+	fixed := strings.Trim(notPGIdent.ReplaceAllString(strings.ToLower(resolved), "_"), "_")
+	if fixed == "" || fixed[0] < 'a' || fixed[0] > 'z' {
+		note(field, fmt.Sprintf(
+			"%q is not a PostgreSQL identifier and could not be made into one; the default stands", resolved))
+		return ""
+	}
+	if fixed != resolved {
+		note(field, fmt.Sprintf("%q is not a PostgreSQL identifier; using %q", resolved, fixed))
+	}
+	return fixed
 }
 
 // asWorkload is the main conversion, and most of it is deciding what to say
@@ -228,9 +396,10 @@ func asWorkload(
 
 	w := platformv1alpha1.Workload{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      objectName(t.Name + "-" + name),
-			Namespace: o.Namespace,
-			Labels:    map[string]string{managedByCompose: t.Name},
+			Name:        objectName(t.Name + "-" + name),
+			Namespace:   o.Namespace,
+			Labels:      map[string]string{managedByCompose: t.Name},
+			Annotations: map[string]string{ServiceAnnotation: name},
 		},
 		Spec: platformv1alpha1.WorkloadSpec{Image: svc.Image},
 	}
@@ -267,23 +436,36 @@ func asWorkload(
 	slices.Sort(keys)
 	for _, k := range keys {
 		v := svc.Environment[k]
-		switch {
-		case magicVar.MatchString(k) && v == "":
+		if v == "" && magicVar.MatchString(k) {
 			// The bare form: the key itself is the request. Coolify writes
 			// `- SERVICE_PASSWORD_N8N` with no value at all.
-			generated = append(generated, Generated{Service: name, Key: k, Kind: magicKind(k)})
+			generated = append(generated, Generated{
+				Service: name, Key: k,
+				Sources: []Source{{Name: k, Kind: magicKind(k)}},
+				Value:   "${" + k + "}",
+			})
 			continue
 		}
-		if ref := magicVar.FindString(strings.Trim(literalRefs(v), "${}")); ref != "" {
-			generated = append(generated, Generated{Service: name, Key: k, Kind: magicKind(ref)})
-			continue
-		}
-		if urlVar.MatchString(strings.Trim(literalRefs(v), "${}")) || urlVar.MatchString(k) {
+		if urlVar.MatchString(k) || refers(v, urlVar) {
 			note(k, "expects the platform to supply its own public URL; set it once the domain is known")
+			continue
+		}
+		// Anywhere in the value, not only as the whole of it. Checking for the
+		// whole of it was the earlier behaviour and it dropped the 51 templates
+		// that put a credential inside a connection string: the reference fell
+		// through to literal(), which resolves an interpolation to its default,
+		// and `postgres://${SERVICE_USER_PG}:${SERVICE_PASSWORD_PG}@db/x`
+		// reached the workload as `postgres://:@db/x`.
+		if srcs := sources(v); len(srcs) > 0 {
+			generated = append(generated, Generated{
+				Service: name, Key: k, Sources: srcs, Value: literalExceptSources(v),
+			})
 			continue
 		}
 		w.Spec.Env = append(w.Spec.Env, platformv1alpha1.EnvVar{Name: k, Value: literal(v)})
 	}
+
+	notes = append(notes, siblingNotes(t, name, w.Spec.Env, generated)...)
 
 	// Volumes.
 	for _, v := range svc.Volumes {
@@ -344,6 +526,71 @@ func asWorkload(
 	return w, notes, generated
 }
 
+// siblingHost matches a compose service name used as a host: after a scheme or
+// the credentials of a URL, or anywhere with a port attached.
+//
+// Deliberately narrow, and narrowed by a test rather than by review. A value of
+// exactly `db` matches everything a host does and is as often a database name —
+// the first version of this reported `DB_NAME=db`, and a note that fires on
+// those is a note people stop reading. The cost is silence on a bare
+// `SOME_HOST=db`, which is the better of the two mistakes.
+var siblingHost = regexp.MustCompile(
+	`(?://|@)([a-zA-Z0-9][a-zA-Z0-9._-]*)(?::[0-9]+)?(?:[/?]|$)` +
+		`|(?:^|=)([a-zA-Z0-9][a-zA-Z0-9._-]*):[0-9]+(?:[/?]|$)`)
+
+// siblingNotes reports every value that addresses another service in the same
+// template by its compose name.
+//
+// Compose puts every service on one network under its own name, so `db:5432`
+// resolves. Here each service becomes its own object under a derived name —
+// the template's, then the service's — and `db` resolves to nothing. The
+// application starts, retries, and reports that its database is down.
+//
+// Measured: 112 of the 199 multi-service templates address a sibling this way.
+// Not rewritten, because the same string is sometimes a database name rather
+// than a host and guessing wrong would corrupt a value instead of losing one.
+func siblingNotes(t Template, self string, env []platformv1alpha1.EnvVar, gen []Generated) []Note {
+	values := make(map[string]string, len(env)+len(gen))
+	for _, e := range env {
+		values[e.Name] = e.Value
+	}
+	for _, g := range gen {
+		values[g.Key] = g.Value
+	}
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+
+	var notes []Note
+	seen := map[string]bool{}
+	for _, k := range keys {
+		for _, m := range siblingHost.FindAllStringSubmatch(values[k], -1) {
+			host := m[1]
+			if host == "" {
+				host = m[2]
+			}
+			if host == self || seen[host] {
+				continue
+			}
+			if _, isSibling := t.Services[host]; !isSibling {
+				continue
+			}
+			seen[host] = true
+			notes = append(notes, Note{
+				Service: self, Field: k,
+				Detail: fmt.Sprintf(
+					"addresses %q, which is what compose calls that service and not what it is "+
+						"called here; it becomes %s. Nothing resolves %q and the application will "+
+						"report that its dependency is down",
+					host, objectName(t.Name+"-"+host), host),
+			})
+		}
+	}
+	return notes
+}
+
 // unsupported says what each dropped field would have meant, rather than that
 // it was dropped. "command is not supported" sends the reader to the source;
 // naming the consequence lets them decide whether it mattered.
@@ -398,15 +645,52 @@ func literal(v string) string {
 	})
 }
 
-// literalRefs returns the variable a value refers to, if it is only a
-// reference. `${SERVICE_PASSWORD_N8N}` is a request; `pg://x:${...}@y` is not,
-// and treating it as one would drop a connection string.
-func literalRefs(v string) string {
-	m := interpolation.FindStringSubmatch(v)
-	if m == nil || m[0] != v {
-		return ""
+// refers says whether any interpolation in v names a variable matching re.
+//
+// Anywhere in the value. The earlier version of this asked whether the value
+// was *only* the reference, which is true of `${SERVICE_URL_X}` and false of
+// `https://${SERVICE_FQDN_X}/hook` — and the second one is the same request
+// wearing a path.
+func refers(v string, re *regexp.Regexp) bool {
+	for _, m := range interpolation.FindAllStringSubmatch(v, -1) {
+		if re.MatchString(m[1]) {
+			return true
+		}
 	}
-	return m[1]
+	return false
+}
+
+// sources lists the generated values a single environment value names, in order
+// and without repeats.
+func sources(v string) []Source {
+	var out []Source
+	for _, m := range interpolation.FindAllStringSubmatch(v, -1) {
+		if !magicVar.MatchString(m[1]) {
+			continue
+		}
+		if slices.ContainsFunc(out, func(s Source) bool { return s.Name == m[1] }) {
+			continue
+		}
+		out = append(out, Source{Name: m[1], Kind: magicKind(m[1])})
+	}
+	return out
+}
+
+// literalExceptSources resolves every interpolation to its default the way
+// literal does, except the generated ones, which are left as a bare ${NAME}
+// for whoever mints them to substitute.
+//
+// The default is dropped from those on purpose. `${SERVICE_PASSWORD_X:-hunter2}`
+// carries a default that is a published credential, and honouring it would be
+// the one outcome worse than an empty password.
+func literalExceptSources(v string) string {
+	return interpolation.ReplaceAllStringFunc(v, func(m string) string {
+		parts := interpolation.FindStringSubmatch(m)
+		if magicVar.MatchString(parts[1]) {
+			return "${" + parts[1] + "}"
+		}
+		return parts[2]
+	})
 }
 
 func imageRepo(image string) string {

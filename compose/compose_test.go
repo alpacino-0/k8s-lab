@@ -137,8 +137,10 @@ func TestGeneratedCredentialsAreNotPassedThroughAsLiterals(t *testing.T) {
 
 	found := false
 	for _, g := range res.Generated {
-		if g.Kind == "password" {
-			found = true
+		for _, src := range g.Sources {
+			if src.Kind == "password" {
+				found = true
+			}
 		}
 	}
 	if !found {
@@ -150,6 +152,214 @@ func TestGeneratedCredentialsAreNotPassedThroughAsLiterals(t *testing.T) {
 				t.Errorf("%s=%q reached the workload as a literal", e.Name, e.Value)
 			}
 		}
+	}
+}
+
+// The identity of a generated value is its source name, not the key it lands
+// under. n8n asks for N8N_RUNNERS_AUTH_TOKEN in both of its services and both
+// name ${SERVICE_PASSWORD_N8N}: mint per key and the task runner presents a
+// token the broker rejects, which looks like a runner bug and is not.
+//
+// 111 of the 369 templates that parse share a source between services.
+func TestOneSourceServesEveryKeyThatNamesIt(t *testing.T) {
+	res := convert(t, "n8n")
+
+	var seen []string
+	for _, g := range res.Generated {
+		if g.Key != "N8N_RUNNERS_AUTH_TOKEN" {
+			continue
+		}
+		if len(g.Sources) != 1 {
+			t.Fatalf("%s in %s names %d sources, want 1", g.Key, g.Service, len(g.Sources))
+		}
+		seen = append(seen, g.Service+"->"+g.Sources[0].Name)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("N8N_RUNNERS_AUTH_TOKEN requested %d times, want once per service: %v", len(seen), seen)
+	}
+	first, second, _ := strings.Cut(seen[0], "->")
+	other, otherSrc, _ := strings.Cut(seen[1], "->")
+	if second != otherSrc {
+		t.Errorf("%s asks for %q and %s asks for %q; the broker and its runner would not agree",
+			first, second, other, otherSrc)
+	}
+}
+
+// A credential inside a larger string. Resolving the interpolation to its
+// default writes the empty string where the password goes, and the result is a
+// URL that parses, connects, and is refused — with no note saying why.
+//
+// 51 of the 369 templates that parse do this.
+func TestACredentialInsideAConnectionStringIsNotBlanked(t *testing.T) {
+	res := convert(t, "plausible")
+
+	for _, w := range res.Workloads {
+		for _, e := range w.Spec.Env {
+			if e.Name == "DATABASE_URL" {
+				t.Fatalf("DATABASE_URL reached the workload as %q", e.Value)
+			}
+		}
+	}
+	var url *compose.Generated
+	for i := range res.Generated {
+		if res.Generated[i].Key == "DATABASE_URL" {
+			url = &res.Generated[i]
+		}
+	}
+	if url == nil {
+		t.Fatal("DATABASE_URL was dropped instead of being asked for")
+	}
+	if len(url.Sources) != 2 {
+		t.Errorf("sources = %+v, want the user and the password", url.Sources)
+	}
+	for _, src := range url.Sources {
+		if !strings.Contains(url.Value, "${"+src.Name+"}") {
+			t.Errorf("%s is named as a source but does not appear in %q", src.Name, url.Value)
+		}
+	}
+	// The rest of the string has to survive, or substituting into it produces
+	// a URL with no host.
+	if !strings.Contains(url.Value, "plausible-db:5432") {
+		t.Errorf("the value lost everything around the credential: %q", url.Value)
+	}
+}
+
+// A default on a generated variable is a published credential. Honouring it is
+// the one outcome worse than an empty password, because it starts and is open.
+func TestADefaultOnAGeneratedVariableIsNotUsed(t *testing.T) {
+	tpl, err := compose.Parse("defaulted", []byte(`
+services:
+  app:
+    image: example/app:1.0
+    environment:
+      - TOKEN=${SERVICE_PASSWORD_APP:-hunter2}
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	res, err := compose.Convert(tpl, compose.Options{Namespace: "t"})
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	for _, g := range res.Generated {
+		if strings.Contains(g.Value, "hunter2") {
+			t.Errorf("the published default survived into %q", g.Value)
+		}
+	}
+	for _, w := range res.Workloads {
+		for _, e := range w.Spec.Env {
+			if strings.Contains(e.Value, "hunter2") {
+				t.Errorf("%s=%q carries the published default", e.Name, e.Value)
+			}
+		}
+	}
+}
+
+// Upstream withdraws a template with a header comment, and 28 of the 371 files
+// carry it. A catalogue that cannot see it offers 28 entries whose own authors
+// took them down.
+func TestAWithdrawnTemplateSaysSo(t *testing.T) {
+	if !load(t, "plausible").Ignore {
+		t.Error("plausible carries `# ignore: true` and parsed as offered")
+	}
+	if load(t, "n8n").Ignore {
+		t.Error("n8n does not carry the header and parsed as withdrawn")
+	}
+}
+
+// Compose puts every service on one network under its own name. Here each one
+// becomes an object under a derived name, so a value that says `plausible-db`
+// addresses nothing — the application starts, retries, and reports that its
+// database is down, which sends the reader looking at the database.
+//
+// 112 of the 199 multi-service templates address a sibling this way.
+func TestAddressingASiblingByItsComposeNameIsReported(t *testing.T) {
+	res := convert(t, "plausible")
+
+	all := strings.Join(noteStrings(res), "\n")
+	if !strings.Contains(all, "plausible-events-db") || !strings.Contains(all, "not what it is called here") {
+		t.Errorf("the clickhouse address was not reported:\n%s", all)
+	}
+	// The note has to say what the name became, or it is a problem with no
+	// action attached.
+	if !strings.Contains(all, "plausible-plausible-events-db") {
+		t.Errorf("the note does not say what the name became:\n%s", all)
+	}
+}
+
+// The same detection must not fire on values that merely contain a service
+// name. A note that cries wolf is a note nobody finishes reading.
+func TestAValueThatOnlyContainsASiblingNameIsNotReported(t *testing.T) {
+	tpl, err := compose.Parse("quiet", []byte(`
+services:
+  app:
+    image: example/app:1.0
+    environment:
+      - DB_NAME=db
+      - NOTE=the db is fine
+      - REAL=postgres://user@db:5432/x
+  db:
+    image: example/db:1.0
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	res, err := compose.Convert(tpl, compose.Options{Namespace: "t"})
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	fired := 0
+	for _, n := range res.Notes {
+		if strings.Contains(n.Detail, "not what it is called here") {
+			fired++
+			if n.Field != "REAL" {
+				t.Errorf("fired on %s, which is not an address", n.Field)
+			}
+		}
+	}
+	if fired != 1 {
+		t.Errorf("the sibling note fired %d times, want once for the one address", fired)
+	}
+}
+
+// A Database and a Workload that do not know about each other leave the app
+// with no credentials at all. All 109 templates with a postgres service
+// converted that way.
+func TestTheDatabaseIsAttachedToAWorkload(t *testing.T) {
+	res := convert(t, "plausible")
+
+	if len(res.Databases) != 1 {
+		t.Fatalf("databases = %d, want 1", len(res.Databases))
+	}
+	attached := 0
+	for _, w := range res.Workloads {
+		if w.Spec.Database == res.Databases[0].Name {
+			attached++
+		}
+	}
+	if attached != 1 {
+		t.Errorf("%d workloads name %s, want the one that fronts the template",
+			attached, res.Databases[0].Name)
+	}
+}
+
+// The two fields are PostgreSQL identifiers and the API refuses anything else.
+// A hyphen is legal in compose and not in an identifier, so `plausible-db` is
+// an object that converts, commits, and is rejected on apply — 61 of the 369
+// templates that parse name one.
+func TestADatabaseNameIsAPostgresIdentifier(t *testing.T) {
+	res := convert(t, "plausible")
+
+	db := res.Databases[0]
+	if db.Spec.Database != "plausible_db" {
+		t.Errorf("database = %q, want the hyphen replaced", db.Spec.Database)
+	}
+	// The user is ${SERVICE_USER_POSTGRES}, which used to resolve to "".
+	if db.Spec.Username != "" {
+		t.Errorf("username = %q, want it left to the API's default", db.Spec.Username)
+	}
+	if !strings.Contains(strings.Join(noteStrings(res), "\n"), "mints this database") {
+		t.Error("the generated username was dropped without saying so")
 	}
 }
 
