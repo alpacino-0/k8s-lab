@@ -340,7 +340,7 @@ jobs:
             exit 1
           }
 
-      - name: The control plane serves, and its identity is scoped
+      - name: The control plane serves its own panel
         run: |
           kubectl -n damga-system run cp-probe --rm -i --restart=Never \
             --image=curlimages/curl:8.11.1 --quiet \
@@ -348,16 +348,6 @@ jobs:
             -- sh | tee /tmp/cp.out
           grep -q '<!doctype html>' /tmp/cp.out || { echo "the panel was not served"; exit 1; }
 
-          # What the identity may and may not do. Asserted rather than assumed,
-          # because an over-broad Role looks identical to a correct one until
-          # something uses it.
-          sa=system:serviceaccount:damga-system:damga
-          kubectl auth can-i create builds.platform.damga.co -n damga-build --as="$sa" | grep -qx yes \
-            || { echo "cannot create builds, so the build endpoint stays 501"; exit 1; }
-          kubectl auth can-i delete builds.platform.damga.co -n damga-build --as="$sa" | grep -qx no \
-            || { echo "can delete a Build — that removes the record of what is running"; exit 1; }
-          kubectl auth can-i create workloads.platform.damga.co -n damga --as="$sa" | grep -qx no \
-            || { echo "can write into a tenant namespace; the write path is git"; exit 1; }
 
       - name: Install ingress-nginx
         run: |
@@ -540,6 +530,32 @@ jobs:
           make -f Makefile.operator deploy IMG="damga-operator:${IMAGE_TAG}"
           kubectl -n damga-platform-system rollout status \
             deployment/damga-platform-controller-manager --timeout=180s
+
+      # After the operator, because the CRDs have to exist first. `kubectl auth
+      # can-i` resolves `builds.platform.damga.co` through discovery before it
+      # asks RBAC anything, so with the type unregistered the answer is "no" for
+      # a reason that has nothing to do with the Role — which is what the first
+      # run of this said, and it read as a broken RoleBinding.
+      - name: The control plane's identity is scoped
+        run: |
+          sa=system:serviceaccount:damga-system:damga
+          check() { # verb resource namespace want
+            got=$(kubectl auth can-i "$1" "$2" -n "$3" --as="$sa" 2>&1 || true)
+            [ "$got" = "$4" ] || {
+              echo "can-i $1 $2 -n $3 = '$got', want '$4'"
+              return 1
+            }
+          }
+          # An over-broad Role looks identical to a correct one until something
+          # uses it, so both directions are asserted.
+          check create builds.platform.damga.co damga-build yes \
+            || { echo "the build endpoint would stay 501"; exit 1; }
+          check delete builds.platform.damga.co damga-build no \
+            || { echo "deleting a Build removes the record of what is running"; exit 1; }
+          check create workloads.platform.damga.co damga no \
+            || { echo "the control plane could write into a tenant; the write path is git"; exit 1; }
+          check get workloads.platform.damga.co damga yes \
+            || { echo "the backup endpoint cannot read what it reports on"; exit 1; }
 
       - name: A Workload must reach Ready
         run: |
