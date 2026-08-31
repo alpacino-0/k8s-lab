@@ -80,7 +80,7 @@ func TestBuildForRefusesWhatTheCRDWouldRefuse(t *testing.T) {
 		// The one most likely to be hit, and the reason the rule exists: a
 		// record that says "built main" cannot answer which main.
 		{"a branch name where a commit belongs", createBuildRequest{
-			Repo: sourceRepo, Revision: "main"}},
+			Repo: sourceRepo, Revision: branchMain}},
 		{"a short sha", createBuildRequest{
 			Repo: sourceRepo, Revision: testRevision[:12]}},
 		{"a sha in capitals", createBuildRequest{

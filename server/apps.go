@@ -238,16 +238,16 @@ func deleteApp(g guard, st stores) http.Handler {
 		Namespace string `json:"namespace"`
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// tenant:admin, which the free authorizer answers owner-only.
+		// app:delete, which the free authorizer answers member and above.
 		//
-		// Not because deleting a record is dangerous — it deliberately is not,
-		// nothing it deletes cannot be recreated by POSTing the same body — but
-		// because the closed action set has no app:delete and inventing one is
-		// a decision about the permission model rather than about this
-		// endpoint. Owner-only is the conservative end of that decision and the
-		// one that can be loosened later without anybody losing access they
-		// had. authz.Action is where a narrower right would go.
-		_, ref, ok := g.admit(w, r, authz.ActionTenantAdmin)
+		// This was tenant:admin — owner-only — for exactly as long as the action
+		// did not exist. That was the conservative end of a decision nobody had
+		// made, and it was wrong in the safe direction: a member may create an
+		// app and ship to it, and there is no story in which the same person
+		// must then find an owner to unregister one. The action set is closed so
+		// that adding an endpoint forces this decision rather than letting it be
+		// borrowed from a neighbour, and this is the decision.
+		_, ref, ok := g.admit(w, r, authz.ActionAppDelete)
 		if !ok {
 			return
 		}

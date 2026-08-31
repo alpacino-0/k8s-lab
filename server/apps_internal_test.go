@@ -53,6 +53,7 @@ const (
 	envStaging  = "staging"
 	nsHomeProd  = "home-prod"
 	pathAPIProd = "apps/api/prod"
+	branchMain  = "main"
 
 	accOwner  = "a_owner"
 	accMember = "a_member"
@@ -197,7 +198,7 @@ func TestCreateAppWritesThePlacementTheDeployPathReads(t *testing.T) {
 	switch {
 	case got.RepoURL != homeRepo:
 		t.Errorf("RepoURL = %q", got.RepoURL)
-	case got.Branch != "main":
+	case got.Branch != branchMain:
 		t.Errorf("Branch = %q", got.Branch)
 	case got.Path != pathAPIProd:
 		t.Errorf("Path = %q", got.Path)
@@ -483,24 +484,37 @@ func TestDeleteAppReleasesTheClaimsSoItCanBeCreatedAgain(t *testing.T) {
 	}
 }
 
-// Owner-only, because the closed action set has no app:delete and the free
-// authorizer answers tenant:admin owner-only. A member may create and deploy;
-// unregistering an app is the conservative end of a decision that has not been
-// made, and this is what records which end was chosen.
-func TestDeleteAppIsOwnerOnly(t *testing.T) {
+// app:delete is a member's right and not an owner's, and a viewer has none.
+//
+// Both halves are load-bearing and each catches a different mistake. Borrowing
+// tenant:admin — which is what this endpoint did until the action existed —
+// refuses the member, and a member who may create an app and ship to it should
+// not need an owner to unregister one. Borrowing app:view or evidence:view lets
+// the viewer through, because the free authorizer allows a viewer to read.
+func TestDeleteAppNeedsAMemberAndRefusesAViewer(t *testing.T) {
 	h := newHarness(t)
-	if code, body := h.createApp(tenantHome, accOwner, `{
-		"app":"api","env":"prod","repoUrl":"`+homeRepo+`","branch":"main",
-		"path":"apps/api/prod","namespace":"home-prod"}`); code != http.StatusCreated {
-		t.Fatalf("create = %d: %s", code, body)
+	create := func(account string) {
+		t.Helper()
+		if code, body := h.createApp(tenantHome, accOwner, `{
+			"app":"api","env":"prod","repoUrl":"`+homeRepo+`","branch":"main",
+			"path":"apps/api/prod","namespace":"home-prod"}`); code != http.StatusCreated {
+			t.Fatalf("create for %s = %d: %s", account, code, body)
+		}
 	}
 
-	if code, _ := h.deleteApp(appAPI, accMember); code != http.StatusForbidden {
-		t.Errorf("a member deleted an app: %d", code)
+	create(accViewer)
+	if code, _ := h.deleteApp(appAPI, accViewer); code != http.StatusForbidden {
+		t.Errorf("a viewer deleted an app: %d", code)
 	}
 	if _, err := h.places.Get(context.Background(), tenantHome, appAPI, envProd); err != nil {
 		t.Errorf("the refused delete removed the placement anyway: %v", err)
 	}
+
+	if code, body := h.deleteApp(appAPI, accMember); code != http.StatusOK {
+		t.Fatalf("a member could not delete an app: %d %s", code, body)
+	}
+	// And an owner still can: widening a right must not have narrowed it.
+	create(accOwner)
 	if code, body := h.deleteApp(appAPI, accOwner); code != http.StatusOK {
 		t.Errorf("an owner could not delete: %d %s", code, body)
 	}
@@ -513,5 +527,110 @@ func TestDeleteAppOnAnAppThatWasNeverPlaced(t *testing.T) {
 	h := newHarness(t)
 	if code, _ := h.deleteApp("ghost", accOwner); code != http.StatusNotFound {
 		t.Errorf("DELETE of an app that was never placed = %d, want 404", code)
+	}
+}
+
+// The list answers from both stores, and says which of them knew.
+//
+// The case that made this necessary is the first one: an app that has been
+// created and never deployed. Answering from the evidence store alone made
+// POST /apps invisible — somebody creates an app, the page stays empty, and
+// nothing anywhere says why. The other two are what the same merge has to say
+// once it exists, and they must not be flattened into each other.
+func TestAppsListsBothStoresAndSaysWhichOneKnew(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	// Placed, never deployed.
+	if code, body := h.createApp(tenantHome, accMember, `{
+		"app":"api","env":"prod","repoUrl":"`+homeRepo+`","branch":"main",
+		"path":"apps/api/prod","namespace":"home-prod"}`); code != http.StatusCreated {
+		t.Fatalf("creating api/prod = %d: %s", code, body)
+	}
+	// Placed and deployed.
+	if code, body := h.createApp(tenantHome, accMember, `{
+		"app":"admin","env":"prod","repoUrl":"`+homeRepo+`","branch":"main",
+		"path":"apps/admin/prod","namespace":"home-prod"}`); code != http.StatusCreated {
+		t.Fatalf("creating admin/prod = %d: %s", code, body)
+	}
+	for _, ref := range []evidence.Ref{
+		{TenantID: tenantHome, App: "admin", Env: envProd},
+		// Deployed and never placed: what DELETE /apps/{app} leaves behind.
+		{TenantID: tenantHome, App: "web", Env: envProd},
+	} {
+		if _, err := h.records.Append(ctx, evidence.Record{
+			IdempotencyKey: "commit:" + ref.App + ":apps/" + ref.App,
+			Ref:            ref,
+			Actor:          evidence.Actor{ID: accMember, Kind: kindUser},
+		}); err != nil {
+			t.Fatalf("Append %s: %v", ref.App, err)
+		}
+	}
+
+	code, body := h.call(apps, http.MethodGet, "/apps", tenantHome, "", accViewer, "")
+	if code != http.StatusOK {
+		t.Fatalf("GET /apps = %d: %s", code, body)
+	}
+	var got struct {
+		Apps []wireApp `json:"apps"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("the response is not JSON: %v", err)
+	}
+
+	// Sorted by app then env, because both sources arrive sorted and a merge
+	// through a map would otherwise reshuffle the panel's list on every load.
+	names := make([]string, 0, len(got.Apps))
+	for _, a := range got.Apps {
+		names = append(names, a.App+"/"+a.Env+"="+a.State)
+	}
+	want := "admin/prod=" + appDeployed + " api/prod=" + appNeverDeployed +
+		" web/prod=" + appRecordRemoved
+	if strings.Join(names, " ") != want {
+		t.Errorf("GET /apps =\n\t%q\nwant\n\t%q", strings.Join(names, " "), want)
+	}
+
+	// The placement travels with the entries that have one, so the page can say
+	// where an app would deploy to before it ever has.
+	for _, a := range got.Apps {
+		switch a.State {
+		case appRecordRemoved:
+			if a.Namespace != "" || a.RepoURL != "" {
+				t.Errorf("%s/%s has no placement but reports one: %+v", a.App, a.Env, a)
+			}
+		default:
+			if a.Namespace != nsHomeProd || a.RepoURL != homeRepo || a.Branch != branchMain {
+				t.Errorf("%s/%s does not carry its placement: %+v", a.App, a.Env, a)
+			}
+		}
+	}
+}
+
+// One tenant's list never reaches into another's, from either source. The guard
+// stops a caller from asking about a tenant they do not belong to; this is the
+// half below it — a member of both would otherwise be shown one list for two.
+func TestAppsIsScopedToOneTenantInBothStores(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	if code, body := h.createApp(tenantOther, "a_other", `{
+		"app":"billing","env":"prod","repoUrl":"`+otherRepo+`","branch":"main",
+		"path":"apps/billing/prod","namespace":"other-prod"}`); code != http.StatusCreated {
+		t.Fatalf("creating the other tenant's app = %d: %s", code, body)
+	}
+	if _, err := h.records.Append(ctx, evidence.Record{
+		IdempotencyKey: "commit:billing:apps/billing",
+		Ref:            evidence.Ref{TenantID: tenantOther, App: "billing", Env: envProd},
+		Actor:          evidence.Actor{ID: "a_other", Kind: kindUser},
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	code, body := h.call(apps, http.MethodGet, "/apps", tenantHome, "", accOwner, "")
+	if code != http.StatusOK {
+		t.Fatalf("GET /apps = %d: %s", code, body)
+	}
+	if strings.Contains(body, "billing") || strings.Contains(body, otherRepo) {
+		t.Errorf("another tenant's app is in the list: %s", body)
 	}
 }

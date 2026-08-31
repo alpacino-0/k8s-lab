@@ -81,6 +81,7 @@ func TestRoleMatrix(t *testing.T) {
 		authz.ActionEvidenceView,
 		authz.ActionAppDeploy,
 		authz.ActionAppRollback,
+		authz.ActionAppDelete,
 		authz.ActionEnvCreate,
 		authz.ActionEvidenceExport,
 		authz.ActionMemberInvite,
@@ -94,11 +95,13 @@ func TestRoleMatrix(t *testing.T) {
 		"member": {
 			authz.ActionAppView: true, authz.ActionEvidenceView: true,
 			authz.ActionAppDeploy: true, authz.ActionAppRollback: true,
+			authz.ActionAppDelete: true,
 			authz.ActionEnvCreate: true, authz.ActionEvidenceExport: true,
 		},
 		"owner": {
 			authz.ActionAppView: true, authz.ActionEvidenceView: true,
 			authz.ActionAppDeploy: true, authz.ActionAppRollback: true,
+			authz.ActionAppDelete: true,
 			authz.ActionEnvCreate: true, authz.ActionEvidenceExport: true,
 			authz.ActionMemberInvite: true, authz.ActionTenantAdmin: true,
 		},
