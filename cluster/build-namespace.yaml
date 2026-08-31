@@ -77,8 +77,14 @@ spec:
     #
     # 200 rather than a round 100: this has to hold every build worth looking
     # back at, and hitting it is a refusal rather than a slowdown. Pruning is
-    # what actually keeps it under — see the note below, which is not yet
-    # written.
+    # what actually keeps it under — see the note above.
+    #
+    # ORDERING: the Build CRD has to be installed before this manifest. A quota
+    # that counts a type the API server has never heard of cannot compute a
+    # usage for it, and until it does, admission refuses every create with
+    # "status unknown for quota" — which names the quota and not the missing
+    # type. Measured: applying this before the operator's CRDs made the first
+    # build of every run fail on the platform's own guard rail.
     count/builds.platform.damga.co: "200"
 ---
 # Default-deny is the wrong shape for a build: it has to reach the repository it

@@ -57,6 +57,15 @@ kubectl wait --for=condition=Ready clusterissuer/selfsigned-ca --timeout=180s
 # it is a plain manifest and Terraform's kubernetes_manifest wants a schema at
 # plan time. The wait is on the deployment rather than the release, because a
 # registry that is not serving yet turns the first build into a push timeout.
+# The CRDs before anything that counts them.
+#
+# cluster/build-namespace.yaml puts a quota on count/builds.platform.damga.co,
+# and a ResourceQuota that counts a type the API server has never heard of
+# cannot compute a usage for it — until it does, every create is refused with
+# "status unknown for quota", which names the quota and not the missing type.
+log "installing the CRDs"
+make -f "$ROOT/Makefile.operator" -C "$ROOT" install >/dev/null
+
 log "installing the image registry and the build namespace"
 kubectl apply -f "$ROOT/cluster/registry.yaml" -f "$ROOT/cluster/build-namespace.yaml"
 kubectl -n damga-registry rollout status deployment/registry --timeout=300s

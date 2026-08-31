@@ -267,6 +267,21 @@ jobs:
       # naming them, which failed here and nowhere else — no local gate stands
       # up a cluster. kubectl reads only .yaml, .yml and .json from a directory,
       # so the README beside them is ignored.
+      # The CRDs first, and this is an ordering constraint rather than a
+      # preference. The build namespace carries a quota on
+      # count/builds.platform.damga.co; a ResourceQuota that counts a type the
+      # API server has never heard of cannot compute a usage for it, and until
+      # it does, admission refuses every create with "status unknown for quota"
+      # — a message about the quota, not about the missing type. The operator
+      # installs these much later, so before this step existed the first Build
+      # of every run was refused by the platform's own guard rail.
+      #
+      # The control plane wants them early too: its manager watches Workloads
+      # and Databases, and a cache for a type that does not exist starts empty
+      # and stays empty.
+      - name: Install the CRDs
+        run: make -f Makefile.operator install
+
       - name: Apply the namespace and the tenant fence
         run: kubectl apply -f policies/
 
