@@ -30,6 +30,16 @@
 # Every platform in this category makes this trade. Coolify runs builds on the
 # Docker daemon that also runs every application on the machine, which is the
 # same concession without the namespace.
+#
+# ## Open: nothing prunes Build objects
+#
+# The quota below bounds them at 200 and that is a wall, not a policy: once it
+# is reached, builds stop rather than old ones being collected. Pruning belongs
+# to the operator and not to the control plane, deliberately — the control plane
+# is granted create and not delete, because a Build is the record of what
+# produced a running image and a server that can remove one can remove the
+# answer to "what is this". The operator already owns that object's lifecycle
+# and is where a retention rule goes.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -59,6 +69,17 @@ spec:
     # memory limit still add up to more than a small node has.
     count/jobs.batch: "10"
     pods: "10"
+    # And on the records themselves, which is a different ceiling and was
+    # missing. The endpoint that requests a build uses generateName, so every
+    # call creates a new object; the two limits above bound what *runs* and
+    # bound nothing about what accumulates. A client in a loop could fill the
+    # namespace with Build objects while never exceeding ten pods.
+    #
+    # 200 rather than a round 100: this has to hold every build worth looking
+    # back at, and hitting it is a refusal rather than a slowdown. Pruning is
+    # what actually keeps it under — see the note below, which is not yet
+    # written.
+    count/builds.platform.damga.co: "200"
 ---
 # Default-deny is the wrong shape for a build: it has to reach the repository it
 # is cloning, which is on the internet, and a registry. What it must not reach
