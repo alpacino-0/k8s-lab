@@ -89,7 +89,7 @@ jobs:
           ./kubeconform -strict -summary \
             -schema-location default \
             -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
-            policies/ gitops/ cluster/registry.yaml cluster/build-namespace.yaml
+            policies/ gitops/ cluster/registry.yaml cluster/build-namespace.yaml cluster/control-plane.yaml
 
       - name: Validate rendered manifests against the Kubernetes schema
         run: |
@@ -291,6 +291,38 @@ jobs:
           TOML
           done
 
+      # The platform's own control plane, in the cluster it manages. Proves
+      # three things a unit test cannot: the image starts under `restricted`,
+      # the panel is served from inside the binary, and the ServiceAccount can
+      # do exactly what it is meant to and nothing more.
+      - name: Deploy the control plane
+        run: |
+          kubectl apply -f cluster/control-plane.yaml
+          kubectl -n damga-system set image deployment/damga \
+            damga="damga-control-plane:${IMAGE_TAG}"
+          kubectl -n damga-system patch deployment damga --type=json \
+            -p '[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"Never"}]'
+          kubectl -n damga-system rollout status deployment/damga --timeout=300s
+
+      - name: The control plane serves, and its identity is scoped
+        run: |
+          kubectl -n damga-system run cp-probe --rm -i --restart=Never \
+            --image=curlimages/curl:8.11.1 --quiet \
+            --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"cp-probe","image":"curlimages/curl:8.11.1","command":["sh","-c","curl -sf http://damga/healthz && curl -sf http://damga/ | head -c 15"],"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"resources":{"requests":{"cpu":"10m","memory":"32Mi"},"limits":{"memory":"64Mi"}}}]}}' \
+            -- sh | tee /tmp/cp.out
+          grep -q '<!doctype html>' /tmp/cp.out || { echo "the panel was not served"; exit 1; }
+
+          # What the identity may and may not do. Asserted rather than assumed,
+          # because an over-broad Role looks identical to a correct one until
+          # something uses it.
+          sa=system:serviceaccount:damga-system:damga
+          kubectl auth can-i create builds.platform.damga.co -n damga-build --as="$sa" | grep -qx yes \
+            || { echo "cannot create builds, so the build endpoint stays 501"; exit 1; }
+          kubectl auth can-i delete builds.platform.damga.co -n damga-build --as="$sa" | grep -qx no \
+            || { echo "can delete a Build — that removes the record of what is running"; exit 1; }
+          kubectl auth can-i create workloads.platform.damga.co -n damga --as="$sa" | grep -qx no \
+            || { echo "can write into a tenant namespace; the write path is git"; exit 1; }
+
       - name: Install ingress-nginx
         run: |
           kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.13.0/deploy/static/provider/baremetal/deploy.yaml
@@ -307,6 +339,17 @@ jobs:
         run: |
           docker build -t "damga-app:${IMAGE_TAG}" ./app
           kind load docker-image "damga-app:${IMAGE_TAG}" --name ci
+
+      # The control plane, which had no Dockerfile until 2026-09-01 and was
+      # therefore never built by anything. The first attempt failed at once:
+      # .dockerignore re-includes only *.go, so the SQL the stores embed and the
+      # panel assets were not in the build context. That is the good version of
+      # the failure — go:embed reads at compile time and the build stops — but
+      # nothing had ever run it.
+      - name: Build and load the control plane
+        run: |
+          docker build -t "damga-control-plane:${IMAGE_TAG}" .
+          kind load docker-image "damga-control-plane:${IMAGE_TAG}" --name ci
 
       - name: Install the chart
         run: |

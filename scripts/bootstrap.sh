@@ -80,6 +80,18 @@ server = "http://${REGISTRY_HOST}"
 TOML
 done
 
+# The control plane itself, in the cluster it manages. Built here rather than
+# pulled, because the published image is the reference tenant — see
+# cluster/control-plane.yaml for why that was true for so long.
+log "building and deploying the control plane"
+docker build -q -t "damga-control-plane:$IMAGE_TAG" "$ROOT" >/dev/null
+kind load docker-image "damga-control-plane:$IMAGE_TAG" --name "$CLUSTER" >/dev/null
+kubectl apply -f "$ROOT/cluster/control-plane.yaml"
+kubectl -n damga-system set image deployment/damga "damga=damga-control-plane:$IMAGE_TAG"
+kubectl -n damga-system patch deployment damga --type=json \
+  -p '[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"Never"}]'
+kubectl -n damga-system rollout status deployment/damga --timeout=300s
+
 log "deploying release '$RELEASE' to namespace '$NAMESPACE'"
 # Deliberately no --wait: it also waits for the backup PVC, which stays Pending
 # under a WaitForFirstConsumer StorageClass until its first consumer runs.
@@ -100,6 +112,10 @@ kubectl -n "$NAMESPACE" get deploy,sts,svc,ingress,hpa
 cat <<TXT
 
   Open http://localhost:8080
+
+  The control plane's own panel:
+    kubectl -n damga-system port-forward svc/damga 9000:80
+    then http://localhost:9000
 
   The chart also serves app.local. To use that name instead, add it once:
     echo "127.0.0.1 app.local" | sudo tee -a /etc/hosts

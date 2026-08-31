@@ -1,0 +1,211 @@
+# The control plane: the panel, the API and the deploy write path, running in
+# the cluster it manages.
+#
+# This did not exist until 2026-09-01, and its absence was the product's largest
+# structural gap rather than a missing convenience. `chart/` deploys the
+# reference tenant in `app/`; the published ghcr.io/damgahq/damga image is built
+# from `./app`; docs/CONTROL-PLANE.md tells the reader to run the binary on a
+# laptop. So the platform had a panel nobody could install — and every path that
+# needs the server to hold a cluster identity was blocked on a ServiceAccount
+# that could not exist, which is how the build-trigger endpoint ended up
+# returning 501 for a reason that looked like a missing permission and was not.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: damga-system
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    app.kubernetes.io/managed-by: damga
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: damga
+  namespace: damga-system
+---
+# Cluster-wide reads, and only reads.
+#
+# The control plane writes to git and to its own database; the one thing it
+# reads from the cluster is what a Workload's Database says about its backups.
+# That separation is deliberate and this Role is where it is enforced: no verb
+# here creates, updates or deletes anything.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: damga-control-plane
+rules:
+  - apiGroups: ["platform.damga.co"]
+    resources: [workloads, databases]
+    verbs: [get, list, watch]
+  # The deploy observer reads Deployments to learn what became of a commit.
+  # Watching rather than polling, which is why watch is here.
+  - apiGroups: ["apps"]
+    resources: [deployments]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: damga-control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: damga-control-plane
+subjects:
+  - kind: ServiceAccount
+    name: damga
+    namespace: damga-system
+---
+# The one place the control plane writes to the cluster, and it is scoped to one
+# namespace on purpose.
+#
+# A Build is the exception to "the write path is git": a build is an action
+# rather than a desired state, and it has to happen before there is a digest to
+# commit. Confining that exception to damga-build means the control plane cannot
+# create anything in a tenant's namespace even by mistake — its writes reach
+# exactly one kind, in exactly one place.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: damga-builds
+  namespace: damga-build
+rules:
+  - apiGroups: ["platform.damga.co"]
+    resources: [builds]
+    verbs: [get, list, watch, create]
+  # No delete. A Build is the record of what produced a running image, and a
+  # control plane that can remove one can remove the answer to "what is this".
+  # Cleaning up old builds is a retention decision, not an API call.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: damga-builds
+  namespace: damga-build
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: damga-builds
+subjects:
+  - kind: ServiceAccount
+    name: damga
+    namespace: damga-system
+---
+# Leader election, so two replicas do not both observe deploys.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: damga-leader-election
+  namespace: damga-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: damga-leader-election
+  namespace: damga-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: damga-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: damga
+    namespace: damga-system
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: damga-data
+  namespace: damga-system
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      # Accounts, sessions, placements and one row per deploy. Small, and the
+      # retention window bounds the only part that grows.
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: damga
+  namespace: damga-system
+  labels:
+    app.kubernetes.io/name: damga
+    app.kubernetes.io/component: control-plane
+    app.kubernetes.io/managed-by: damga
+spec:
+  replicas: 1
+  # One replica, and Recreate, because the default DSN is SQLite on a
+  # ReadWriteOnce claim — two pods cannot both mount it and a rolling update
+  # would wait on a volume the old pod still holds. An install that points
+  # -evidence-dsn at PostgreSQL can raise this; nothing here assumes it has.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: damga
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: damga
+    spec:
+      serviceAccountName: damga
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: damga
+          image: ghcr.io/damgahq/damga-control-plane:latest
+          args:
+            - -listen-address=0.0.0.0:8080
+            - -evidence-dsn=/data/damga.db
+            - -observe-deploys
+            - -leader-elect
+            - -leader-election-namespace=damga-system
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: damga-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: damga
+  namespace: damga-system
+spec:
+  selector:
+    app.kubernetes.io/name: damga
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

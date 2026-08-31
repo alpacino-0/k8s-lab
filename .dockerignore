@@ -14,3 +14,19 @@ app/**
 # Re-include Go module files
 !go.mod
 !go.sum
+
+# And the SQL the stores embed.
+#
+# go:embed is a compile-time read of the filesystem, so a migration missing from
+# the build context is not a runtime surprise — it is "pattern migrations/*.sql:
+# no matching files found" and the build stops. That is the good version of this
+# failure, and it stayed invisible for a different reason: the operator does not
+# import the stores, and until 2026-09-01 the operator was the only thing with a
+# Dockerfile. The first attempt to containerise the control plane hit it
+# immediately.
+!**/migrations/*.sql
+
+# The panel, which package panel embeds the same way. A control plane built
+# without these starts, serves the API, and returns nothing at "/" — which is
+# worse than failing to build, because it looks like it worked.
+!panel/**

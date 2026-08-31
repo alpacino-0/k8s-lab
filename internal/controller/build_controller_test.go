@@ -73,7 +73,14 @@ var _ = Describe("Build Controller", func() {
 	spec := platformv1alpha1.BuildSpec{
 		Repo:     "https://github.com/example/app.git",
 		Revision: rev,
-		Image:    "registry.damga.svc/tenant-a/app",
+		// Named rather than left to detect, and the reason is what this suite
+		// asserts: detect renders two containers — an init that clones and
+		// decides, and a main one carrying the buildpack lifecycle — so
+		// Containers[0] is no longer the thing whose environment and
+		// termination path the specs below read. Naming dockerfile keeps those
+		// assertions pointed at the container they were written about.
+		Builder: platformv1alpha1.BuildDockerfile,
+		Image:   "registry.damga.svc/tenant-a/app",
 	}
 
 	create := func(s platformv1alpha1.BuildSpec) {
