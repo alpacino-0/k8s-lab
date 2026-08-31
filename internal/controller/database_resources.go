@@ -227,7 +227,7 @@ func desiredDatabaseStatefulSet(db *platformv1alpha1.Database) *appsv1.StatefulS
 						}},
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: dataVolume, MountPath: "/var/lib/postgresql/data"},
-							{Name: "run", MountPath: "/var/run/postgresql"},
+							{Name: runVolume, MountPath: "/var/run/postgresql"},
 							{Name: tmpVolume, MountPath: tmpPath},
 						},
 						// pg_isready and not a TCP probe. A socket that accepts
@@ -265,7 +265,7 @@ func desiredDatabaseStatefulSet(db *platformv1alpha1.Database) *appsv1.StatefulS
 						},
 					}},
 					Volumes: []corev1.Volume{
-						{Name: "run", VolumeSource: corev1.VolumeSource{
+						{Name: runVolume, VolumeSource: corev1.VolumeSource{
 							EmptyDir: &corev1.EmptyDirVolumeSource{},
 						}},
 						{Name: tmpVolume, VolumeSource: corev1.VolumeSource{

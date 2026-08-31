@@ -1,0 +1,102 @@
+# Where builds run, and why they do not run beside the applications.
+#
+# ## The measurement that forced this
+#
+# Rootless BuildKit was tried first and does not work on the hosts this platform
+# targets. On Ubuntu 23.10 and later — 24.04 is what a new server gets —
+# unprivileged user namespaces are restricted by AppArmor
+# (kernel.apparmor_restrict_unprivileged_userns=1), so rootlesskit cannot start
+# its child and buildkitd never comes up:
+#
+#     [rootlesskit:parent] error: failed to start the child:
+#     fork/exec /proc/self/exe: operation not permitted
+#
+# That is a host kernel policy, not a pod setting. No Pod Security Admission
+# level fixes it from inside a pod, and the alternative — asking every operator
+# to flip a sysctl on every node before they can deploy anything — is not a
+# one-button product.
+#
+# ## What this costs, said plainly
+#
+# Builds therefore run privileged. That is a real concession and it is worth
+# naming rather than burying: a build container executes code from a
+# repository, and here it does so with the node available to it.
+#
+# The containment is the boundary rather than the pod. Builds get their own
+# namespace, so they are not beside a tenant's data; the namespace carries a
+# quota, so a build cannot starve the cluster; and nothing else is admitted
+# here. Isolating builds onto their own nodes is the next step and is not done.
+#
+# Every platform in this category makes this trade. Coolify runs builds on the
+# Docker daemon that also runs every application on the machine, which is the
+# same concession without the namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: damga-build
+  labels:
+    # Privileged, and only here. Every other namespace this platform creates is
+    # restricted, and the difference is the point: the exemption is a place
+    # rather than an annotation somebody can add to a workload.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    app.kubernetes.io/managed-by: damga
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: build-quota
+  namespace: damga-build
+spec:
+  hard:
+    # Builds are the burstiest thing on a cluster and the only workload here
+    # that is expected to end. Bounded so a queue of them cannot take the
+    # machine away from the applications it is running.
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.memory: 16Gi
+    # A ceiling on concurrency as well as on size. Ten builds each within the
+    # memory limit still add up to more than a small node has.
+    count/jobs.batch: "10"
+    pods: "10"
+---
+# Default-deny is the wrong shape for a build: it has to reach the repository it
+# is cloning, which is on the internet, and a registry. What it must not reach
+# is the rest of the cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: build-egress
+  namespace: damga-build
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    # DNS. Forgetting this is the most common way a policy like this breaks:
+    # every name lookup times out and nothing says why.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The registry the build pushes to.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: damga-registry
+    # Everything off-cluster, minus the private ranges. A build clones from
+    # GitHub and pulls packages from a language registry, so the internet has to
+    # be open; the cluster's own network and the node's metadata service do not.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16

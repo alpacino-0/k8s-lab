@@ -57,8 +57,8 @@ kubectl wait --for=condition=Ready clusterissuer/selfsigned-ca --timeout=180s
 # it is a plain manifest and Terraform's kubernetes_manifest wants a schema at
 # plan time. The wait is on the deployment rather than the release, because a
 # registry that is not serving yet turns the first build into a push timeout.
-log "installing the image registry"
-kubectl apply -f "$ROOT/cluster/registry.yaml"
+log "installing the image registry and the build namespace"
+kubectl apply -f "$ROOT/cluster/registry.yaml" -f "$ROOT/cluster/build-namespace.yaml"
 kubectl -n damga-registry rollout status deployment/registry --timeout=300s
 
 # The half of the registry that lives on the nodes, and the half that is easy to

@@ -89,7 +89,7 @@ jobs:
           ./kubeconform -strict -summary \
             -schema-location default \
             -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
-            policies/ gitops/ cluster/registry.yaml
+            policies/ gitops/ cluster/registry.yaml cluster/build-namespace.yaml
 
       - name: Validate rendered manifests against the Kubernetes schema
         run: |
@@ -277,9 +277,9 @@ jobs:
       # every pull with "no such host" while the build that produced the image
       # succeeded. kind-config.yaml points containerd at the directory; the file
       # has to be written per node because kind cannot place it.
-      - name: Install the image registry
+      - name: Install the image registry and the build namespace
         run: |
-          kubectl apply -f cluster/registry.yaml
+          kubectl apply -f cluster/registry.yaml -f cluster/build-namespace.yaml
           kubectl -n damga-registry rollout status deployment/registry --timeout=300s
           for node in $(kind get nodes --name ci); do
             docker exec "$node" mkdir -p "/etc/containerd/certs.d/${REGISTRY_HOST}"
@@ -578,7 +578,7 @@ jobs:
           kind: Build
           metadata:
             name: ci-build
-            namespace: damga
+            namespace: damga-build
           spec:
             repo: https://github.com/${{ github.repository }}.git
             revision: ${{ github.sha }}
@@ -591,24 +591,24 @@ jobs:
           # fails is a normal outcome of this test and has to be reported with
           # its own message rather than as a timeout.
           for i in $(seq 1 90); do
-            phase=$(kubectl -n damga get build ci-build -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            phase=$(kubectl -n damga-build get build ci-build -o jsonpath='{.status.phase}' 2>/dev/null || true)
             [ "$phase" = Succeeded ] && break
             if [ "$phase" = Failed ]; then
               echo "the build failed:"
-              kubectl -n damga get build ci-build -o jsonpath='{.status.message}'; echo
-              kubectl -n damga logs job/ci-build --tail=60 || true
+              kubectl -n damga-build get build ci-build -o jsonpath='{.status.message}'; echo
+              kubectl -n damga-build logs job/ci-build --tail=60 || true
               exit 1
             fi
             sleep 10
           done
           [ "$phase" = Succeeded ] || {
             echo "the build never finished; phase=$phase"
-            kubectl -n damga describe job ci-build | tail -30
-            kubectl -n damga logs job/ci-build --tail=60 || true
+            kubectl -n damga-build describe job ci-build | tail -30
+            kubectl -n damga-build logs job/ci-build --tail=60 || true
             exit 1
           }
 
-          digest=$(kubectl -n damga get build ci-build -o jsonpath='{.status.digest}')
+          digest=$(kubectl -n damga-build get build ci-build -o jsonpath='{.status.digest}')
           case "$digest" in sha256:*) ;; *) echo "no digest recorded"; exit 1 ;; esac
           echo "built ${digest}"
 
@@ -624,7 +624,7 @@ jobs:
             exit 1
           }
           kubectl -n damga delete pod pull-probe --wait=false
-          kubectl -n damga delete build ci-build
+          kubectl -n damga-build delete build ci-build
 
       - name: Deleting the Workload must leave nothing behind
         run: |

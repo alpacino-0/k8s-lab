@@ -79,6 +79,10 @@ const (
 	// all of them.
 	readyCondition = "Ready"
 
+	// runVolume is the writable /run every hardened container needs: a read-only
+	// root filesystem leaves nowhere for a socket.
+	runVolume = "run"
+
 	// preStop buys the endpoint removal a head start. Without it, a pod is
 	// removed from the Service and its process is killed at the same moment,
 	// and whichever loses that race drops requests that were already in flight.

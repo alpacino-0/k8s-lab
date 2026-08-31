@@ -37,18 +37,17 @@ const (
 
 	buildContainer = "build"
 
-	// buildHome is where the rootless builder keeps everything it writes. Named
-	// once because three things have to agree on it — the mount, HOME, and the
-	// mkdir in the script — and they did not.
-	buildHome      = "/home/user"
 	buildComponent = "build"
 
-	// buildkitImage builds from a Dockerfile without a daemon.
+	// buildkitImage builds from a Dockerfile without a Docker daemon.
 	//
-	// Rootless on purpose and not as hardening theatre: the alternative is
-	// mounting the node's docker.sock into a pod, which is root on the node for
-	// anything that can write a Dockerfile — that is, for every tenant.
-	buildkitImage = "moby/buildkit:v0.27.0-rootless"
+	// Not the rootless variant, which was tried first and does not work on the
+	// hosts this targets: Ubuntu 23.10 and later restrict unprivileged user
+	// namespaces through AppArmor, so rootlesskit cannot start its child and
+	// buildkitd never comes up. That is a host kernel policy and no pod setting
+	// reaches it. cluster/build-namespace.yaml carries the full reasoning and
+	// the boundary that replaces the pod-level one.
+	buildkitImage = "moby/buildkit:v0.27.0"
 )
 
 // buildScript decides how to build and then builds.
@@ -101,16 +100,6 @@ trap 'rc=$?; [ "$rc" = 0 ] || [ -n "$SAID" ] || say "the build exited with statu
 mkdir -p /workspace/src
 cd /workspace/src
 
-# The directories rootlesskit expects to find, created rather than inherited.
-#
-# An emptyDir mounted at .local does not merge with what the image has there —
-# it covers it — so mounting it to make .local/tmp writable removed .local/tmp
-# entirely. The error moved from "read-only file system" to "no such file or
-# directory" and stayed ten seconds behind the real failure either way, arriving
-# as "could not connect to buildkitd.sock". Two rounds for one directory,
-# because a mount that hides is indistinguishable in a diff from a mount that
-# grants.
-mkdir -p "$HOME/.local/tmp" "$HOME/.local/share/buildkit"
 
 git init -q . || fail "could not initialise a repository"
 git remote add origin "$REPO" || fail "could not set the remote to $REPO"
@@ -210,14 +199,15 @@ func desiredBuildJob(b *platformv1alpha1.Build) *batchv1.Job {
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
-					RestartPolicy:                corev1.RestartPolicyNever,
-					AutomountServiceAccountToken: ptr.To(false),
+					RestartPolicy: corev1.RestartPolicyNever,
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot:   ptr.To(true),
-						RunAsUser:      ptr.To(int64(1000)),
-						RunAsGroup:     ptr.To(int64(1000)),
-						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
 					},
+					// Still no token. The concession below is about the node,
+					// not about the API: a build has no business talking to the
+					// control plane, and it reports its result through the
+					// termination log precisely so it never needs to.
+					AutomountServiceAccountToken: ptr.To(false),
 					Containers: []corev1.Container{{
 						Name:    buildContainer,
 						Image:   buildkitImage,
@@ -228,43 +218,20 @@ func desiredBuildJob(b *platformv1alpha1.Build) *batchv1.Job {
 							{Name: "PATH_IN_REPO", Value: b.Spec.Path},
 							{Name: "IMAGE", Value: b.Spec.Image + ":" + b.Spec.Revision},
 							{Name: "METHOD", Value: string(method)},
-							// Set rather than inherited, so the script and the
-							// volume mount below cannot drift: both spell this
-							// path, and one of them changing silently is how
-							// the mount ended up one level too deep.
-							{Name: "HOME", Value: buildHome},
-							// Rootless buildkit needs somewhere writable that
-							// is not the root filesystem.
-							{Name: "XDG_RUNTIME_DIR", Value: buildHome + "/.local/share/buildkit"},
-							{Name: "BUILDKITD_FLAGS", Value: "--oci-worker-no-process-sandbox"},
 						},
 						SecurityContext: &corev1.SecurityContext{
-							AllowPrivilegeEscalation: ptr.To(false),
-							ReadOnlyRootFilesystem:   ptr.To(true),
-							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{capabilityAll}},
-							// RuntimeDefault, and this field is the interesting
-							// one. It first read Unconfined, because rootless
-							// BuildKit needs unprivileged user namespaces and
-							// the usual advice is to unconfine seccomp for it.
-							// Pod Security Admission at `restricted` refuses
-							// exactly that, so every build pod was rejected at
-							// creation.
+							// Privileged, and this is the concession the whole
+							// design turns on. buildkitd creates mount and
+							// network namespaces for each build step; rootless
+							// avoids needing that and is unavailable here.
 							//
-							// The comment beside it had predicted this — "so a
-							// cluster which refuses it fails at admission with a
-							// reason" — and predicting a failure is not the same
-							// as deciding what to do about it. The choice was
-							// between weakening the namespace and finding out
-							// whether the exception is needed at all:
-							// containerd's default profile permits unshare, and
-							// --oci-worker-no-process-sandbox exists so rootless
-							// BuildKit can run without a second sandbox.
-							//
-							// If a kernel or an AppArmor profile refuses this,
-							// the answer is a separate namespace for builds at
-							// the `baseline` level — not an exemption inside a
-							// tenant's.
-							SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+							// Written as one field rather than a list of
+							// capabilities on purpose: CAP_SYS_ADMIN plus mount
+							// is most of privileged with a longer spelling, and
+							// a spec that looks narrow while granting the same
+							// thing is worse than one that says what it does.
+							// Narrowing it is real work and is not done.
+							Privileged: ptr.To(true),
 						},
 						TerminationMessagePath:   BuildResultPath,
 						TerminationMessagePolicy: corev1.TerminationMessageReadFile,
@@ -278,14 +245,8 @@ func desiredBuildJob(b *platformv1alpha1.Build) *batchv1.Job {
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "workspace", MountPath: "/workspace"},
 							{Name: tmpVolume, MountPath: tmpPath},
-							// The whole of .local, not just the buildkit
-							// directory under it. rootlesskit also wants
-							// .local/tmp for its state, which was still on the
-							// read-only root filesystem — so buildkitd never
-							// started and every build died with "could not
-							// connect to buildkitd.sock" ten seconds later,
-							// naming the socket rather than the directory.
-							{Name: "buildkit", MountPath: buildHome + "/.local"},
+							{Name: "buildkit", MountPath: "/var/lib/buildkit"},
+							{Name: runVolume, MountPath: "/run"},
 						},
 					}},
 					Volumes: []corev1.Volume{
@@ -296,6 +257,9 @@ func desiredBuildJob(b *platformv1alpha1.Build) *batchv1.Job {
 							EmptyDir: &corev1.EmptyDirVolumeSource{},
 						}},
 						{Name: "buildkit", VolumeSource: corev1.VolumeSource{
+							EmptyDir: &corev1.EmptyDirVolumeSource{},
+						}},
+						{Name: runVolume, VolumeSource: corev1.VolumeSource{
 							EmptyDir: &corev1.EmptyDirVolumeSource{},
 						}},
 					},
