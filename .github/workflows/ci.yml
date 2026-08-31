@@ -616,8 +616,13 @@ jobs:
           # node's network, can resolve and pull the name the build pushed. That
           # is the redirect this registry exists to make work, and it fails
           # separately from the build.
-          # The probe carries a full restricted security context, which makes
-          # it two assertions rather than one: the kubelet can resolve and pull
+          # The probe carries a full restricted security context and declares
+          # its resources, because the tenant namespace enforces both — and a
+          # probe that cannot satisfy the rules a tenant lives under is not
+          # testing what a tenant would experience. Both were found by the
+          # namespace refusing it, one round each.
+          #
+          # It makes two assertions rather than one: the kubelet can resolve and pull
           # the name the build pushed, and the image the build produced can run
           # under the same rules a tenant's workload does. The first version
           # was a bare `kubectl run` and the namespace refused it — the test
@@ -640,6 +645,10 @@ jobs:
                   "allowPrivilegeEscalation": false,
                   "readOnlyRootFilesystem": true,
                   "capabilities": {"drop": ["ALL"]}
+                },
+                "resources": {
+                  "requests": {"cpu": "10m", "memory": "32Mi"},
+                  "limits": {"memory": "64Mi"}
                 }
               }]
             }
