@@ -70,6 +70,13 @@ type Template struct {
 	// several and this says which one a browser should reach.
 	Port int32
 
+	// Ignore is the header saying this entry is not offered.
+	//
+	// Upstream uses it for templates that are broken, superseded or not meant
+	// to be installed, and 28 of the 371 files carry it. A catalogue that does
+	// not read it lists 28 entries whose own authors withdrew them.
+	Ignore bool
+
 	Services map[string]Service
 }
 
@@ -300,6 +307,8 @@ func Parse(name string, data []byte) (Template, error) {
 					t.Tags = append(t.Tags, tag)
 				}
 			}
+		case "ignore":
+			t.Ignore = value == "true"
 		case "port":
 			// The first of several, because a template that publishes two ports
 			// still has one a browser goes to.
