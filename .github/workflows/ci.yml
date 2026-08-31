@@ -762,6 +762,97 @@ jobs:
           kubectl -n damga delete pod pull-probe --wait=false
           kubectl -n damga-build delete build ci-build
 
+      # The other half of the builder, which until now shipped green and had
+      # never run. The step above uses builder: dockerfile, so every line of the
+      # Cloud Native Buildpacks path — five lifecycle phases, a 1.2 GB builder
+      # image, a run image fetched from Docker Hub — passed CI without being
+      # executed once. That is the same shape as two packages that shipped for
+      # days with a hand-written GO_PKGS list they were missing from.
+      #
+      # builder: buildpack rather than detect, because app/ has a Dockerfile and
+      # detect would correctly choose it. Naming the method is what forces the
+      # path under test.
+      #
+      # Four things are measured here that were guesses. Each is printed whether
+      # the step passes or fails, because a number nobody wrote down is a number
+      # that gets invented again next time.
+      - name: A buildpack build, and what it actually costs
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: platform.damga.co/v1alpha1
+          kind: Build
+          metadata:
+            name: ci-buildpack
+            namespace: damga-build
+          spec:
+            repo: https://github.com/${{ github.repository }}.git
+            revision: ${{ github.sha }}
+            path: app
+            image: ${REGISTRY_HOST}/ci/app-buildpack
+            builder: buildpack
+          EOF
+
+          started=$(date +%s)
+          phase=""
+          # Bounded below the Job's own 30-minute deadline, so a build that is
+          # merely slow is distinguishable from one that the deadline killed.
+          for i in $(seq 1 108); do
+            phase=$(kubectl -n damga-build get build ci-buildpack -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            [ "$phase" = Succeeded ] && break
+            [ "$phase" = Failed ] && break
+            sleep 10
+          done
+          elapsed=$(( $(date +%s) - started ))
+
+          echo "::group::what the buildpack path cost"
+          echo "phase      : ${phase:-<none>} after ${elapsed}s"
+          echo "deadline   : 1800s (Job activeDeadlineSeconds)"
+          # The pull is inside that deadline, which is the thing worth knowing:
+          # a 1.2 GB image on a slow link eats the budget the build needs.
+          kubectl -n damga-build get events --field-selector reason=Pulled \
+            -o custom-columns=OBJ:.involvedObject.name,MSG:.message --no-headers 2>/dev/null | tail -5
+          kubectl -n damga-build get build ci-buildpack \
+            -o jsonpath='{.status.method}{"  "}{.status.digest}{"\n"}' 2>/dev/null || true
+          echo "::endgroup::"
+
+          if [ "$phase" != Succeeded ]; then
+            echo "::group::why it did not succeed"
+            kubectl -n damga-build get build ci-buildpack -o jsonpath='{.status.message}'; echo
+            kubectl -n damga-build describe job ci-buildpack | tail -25
+            kubectl -n damga-build logs job/ci-buildpack --all-containers --tail=80 || true
+            echo "::endgroup::"
+            exit 1
+          fi
+
+          digest=$(kubectl -n damga-build get build ci-buildpack -o jsonpath='{.status.digest}')
+          case "$digest" in sha256:*) ;; *) echo "no digest recorded"; exit 1 ;; esac
+
+          # Second build of the same source, to separate what the 1.2 GB costs
+          # once from what every build costs. Without this the first number is
+          # unattributable.
+          kubectl -n damga-build delete build ci-buildpack
+          cat <<EOF | kubectl apply -f -
+          apiVersion: platform.damga.co/v1alpha1
+          kind: Build
+          metadata:
+            name: ci-buildpack-2
+            namespace: damga-build
+          spec:
+            repo: https://github.com/${{ github.repository }}.git
+            revision: ${{ github.sha }}
+            path: app
+            image: ${REGISTRY_HOST}/ci/app-buildpack
+            builder: buildpack
+          EOF
+          started=$(date +%s)
+          for i in $(seq 1 108); do
+            phase=$(kubectl -n damga-build get build ci-buildpack-2 -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            [ "$phase" = Succeeded ] || [ "$phase" = Failed ] && break
+            sleep 10
+          done
+          echo "second build: $phase after $(( $(date +%s) - started ))s (builder image already on the node)"
+          kubectl -n damga-build delete build ci-buildpack-2 || true
+
       - name: Deleting the Workload must leave nothing behind
         run: |
           kubectl -n damga delete workload ci-probe --wait=true
