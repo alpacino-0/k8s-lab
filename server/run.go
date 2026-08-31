@@ -198,6 +198,7 @@ type stores struct {
 	evidence  evidence.Store
 	placement placement.Store
 	backups   BackupReader
+	builds    BuildCreator
 	writer    *gitwrite.Writer
 	gitAuth   GitAuth
 }
@@ -214,6 +215,17 @@ var tenantRoutes = []struct {
 	handler func(guard, stores) http.Handler
 }{
 	{http.MethodGet, "/apps", apps},
+	// The first link in the chain. Nothing wrote to the placement store before
+	// this one, so every route below it described something that could only be
+	// brought into existence by hand.
+	{http.MethodPost, "/apps", createApp},
+	// Deletes the record and not the app: the manifests stay committed, what is
+	// running keeps running, and the deploy history stays readable.
+	{http.MethodDelete, "/apps/{app}", deleteApp},
+	// The one endpoint that would write to the cluster rather than to git, and
+	// the reason that is not a breach of Principle 1: a build stands in front of
+	// the write path, producing a digest that a later commit carries.
+	{http.MethodPost, "/apps/{app}/builds", createBuild},
 	{http.MethodGet, "/apps/{app}/envs/{env}/evidence", currentEvidence},
 	{http.MethodGet, "/apps/{app}/envs/{env}/history", history},
 	{http.MethodGet, "/apps/{app}/envs/{env}/verify", verify},
@@ -260,8 +272,8 @@ func (o Options) handler(store evidence.Store, idStore identity.Store) (http.Han
 	g := guard{authorizer: o.Authorizer, identity: idStore, sessions: sess}
 	st := stores{
 		evidence: store, placement: o.Placement,
-		backups: o.Backups,
-		writer:  &gitwrite.Writer{Evidence: store}, gitAuth: o.GitAuth,
+		backups: o.Backups, builds: o.Builds,
+		writer: &gitwrite.Writer{Evidence: store}, gitAuth: o.GitAuth,
 	}
 	for _, rt := range tenantRoutes {
 		mux.Handle(rt.method+" "+tenantScope+rt.suffix, rt.handler(g, st))

@@ -108,6 +108,27 @@ func (s *Store) Put(ctx context.Context, p placement.Placement) (placement.Place
 			"%w: repository %q belongs to another tenant", placement.ErrConflict, p.RepoURL)
 	}
 
+	// The namespace claim, the same way and for the reason in
+	// 0003_namespace_owner.sql: the repository claim protects what gets
+	// committed, this one protects where it runs. Both are taken before the
+	// placement row is written and inside one transaction, so a placement
+	// refused on its namespace rolls the repository claim back with it.
+	if _, err := tx.ExecContext(ctx, s.d.Rebind(`
+		INSERT INTO namespace_owner (namespace, tenant_id, claimed_at) VALUES (?, ?, ?)
+		ON CONFLICT (namespace) DO NOTHING`),
+		p.Namespace, p.TenantID, asText(now)); err != nil {
+		return placement.Placement{}, err
+	}
+	var nsOwner string
+	if err := tx.QueryRowContext(ctx, s.d.Rebind(
+		`SELECT tenant_id FROM namespace_owner WHERE namespace = ?`), p.Namespace).Scan(&nsOwner); err != nil {
+		return placement.Placement{}, err
+	}
+	if nsOwner != p.TenantID {
+		return placement.Placement{}, fmt.Errorf(
+			"%w: namespace %q belongs to another tenant", placement.ErrConflict, p.Namespace)
+	}
+
 	// CreatedAt is preserved across a replace: moving an app to another
 	// directory is not the app coming into existence.
 	var created string
@@ -135,9 +156,9 @@ func (s *Store) Put(ctx context.Context, p placement.Placement) (placement.Place
 		return placement.Placement{}, err
 	}
 
-	// A replace can be the last thing pointing at the OLD repository, which
-	// then has to be released — otherwise moving an app between repositories
-	// leaves one nobody can ever claim again.
+	// A replace can be the last thing pointing at the OLD repository or the old
+	// namespace, either of which then has to be released — otherwise moving an
+	// app leaves one nobody can ever claim again.
 	if err := releaseUnused(ctx, tx, s.d); err != nil {
 		return placement.Placement{}, err
 	}
@@ -239,13 +260,19 @@ func (s *Store) RepoOwner(ctx context.Context, repoURL string) (string, error) {
 // Close releases the pool.
 func (s *Store) Close() error { return s.db.Close() }
 
-// releaseUnused drops the claim on any repository nothing points at any more.
-// Called inside the same transaction as the write that may have orphaned it,
-// so there is no window in which a repository is unreferenced and still owned.
+// releaseUnused drops the claim on any repository or namespace nothing points
+// at any more. Called inside the same transaction as the write that may have
+// orphaned it, so there is no window in which one is unreferenced and still
+// owned.
 func releaseUnused(ctx context.Context, tx *sql.Tx, d Dialect) error {
-	_, err := tx.ExecContext(ctx, d.Rebind(`
+	if _, err := tx.ExecContext(ctx, d.Rebind(`
 		DELETE FROM repo_owner
-		WHERE repo_url NOT IN (SELECT repo_url FROM placement)`))
+		WHERE repo_url NOT IN (SELECT repo_url FROM placement)`)); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, d.Rebind(`
+		DELETE FROM namespace_owner
+		WHERE namespace NOT IN (SELECT namespace FROM placement)`))
 	return err
 }
 

@@ -192,6 +192,19 @@ type Options struct {
 	// than reporting an app's backups as absent.
 	Backups BackupReader
 
+	// Builds creates Build resources in the cluster. nil refuses every build
+	// with 501, which is what this build does.
+	//
+	// It has no default, and the missing default is the point: creating a Build
+	// is the one thing in this server that would write to the cluster, and this
+	// control plane is not in one — it is not containerised and the chart does
+	// not deploy it, so there is no ServiceAccount for a Role to be bound to. A
+	// default implementation here would turn that into a Forbidden from the API
+	// server at the moment somebody presses build, which reads as a broken
+	// platform rather than as an install that cannot do this yet. See
+	// createBuild.
+	Builds BuildCreator
+
 	// GitAuth answers how to authenticate to a repository. nil means the
 	// free build's answer, built from Config.GitTokenFile — and with no token
 	// configured, a deploy is refused with a message that says which flag is

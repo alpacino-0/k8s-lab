@@ -163,5 +163,6 @@ func callRoute(
 // future endpoint needs something the guard cannot give it, that is a design
 // question, not a signature to widen.
 var _ = []func(guard, stores) http.Handler{
-	apps, currentEvidence, history, verify, retention, export, deployRoute,
+	apps, createApp, deleteApp, createBuild,
+	currentEvidence, history, verify, retention, export, deployRoute,
 }

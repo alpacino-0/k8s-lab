@@ -55,8 +55,10 @@ func Run(t *testing.T, newStore Factory) {
 		{"PutReplacesWithoutMovingCreatedAt", testPutReplacesWithoutMovingCreatedAt},
 		{"ListIsScopedToOneTenantAndOrdered", testListIsScopedToOneTenantAndOrdered},
 		{"ARepositoryBelongsToOneTenant", testARepositoryBelongsToOneTenant},
+		{"ANamespaceBelongsToOneTenant", testANamespaceBelongsToOneTenant},
 		{"ConcurrentClaimsOfOneRepositoryAgree", testConcurrentClaimsOfOneRepositoryAgree},
 		{"DeletingTheLastPlacementReleasesTheRepository", testDeletingTheLastPlacementReleasesTheRepository},
+		{"DeletingTheLastPlacementReleasesTheNamespace", testDeletingTheLastPlacementReleasesTheNamespace},
 		{"AnUnusablePlacementIsRefused", testAnUnusablePlacementIsRefused},
 		{"NotFoundIsDistinguishable", testNotFoundIsDistinguishable},
 	}
@@ -70,6 +72,16 @@ func place(tenant, app, env, repo, path string) placement.Placement {
 		TenantID: tenant, App: app, Env: env,
 		RepoURL: repo, Branch: "main", Path: path, Namespace: app + "-" + env,
 	}
+}
+
+// sharedNamespace is the one both tenants ask for in the namespace cases below.
+// It is chosen rather than derived from the app, because the whole question
+// there is what happens when two tenants name the same one.
+const sharedNamespace = "acme-prod"
+
+func inSharedNamespace(p placement.Placement) placement.Placement {
+	p.Namespace = sharedNamespace
+	return p
 }
 
 func mustPut(t *testing.T, s placement.Store, p placement.Placement) placement.Placement {
@@ -273,6 +285,71 @@ func testConcurrentClaimsOfOneRepositoryAgree(t *testing.T, newStore Factory) {
 	if owner != won[0] {
 		t.Errorf("RepoOwner = %q but %q was told it won", owner, won[0])
 	}
+}
+
+// The invariant one layer out from the repository claim: one namespace never
+// holds two tenants.
+//
+// The repository claim protects what gets committed. This protects where it
+// runs — the namespace is what the ResourceQuota, the Pod Security Admission
+// level and the NetworkPolicy are attached to, so a tenant that could name a
+// namespace another tenant is using would be deploying inside somebody else's
+// fence. Nothing above this store can refuse it: by the time a manifest is
+// rendered the namespace is already in it, and the request that got there was a
+// well-formed one from an ordinary member of an ordinary tenant.
+func testANamespaceBelongsToOneTenant(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	mustPut(t, s, inSharedNamespace(place(tenantA, "api", prod, repoA, "apps/api/prod")))
+
+	// A different tenant, a different repository, a different app — and the
+	// same namespace, which is the only thing that matters here.
+	_, err := s.Put(ctx, inSharedNamespace(place(tenantB, "billing", prod, repoB, "apps/billing/prod")))
+	if !errors.Is(err, placement.ErrConflict) {
+		t.Fatalf("placing another tenant's app in the same namespace returned %v, want ErrConflict", err)
+	}
+	if _, err := s.Get(ctx, tenantB, "billing", prod); !errors.Is(err, placement.ErrNotFound) {
+		t.Error("the refused placement was written anyway")
+	}
+	// And the refusal took the repository claim down with it. Without this the
+	// loser has claimed repoB on its way to being told no, and can never place
+	// anything there again.
+	if owner, err := s.RepoOwner(ctx, repoB); err != nil || owner != "" {
+		t.Errorf("a placement refused on its namespace claimed its repository: %q, %v", owner, err)
+	}
+
+	// The owner may keep putting its own apps in its own namespace: one
+	// namespace per tenant and environment is the arrangement, not one per app.
+	mustPut(t, s, inSharedNamespace(place(tenantA, "web", prod, repoA, "apps/web/prod")))
+}
+
+// A namespace stays claimed while anything points at it and is released when
+// nothing does. Released independently of the repository, because an app that
+// moves between namespaces keeps its repository and the reverse is also true.
+func testDeletingTheLastPlacementReleasesTheNamespace(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	mustPut(t, s, inSharedNamespace(place(tenantA, "api", prod, repoA, "apps/api/prod")))
+	mustPut(t, s, inSharedNamespace(place(tenantA, "web", prod, repoA, "apps/web/prod")))
+
+	if err := s.Delete(ctx, tenantA, "api", prod); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	// Still claimed: web is still in it, so tenantB must still be refused.
+	_, err := s.Put(ctx, inSharedNamespace(place(tenantB, "billing", prod, repoB, "apps/billing/prod")))
+	if !errors.Is(err, placement.ErrConflict) {
+		t.Fatalf("the namespace was released while a placement still pointed at it: %v", err)
+	}
+
+	if err := s.Delete(ctx, tenantA, "web", prod); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	// And now somebody else can have it. Without the release, a tenant that is
+	// removed and re-created leaves a namespace nobody can ever use again and
+	// the only fix is editing the database.
+	mustPut(t, s, inSharedNamespace(place(tenantB, "billing", prod, repoB, "apps/billing/prod")))
 }
 
 // A repository stays claimed while anything points at it and is released when
