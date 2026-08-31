@@ -60,22 +60,51 @@ const (
 const buildScript = `set -eu
 : "${REPO:?}" "${REVISION:?}" "${IMAGE:?}" "${METHOD:?}"
 
-fail() {
-  printf '{"method":"%s","message":%s}' "${RAN:-unknown}" "$(printf '%s' "$1" | head -c 900 | sed 's/\\/\\\\/g; s/"/\\"/g; s/$/\\n/' | tr -d '\n' | sed 's/^/"/; s/$/"/')" \
+RAN=unknown
+SAID=
+
+say() {
+  SAID=1
+  printf '{"method":"%s","message":%s}' "$RAN" \
+    "$(printf '%s' "$1" | head -c 900 | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\n' | sed 's/^/"/; s/$/"/')" \
     > ` + BuildResultPath + `
-  exit 1
 }
 
-cd /workspace
-git init -q .
-git remote add origin "$REPO"
+fail() { say "$1"; exit 1; }
+
+# Anything that exits without having written a result writes one here.
+#
+# Added because the first real build died on a git command that had no || fail
+# after it, so set -e killed the script before anything reached the termination
+# log. The control plane then had only the Job's own condition — "backoff limit
+# exceeded" — while the actual reason sat in a pod log nobody was reading. A
+# handler that only covers the failures it anticipated is a handler for the
+# failures that do not happen.
+# Guarded on SAID, because fail() writes and then exits — which fires this trap,
+# which would otherwise overwrite the specific message with the generic one. The
+# first version did exactly that, and the only reason it was not shipped is that
+# reading it back was cheaper than watching it run.
+trap 'rc=$?; [ "$rc" = 0 ] || [ -n "$SAID" ] || say "the build exited with status $rc; see the job log"' EXIT
+
+# A subdirectory the container creates itself, not the mount point.
+#
+# /workspace is an emptyDir and belongs to root; git refuses to operate on a
+# repository whose directory somebody else owns ("detected dubious ownership")
+# and this container is uid 1000. Creating the directory here makes the
+# container its owner, which is the answer git is actually asking for —
+# safe.directory would tell git to stop checking instead.
+mkdir -p /workspace/src
+cd /workspace/src
+
+git init -q . || fail "could not initialise a repository"
+git remote add origin "$REPO" || fail "could not set the remote to $REPO"
 # One commit, not a history. A shallow fetch of the exact revision is the
 # difference between seconds and minutes on a repository with any age, and
 # nothing here reads the log.
 git fetch -q --depth 1 origin "$REVISION" || fail "could not fetch $REVISION from $REPO"
 git checkout -q FETCH_HEAD || fail "could not check out $REVISION"
 
-SRC="/workspace${PATH_IN_REPO:+/$PATH_IN_REPO}"
+SRC="/workspace/src${PATH_IN_REPO:+/$PATH_IN_REPO}"
 [ -d "$SRC" ] || fail "the path $PATH_IN_REPO does not exist in this repository"
 
 RAN="$METHOD"
@@ -89,9 +118,7 @@ case "$RAN" in
     buildctl-daemonless.sh build \
       --frontend dockerfile.v0 \
       --local context="$SRC" --local dockerfile="$SRC" \
-      --output "type=image,name=${IMAGE},push=true" \
-      --export-cache "type=inline" \
-      --import-cache "type=registry,ref=${IMAGE%:*}:cache" \
+      --output "type=image,name=${IMAGE},push=true,registry.insecure=true" \
       --metadata-file /tmp/meta.json || fail "the Dockerfile build failed"
     DIGEST=$(sed -n 's/.*"containerimage.digest":"\([^"]*\)".*/\1/p' /tmp/meta.json)
     ;;
@@ -100,10 +127,6 @@ case "$RAN" in
     # daemonless — which is why it and not the pack CLI, since pack needs a
     # Docker daemon — but it is five phases with their own cache layout, and a
     # half-wired one would report a digest for an image nobody can run.
-    #
-    # Failing loudly with the reason beats a partial implementation: a user with
-    # no Dockerfile is told exactly what is missing, rather than getting a build
-    # that succeeds and produces something broken.
     fail "this repository has no Dockerfile, and language detection is not built yet"
     ;;
 esac
