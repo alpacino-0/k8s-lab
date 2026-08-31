@@ -115,11 +115,17 @@ fi
 case "$RAN" in
   dockerfile)
     [ -f "$SRC/Dockerfile" ] || fail "builder is dockerfile but this repository has none"
+    # stderr kept rather than discarded. The first run of this reported "the
+    # Dockerfile build failed", which is true of every failure and says nothing;
+    # the actual reason — a directory that was still read-only — was in a pod
+    # log the control plane never reads. A build fails for reasons that belong
+    # to the user's code, so the user's own tool has to be the one talking.
     buildctl-daemonless.sh build \
       --frontend dockerfile.v0 \
       --local context="$SRC" --local dockerfile="$SRC" \
       --output "type=image,name=${IMAGE},push=true,registry.insecure=true" \
-      --metadata-file /tmp/meta.json || fail "the Dockerfile build failed"
+      --metadata-file /tmp/meta.json 2>/tmp/build.err \
+      || fail "$(tail -c 700 /tmp/build.err)"
     DIGEST=$(sed -n 's/.*"containerimage.digest":"\([^"]*\)".*/\1/p' /tmp/meta.json)
     ;;
   buildpack)
@@ -251,7 +257,14 @@ func desiredBuildJob(b *platformv1alpha1.Build) *batchv1.Job {
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "workspace", MountPath: "/workspace"},
 							{Name: tmpVolume, MountPath: tmpPath},
-							{Name: "buildkit", MountPath: "/home/user/.local/share/buildkit"},
+							// The whole of .local, not just the buildkit
+							// directory under it. rootlesskit also wants
+							// .local/tmp for its state, which was still on the
+							// read-only root filesystem — so buildkitd never
+							// started and every build died with "could not
+							// connect to buildkitd.sock" ten seconds later,
+							// naming the socket rather than the directory.
+							{Name: "buildkit", MountPath: "/home/user/.local"},
 						},
 					}},
 					Volumes: []corev1.Volume{
