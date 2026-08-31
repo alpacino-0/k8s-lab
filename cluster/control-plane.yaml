@@ -172,6 +172,21 @@ spec:
             - -observe-deploys
             - -leader-elect
             - -leader-election-namespace=damga-system
+            # The registry a build pushes to, passed rather than compiled in.
+            #
+            # This value has to equal the Service in cluster/registry.yaml, and
+            # saying so here is the whole reason it is a flag: the same string
+            # already lives in that manifest and in CI's REGISTRY_HOST, and two
+            # separate things in this repository have already cost a round by
+            # holding one string in three places and drifting.
+            #
+            # Deliberately not validated by the server, which the session that
+            # wrote the flag reported rather than fixed: an operator who puts a
+            # tag here (host:5000/ci:v1) gets a composite whose last segment is
+            # still clean, so the image rule does not catch it and the push
+            # fails instead. Not tenant-reachable, so it is an operator's own
+            # mistake — but it is one this line has to not make.
+            - -registry=registry.damga-registry.svc:5000
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
