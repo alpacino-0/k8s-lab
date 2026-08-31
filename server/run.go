@@ -199,8 +199,14 @@ type stores struct {
 	placement placement.Store
 	backups   BackupReader
 	builds    BuildCreator
-	writer    *gitwrite.Writer
-	gitAuth   GitAuth
+	// registry is not a store, and it is here because the route table gives a
+	// handler exactly two arguments. It is install-wide configuration a handler
+	// needs, which is the same kind of thing gitAuth already is — and unlike
+	// the deliberate exclusion above, a registry host cannot answer who is
+	// asking.
+	registry string
+	writer   *gitwrite.Writer
+	gitAuth  GitAuth
 }
 
 // tenantRoutes is every endpoint under tenantScope.
@@ -272,7 +278,7 @@ func (o Options) handler(store evidence.Store, idStore identity.Store) (http.Han
 	g := guard{authorizer: o.Authorizer, identity: idStore, sessions: sess}
 	st := stores{
 		evidence: store, placement: o.Placement,
-		backups: o.Backups, builds: o.Builds,
+		backups: o.Backups, builds: o.Builds, registry: o.Config.Registry,
 		writer: &gitwrite.Writer{Evidence: store}, gitAuth: o.GitAuth,
 	}
 	for _, rt := range tenantRoutes {
@@ -378,6 +384,12 @@ func (o Options) withDefaults() Options {
 	}
 	if o.Config.ShutdownTimeout == 0 {
 		o.Config.ShutdownTimeout = 15 * time.Second
+	}
+	if o.Config.Registry == "" {
+		// The same value BindFlags gives the flag, named rather than repeated.
+		// A caller that builds Options directly took no flags, and a build with
+		// no registry would compose an image reference that begins with a slash.
+		o.Config.Registry = defaultRegistry
 	}
 	return o
 }

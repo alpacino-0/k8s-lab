@@ -77,7 +77,7 @@ func TestEveryTenantRouteIsGuarded(t *testing.T) {
 	}
 
 	sess := &auth.Sessions{Store: idStore, TTL: time.Hour}
-	cookie, err := sess.Issue(ctx, "a_member", "damga.example.test")
+	cookie, err := sess.Issue(ctx, "a_member", testHost)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
@@ -150,7 +150,7 @@ func callRoute(
 	// which runs before anything reads one, and a handler that rejects the
 	// body afterwards has already proved the point.
 	req := httptest.NewRequest(method, target, strings.NewReader("{}"))
-	req.Host = "damga.example.test"
+	req.Host = testHost
 	if cookie != nil {
 		req.AddCookie(cookie)
 	}

@@ -97,6 +97,19 @@ type Config struct {
 	// used. Zero is twelve hours.
 	SessionTTL time.Duration
 
+	// Registry is where a build pushes when the request does not name an image.
+	//
+	// Configuration rather than a constant because it is an install-wide answer
+	// that differs per install, and the shape it replaces made every install
+	// with a registry of its own send an image on every single request. Empty
+	// means defaultRegistry — the platform's own in-cluster registry — so the
+	// zero value is still a complete installation.
+	//
+	// No credentials travel with it. A registry that needs authentication is a
+	// pull secret on the build's ServiceAccount, which is the build's business
+	// and not a field the control plane holds.
+	Registry string
+
 	// GitTokenFile is the path to a file holding the token damga pushes with.
 	//
 	// A file and not a flag value or an environment variable. A flag is in the
@@ -133,6 +146,8 @@ func (c *Config) BindFlags(f *flag.FlagSet) {
 		"how long to wait for in-flight requests on shutdown")
 	f.DurationVar(&c.SessionTTL, "session-ttl", 12*time.Hour,
 		"how long a login lasts")
+	f.StringVar(&c.Registry, "registry", defaultRegistry,
+		"registry a build pushes to when the request does not name an image")
 	f.StringVar(&c.GitTokenFile, "git-token-file", "",
 		"file holding the token damga pushes tenant repositories with")
 	f.BoolVar(&c.SecureCookies, "secure-cookies", false,

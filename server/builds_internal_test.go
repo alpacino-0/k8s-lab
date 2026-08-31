@@ -35,6 +35,11 @@ import (
 const (
 	testRevision = "0123456789abcdef0123456789abcdef01234567"
 	sourceRepo   = "https://github.com/acme/api"
+
+	// Deliberately not defaultRegistry. A case that asserts the default by
+	// composing it from the same constant the code reads passes whatever the
+	// value is; this one fails if the configured registry is ignored.
+	testRegistry = "registry.example.test:5000"
 )
 
 // recordingCreator stands in for the cluster. It keeps what it was handed,
@@ -96,7 +101,7 @@ func TestBuildForRefusesWhatTheCRDWouldRefuse(t *testing.T) {
 			Image: "registry.damga-registry.svc:5000/t_home/api:v1"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if _, err := buildFor(tenantHome, appAPI, c.req); err == nil {
+			if _, err := buildFor(testRegistry, tenantHome, appAPI, c.req); err == nil {
 				t.Error("accepted")
 			}
 		})
@@ -110,7 +115,7 @@ func TestBuildForRefusesWhatTheCRDWouldRefuse(t *testing.T) {
 // version of the CRD rule refused, on the first build that ever ran. The rule
 // is copied here, so the trap is copied here too unless something holds it.
 func TestBuildForAcceptsARegistryWithAPort(t *testing.T) {
-	got, err := buildFor(tenantHome, appAPI, createBuildRequest{
+	got, err := buildFor(testRegistry, tenantHome, appAPI, createBuildRequest{
 		Repo: sourceRepo, Revision: testRevision,
 		Image: "registry.damga-registry.svc:5000/ci/app",
 	})
@@ -124,7 +129,7 @@ func TestBuildForAcceptsARegistryWithAPort(t *testing.T) {
 
 // What a request with nothing optional in it becomes.
 func TestBuildForFillsInWhatTheRequestLeftOut(t *testing.T) {
-	got, err := buildFor(tenantHome, appAPI, createBuildRequest{
+	got, err := buildFor(testRegistry, tenantHome, appAPI, createBuildRequest{
 		Repo: sourceRepo, Revision: testRevision,
 	})
 	if err != nil {
@@ -149,7 +154,7 @@ func TestBuildForFillsInWhatTheRequestLeftOut(t *testing.T) {
 	if got.Spec.Builder != platformv1alpha1.BuildDetect {
 		t.Errorf("Builder = %q, want it set rather than left for the CRD default", got.Spec.Builder)
 	}
-	if want := defaultRegistry + "/" + tenantHome + "/api"; got.Spec.Image != want {
+	if want := testRegistry + "/" + tenantHome + "/api"; got.Spec.Image != want {
 		t.Errorf("Image = %q, want %q", got.Spec.Image, want)
 	}
 	// Every build of every tenant shares one namespace, so the object itself

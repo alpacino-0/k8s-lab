@@ -49,16 +49,22 @@ const (
 	// objects in it. They have to agree, and nothing checks that they do.
 	BuildNamespace = "damga-build"
 
-	// defaultRegistry is where a build pushes when the request does not say.
+	// defaultRegistry is what Config.Registry falls back to: the platform's own
+	// in-cluster registry, from cluster/registry.yaml. The port is fixed rather
+	// than allocated because containerd's redirect names it in a file written
+	// when the node is created.
 	//
-	// The platform's own in-cluster registry, from cluster/registry.yaml. The
-	// port is fixed rather than allocated because containerd's redirect names
-	// it in a file written when the node is created.
+	// The one literal, read by BindFlags for the flag's default and by
+	// withDefaults for an Options nobody passed a flag to. Both readers name
+	// this identifier rather than repeating the string, because a value written
+	// out twice is a value that disagrees with itself later — this repository
+	// lost two CI rounds to buildHome being spelled in three places, and had an
+	// operator reconcile a type it had never heard of because a kustomization
+	// list was maintained by hand.
 	//
-	// A constant and not configuration, which is the shortcut in this file. An
-	// install whose registry is somewhere else has to send an image with every
-	// request; it cannot set a different default. That belongs in Config beside
-	// the other install-wide answers, and is not there yet.
+	// The deployed value does not come from here at all. cluster/control-plane.yaml
+	// passes -registry, so what a real install pushes to is read from the Service
+	// in cluster/registry.yaml rather than from this file.
 	defaultRegistry = "registry.damga-registry.svc:5000"
 )
 
@@ -147,7 +153,7 @@ func createBuild(g guard, st stores) http.Handler {
 			problem(w, http.StatusBadRequest, "the request body is not the expected JSON")
 			return
 		}
-		build, err := buildFor(ref.TenantID, ref.App, req)
+		build, err := buildFor(st.registry, ref.TenantID, ref.App, req)
 		if err != nil {
 			problem(w, http.StatusBadRequest, err.Error())
 			return
@@ -196,7 +202,7 @@ func createBuild(g guard, st stores) http.Handler {
 // build needs a full 40-character commit sha" instead of a CEL rule quoted back
 // at them. If the two ever drift, the CRD still refuses; what is lost is the
 // sentence, not the guarantee.
-func buildFor(tenantID, app string, req createBuildRequest) (*platformv1alpha1.Build, error) {
+func buildFor(registry, tenantID, app string, req createBuildRequest) (*platformv1alpha1.Build, error) {
 	repo := strings.TrimSpace(req.Repo)
 	revision := strings.TrimSpace(req.Revision)
 	path := strings.TrimSpace(req.Path)
@@ -234,7 +240,12 @@ func buildFor(tenantID, app string, req createBuildRequest) (*platformv1alpha1.B
 		// that stopped being true. Underscores are legal in a registry path
 		// component, which is why the id can go in unaltered where it cannot go
 		// into an object name.
-		image = defaultRegistry + "/" + tenantID + "/" + app
+		//
+		// The registry is passed in rather than read from the constant, so that
+		// this function has no opinion about which install it is running in and
+		// an install whose registry is elsewhere does not have to name an image
+		// on every request.
+		image = registry + "/" + tenantID + "/" + app
 	}
 	// The CRD's own rule, and the trap it records: the tag is looked for in the
 	// last path segment and not in the whole string, because a registry carries

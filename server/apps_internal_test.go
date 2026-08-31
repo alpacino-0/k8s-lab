@@ -55,6 +55,12 @@ const (
 	pathAPIProd = "apps/api/prod"
 	branchMain  = "main"
 
+	// The host every session in these cases is issued for. A session is bound
+	// to it, so a request that arrives with a different Host resolves to no
+	// session at all — which is the point of the binding and a confusing way
+	// for a case to fail if the two are spelled apart.
+	testHost = "damga.example.test"
+
 	accOwner  = "a_owner"
 	accMember = "a_member"
 	accViewer = "a_viewer"
@@ -74,6 +80,10 @@ type harness struct {
 	stores  stores
 	places  *placementmem.Store
 	records evidence.Store
+	// idStore is kept so a case can go through Options.handler rather than
+	// through a stores this file assembled — the wiring between the two is
+	// itself something to test.
+	idStore identity.Store
 	cookies map[string]*http.Cookie
 }
 
@@ -115,7 +125,7 @@ func newHarness(t *testing.T) *harness {
 		}); err != nil {
 			t.Fatalf("AddMember %s: %v", who.id, err)
 		}
-		cookie, err := sess.Issue(ctx, who.id, "damga.example.test")
+		cookie, err := sess.Issue(ctx, who.id, testHost)
 		if err != nil {
 			t.Fatalf("Issue %s: %v", who.id, err)
 		}
@@ -132,9 +142,15 @@ func newHarness(t *testing.T) *harness {
 		guard: guard{authorizer: authz.Authorizer(rbac.New()), identity: idStore, sessions: sess},
 		stores: stores{
 			evidence: records, placement: places, gitAuth: noAuth{},
+			// What withDefaults would have put here. Set rather than left
+			// empty: a stores built by hand is the one place the defaulting in
+			// Run does not run, and a build with no registry composes an image
+			// reference that begins with a slash.
+			registry: testRegistry,
 		},
 		places:  places,
 		records: records,
+		idStore: idStore,
 		cookies: cookies,
 	}
 }
@@ -152,7 +168,7 @@ func (h *harness) call(
 
 	target := strings.NewReplacer("{tenant}", tenant, "{app}", app).Replace(tenantScope + suffix)
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
-	req.Host = "damga.example.test"
+	req.Host = testHost
 	if account != "" {
 		req.AddCookie(h.cookies[account])
 	}
