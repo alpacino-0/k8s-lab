@@ -122,7 +122,97 @@ kubectl get namespace damga -o jsonpath='{.metadata.labels}' | tr ',' '\n'
 > its filesystem, and needs to reach the internet. Nothing verifies an image
 > now. That is a deliberate trade, recorded rather than quietly dropped.
 
-## 5. Database credentials
+## 5. The image store
+
+Needed as soon as the platform builds anything: a build pushes an image here and
+the kubelet pulls it back out. Nothing else on this page depends on it.
+
+```bash
+kubectl apply -f cluster/registry.yaml -f cluster/build-namespace.yaml
+kubectl -n damga-registry rollout status deployment/registry --timeout=300s
+```
+
+That is one half of it. The other half is on the node, and it is the half that
+gets missed, because the build that produced the image succeeds either way and
+the failure arrives later, as a pull.
+
+A build pushes to `registry.damga-registry.svc:5000`, and the reference recorded
+for the deploy is that exact string. containerd runs on the host rather than in
+the cluster, does not use cluster DNS, and answers every pull of that name with
+`no such host`. So the node is told once that this one name is served by the
+registry's NodePort. kind gets that from `kind-config.yaml` and
+`scripts/bootstrap.sh`. k3s takes a file, on **every** node:
+
+```bash
+# on the server, as root
+cat > /etc/rancher/k3s/registries.yaml <<'YAML'
+mirrors:
+  "registry.damga-registry.svc:5000":
+    endpoint:
+      - "http://127.0.0.1:30500"
+YAML
+```
+
+```bash
+systemctl restart k3s      # on a node that is not the server: k3s-agent
+```
+
+**The restart is what applies it.** k3s reads this file at start-up and writes
+containerd's own configuration from it; edited afterwards it changes nothing,
+and nothing says so. Measured: a second mirror added to the file left
+containerd's copy untouched until k3s restarted, and appeared immediately after.
+
+Both halves, checked:
+
+```bash
+sudo cat "/var/lib/rancher/k3s/agent/etc/containerd/certs.d/registry.damga-registry.svc:5000/hosts.toml"
+```
+
+```bash
+sudo crictl pull registry.damga-registry.svc:5000/<repository>:<tag>
+```
+
+A pull that succeeds is the whole thing proved: the node cannot resolve that
+name at all, so the only way the bytes arrive is the redirect. Two notes on that
+command:
+
+- `sudo k3s crictl`, the form older guides use, is not a subcommand any more —
+  on v1.34.1+k3s1 it answers `No help topic for 'crictl'`. Plain `crictl` is a
+  symlink to the same binary and works.
+- `127.0.0.1` rather than the node's address, because kube-proxy's iptables
+  proxier deliberately makes NodePorts reachable on loopback: it sets
+  `route_localnet=1` and logs that it has. A cluster that turns that off
+  (`--iptables-localhost-nodeports=false`, or a `--nodeport-addresses` that
+  filters loopback) wants the node's own address here instead.
+
+### What keeps it off the disk
+
+`cluster/registry.yaml` also installs a CronJob that sweeps the store at 03:17
+each night: it keeps the ten newest builds of each application and collects the
+rest, blobs included. Without it the 10Gi claim is a date rather than a size — a
+registry removes nothing on its own.
+
+Two consequences, better met here than in production:
+
+- Rolling back further than ten builds of an application finds no image and says
+  so as an `ImagePullBackOff`. The commit it was named after is still there, and
+  building it again produces the same image.
+- The bound is per application, not per cluster. Ten applications keep ten
+  builds each, so raise the claim before adding applications rather than after.
+
+`./scripts/registry-gc-test.sh` proves the sweep against a running cluster: it
+pushes three images, collects with the retention set to one, and asserts that
+the old image's bytes are gone, that the current one still downloads whole, and
+that the store on the volume shrank.
+
+> **What was measured here.** Everything in this section ran against k3s
+> v1.34.1+k3s1 and, for the sweep, a three-node kind cluster as well: the two
+> manifests, the generated `hosts.toml` and its path, the pull through the
+> redirect, the restart requirement, and all six assertions of the test. Not
+> run: `systemctl restart k3s` — that k3s was restarted whole rather than
+> through its unit.
+
+## 6. Database credentials
 
 The password never goes into a values file or a shell history:
 
@@ -137,7 +227,7 @@ kubectl -n damga create secret generic db-credentials \
 `postgres.auth.existingSecret`, so the chart renders no PostgreSQL secret of its
 own — the credentials exist only in the cluster, never in this repository.
 
-## 6. Deploy
+## 7. Deploy
 
 ```bash
 helm upgrade --install app ./chart \
@@ -160,7 +250,7 @@ public address is the difference between a limit and a suggestion.
 `WaitForFirstConsumer` storage class and stays `Pending` until the first backup
 job mounts it, which would block the release forever.
 
-## 7. Verify
+## 8. Verify
 
 ```bash
 curl -sI https://demo.your-domain.com | head -3          # 200, valid certificate
@@ -210,6 +300,7 @@ second node appears. No redeploy.
 |---|---|
 | Server | ~€4-5/month, ~€9-10 with a second node |
 | Domain | ~€10-15/year |
+| Image store | A 10Gi claim, swept nightly, ten builds of each application kept. Raise it before adding applications rather than after |
 | Backups | Written to a volume **on the same cluster** — fine for a demo, not a backup strategy. Copy them off the machine if the data ever matters |
 | Updates | Dependabot opens the pull requests; CI proves them; you merge |
 | Certificate | cert-manager renews automatically. It emails you if renewal fails |
