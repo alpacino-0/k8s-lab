@@ -616,9 +616,36 @@ jobs:
           # node's network, can resolve and pull the name the build pushed. That
           # is the redirect this registry exists to make work, and it fails
           # separately from the build.
+          # The probe carries a full restricted security context, which makes
+          # it two assertions rather than one: the kubelet can resolve and pull
+          # the name the build pushed, and the image the build produced can run
+          # under the same rules a tenant's workload does. The first version
+          # was a bare `kubectl run` and the namespace refused it — the test
+          # failed on the test, one line after the build had finally worked.
           kubectl -n damga run pull-probe --restart=Never \
             --image="${REGISTRY_HOST}/ci/app@${digest}" \
-            --command -- sleep 30
+            --overrides="$(cat <<JSON
+          {
+            "spec": {
+              "securityContext": {
+                "runAsNonRoot": true,
+                "runAsUser": 1000,
+                "seccompProfile": {"type": "RuntimeDefault"}
+              },
+              "containers": [{
+                "name": "pull-probe",
+                "image": "${REGISTRY_HOST}/ci/app@${digest}",
+                "command": ["sleep", "30"],
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "readOnlyRootFilesystem": true,
+                  "capabilities": {"drop": ["ALL"]}
+                }
+              }]
+            }
+          }
+          JSON
+          )"
           kubectl -n damga wait --for=condition=Ready pod/pull-probe --timeout=180s || {
             kubectl -n damga describe pod pull-probe | tail -25
             exit 1
