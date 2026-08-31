@@ -35,9 +35,19 @@ resource with nightly backups and the restore rehearsal above, identity with
 teams and roles, and a GitOps write path — every change is a commit that Argo CD
 applies, so a rollback is a revert.
 
-**Not here yet:** the template catalogue (one-click n8n, Ghost, Plausible), live
-log streaming, custom domains from the UI, a CLI, and a one-command installer.
-Those are the next block of work.
+Since 2026-09-01 it also builds: a `Build` names a repository and a commit, and
+the platform clones it, produces an image and pushes it to a registry it
+installs alongside itself. A Dockerfile is used when the repository has one and
+the language is detected when it does not. A `Workload` that names a domain gets
+a certificate as well as an ingress.
+
+**Not here yet, stated as what is missing rather than what exists.** Nothing
+triggers a build from a git push — no webhook, nothing polling — so a build
+happens because somebody asked for one. The catalogue is a library with no
+consumer: it can read a directory of templates and turn one into resources, and
+no endpoint or screen reaches it, so there is no one-click n8n yet. Domains work
+from the API and not from the panel. And there is no live log streaming, no CLI,
+and no one-command installer.
 
 ## What was removed, and why
 

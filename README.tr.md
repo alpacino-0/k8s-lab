@@ -33,9 +33,17 @@ yükleme provasıyla bir `Database` kaynağı, takım ve rolleriyle kimlik, ve b
 GitOps yazma yolu — her değişiklik Argo CD'nin uyguladığı bir commit, yani geri
 alma bir revert.
 
-**Henüz yok:** şablon kataloğu (tek tuşla n8n, Ghost, Plausible), canlı log
-akışı, arayüzden alan adı ekleme, CLI ve tek komutluk kurulum. Sıradaki iş bloğu
-bunlar.
+2026-09-01'den beri derliyor da: bir `Build` bir repoyu ve bir commit'i
+adlandırıyor, platform onu klonluyor, imaj üretiyor ve yanında kurduğu bir
+depoya itiyor. Repoda Dockerfile varsa o kullanılıyor, yoksa dil tanınıyor. Alan
+adı bildiren bir `Workload` artık ingress'in yanında sertifika da alıyor.
+
+**Henüz yok — var olanla değil, eksik olanla anlatılmış hâli.** Bir git push'u
+derlemeye çeviren hiçbir şey yok: ne webhook ne yoklama, yani derleme birisi
+istediği için oluyor. Katalog tüketicisi olmayan bir kütüphane: bir şablon
+dizinini okuyup birini kaynaklara çevirebiliyor, ama ona ulaşan bir uç ya da
+ekran yok — yani tek tuşla n8n henüz yok. Alan adları API'den çalışıyor,
+panelden değil. Ve canlı log akışı, CLI ve tek komutluk kurulum yok.
 
 ## Ne kaldırıldı, neden
 

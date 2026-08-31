@@ -1,9 +1,17 @@
 # Running the control plane
 
-`cmd/damga` is the control plane: the panel, the API, and the evidence store
-behind them. It is not the operator (`cmd/operator`, which reconciles the
-`Workload` CRD) and it is not the sample service in this repository. It runs on
-its own, needs no cluster to start, and keeps its data in one database.
+`cmd/damga` is the control plane: the panel, the API, the deploy write path and
+the deploy history behind them. It is not the operator (`cmd/operator`, which
+reconciles the `Workload`, `Database` and `Build` types) and it is not the
+sample service in this repository.
+
+It runs two ways. On its own it needs no cluster to start and keeps its data in
+one database — which is what this document walks through, because it is the
+fastest way to see it work. In a cluster it runs from `cluster/control-plane.yaml`,
+which is what `make up` installs and what an actual install uses; that manifest
+carries the ServiceAccount, and the identity it grants is deliberately lopsided
+(cluster-wide reads, one namespace it may create a `Build` in, and no delete
+anywhere).
 
 This document is what a first run actually looks like, including the parts that
 go wrong.
@@ -98,9 +106,11 @@ report an owner into a database that stops existing when the command returns.
 ```
 
 Both engines are supported from day one and chosen by the DSN scheme. SQLite is
-what a single node runs; PostgreSQL is required for the paid archive, because
-SQLite has no roles and no `REVOKE` — "we cannot modify the evidence" is not a
-claim it can back. Migrations are applied at startup by the binary itself.
+what a single node runs; PostgreSQL is what an install wants once it needs more
+than one, and it is also the only one that can back the stronger sentence —
+SQLite has no roles and no `REVOKE`, so "we do not modify the history" is a
+promise it can make and "we cannot" is not. Migrations are applied at startup by
+the binary itself.
 
 ## What is on the API
 
@@ -111,14 +121,24 @@ same endpoints; there is no private API.
 | --- | --- |
 | `POST /api/v1/login`, `POST /api/v1/logout` | A session cookie. |
 | `GET /api/v1/me` | Who you are and which tenants you belong to. |
-| `GET /api/v1/tenants/{tenant}/apps` | What this tenant has evidence for. |
+| `GET /api/v1/tenants/{tenant}/apps` | Every app, from both stores, saying which one knew: deployed, never deployed, or record removed. |
+| `POST …/apps` | Registers an app and its environments. Until this existed nothing wrote to the placement store at all. |
+| `DELETE …/apps/{app}` | Removes the registration. Not the data, not the history. |
+| `POST …/apps/{app}/builds` | Asks for one commit to be built into one image. |
 | `…/apps/{app}/envs/{env}/evidence` | What is running now. |
 | `…/history` | The deploy log, newest first, keyset-paged. |
 | `…/verify` | Recomputes the hash chain and reports whether it holds. |
 | `…/retention` | What the store promises to keep. |
 | `…/backup` | The app's database, and when its backup was last restored. |
 | `…/export` | Every record, oldest first, as JSONL. |
-| `POST …/deploys` | The only endpoint that writes. It writes to git and to nothing else. |
+| `POST …/deploys` | Writes a commit. Argo CD applies it; this endpoint touches no cluster. |
+
+Four of these write, and only one of them writes to the cluster. `deploys` and
+the two `apps` endpoints write to git and to the control plane's own database;
+`builds` is the single exception, because a build is an action rather than a
+desired state and has to happen before there is a digest to commit. That
+exception is why the ServiceAccount in `cluster/control-plane.yaml` can create a
+`Build` in one namespace and nothing else anywhere.
 
 Every endpoint under `/tenants/{tenant}` resolves the caller from the session
 cookie and the membership row, and from nothing the request carries. A tenant
@@ -146,18 +166,22 @@ either way rather than claiming otherwise.
 
 ## What is not here yet
 
-- **No write path.** The control plane can show you what is running and prove
-  the record has not been edited. It cannot yet deploy anything: the endpoint
-  that commits to a tenant's repository is not written. Evidence arrives from
-  the observer (`-observe-deploys`) and from the git write path used internally.
-- **No teams.** A membership carries one role per tenant: owner, member or
-  viewer.
+- **Nothing triggers a build.** `POST …/builds` exists and a push to the
+  repository does not reach it: there is no webhook and nothing polls. A build
+  happens because somebody asked for one.
+- **The build endpoint answers `501` on an install with no cluster.** It is a
+  seam, and a control plane started without one has nothing to fill it with.
+  Said plainly rather than answered with an empty success, which would read as
+  a build that was started.
+- **No log streaming.** The panel shows what was deployed and what happened to
+  it; it cannot show you what the process printed.
 - **No account management in the panel.** After `bootstrap` there is no screen
   for inviting anyone.
+- **No move.** An app is registered against one repository and branch; changing
+  them means deleting the registration and making it again.
 - **CSV export.** Declared as a format and deliberately not implemented —
-  flattening the policy results and the transitions loses exactly what makes an
-  export re-verifiable. Asking for it returns `400` rather than quietly handing
-  back JSONL.
+  flattening the transitions loses exactly what makes an export re-verifiable.
+  Asking for it returns `400` rather than quietly handing back JSONL.
 
 ## Shutting down
 
