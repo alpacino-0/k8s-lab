@@ -131,7 +131,18 @@ case "$RAN" in
       --output "type=image,name=${IMAGE},push=true,registry.insecure=true" \
       --metadata-file /tmp/meta.json 2>/tmp/build.err \
       || fail "$(tail -c 700 /tmp/build.err)"
-    DIGEST=$(sed -n 's/.*"containerimage.digest":"\([^"]*\)".*/\1/p' /tmp/meta.json)
+    # Whitespace-tolerant, because buildctl writes the metadata file
+    # indented: "containerimage.digest": "sha256:..." has a space after the
+    # colon and the first version of this pattern did not allow one. The build
+    # had already run and pushed; only the reading failed, and the platform
+    # reported "no digest" — which reads as a broken build rather than as a
+    # broken sed.
+    DIGEST=$(tr -d '\n' < /tmp/meta.json \
+      | sed -n 's/.*"containerimage\.digest"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    # And if it is still empty, hand over the file rather than a verdict about
+    # it. A parser that cannot find what it wants knows less about why than the
+    # bytes it was given.
+    [ -n "$DIGEST" ] || fail "the build finished but no digest could be read from: $(head -c 400 /tmp/meta.json)"
     ;;
   buildpack)
     # The half that is not written. Cloud Native Buildpacks' lifecycle runs
