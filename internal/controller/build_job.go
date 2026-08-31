@@ -36,6 +36,11 @@ const (
 	BuildResultPath = "/dev/termination-log"
 
 	buildContainer = "build"
+
+	// buildHome is where the rootless builder keeps everything it writes. Named
+	// once because three things have to agree on it — the mount, HOME, and the
+	// mkdir in the script — and they did not.
+	buildHome      = "/home/user"
 	buildComponent = "build"
 
 	// buildkitImage builds from a Dockerfile without a daemon.
@@ -95,6 +100,17 @@ trap 'rc=$?; [ "$rc" = 0 ] || [ -n "$SAID" ] || say "the build exited with statu
 # safe.directory would tell git to stop checking instead.
 mkdir -p /workspace/src
 cd /workspace/src
+
+# The directories rootlesskit expects to find, created rather than inherited.
+#
+# An emptyDir mounted at .local does not merge with what the image has there —
+# it covers it — so mounting it to make .local/tmp writable removed .local/tmp
+# entirely. The error moved from "read-only file system" to "no such file or
+# directory" and stayed ten seconds behind the real failure either way, arriving
+# as "could not connect to buildkitd.sock". Two rounds for one directory,
+# because a mount that hides is indistinguishable in a diff from a mount that
+# grants.
+mkdir -p "$HOME/.local/tmp" "$HOME/.local/share/buildkit"
 
 git init -q . || fail "could not initialise a repository"
 git remote add origin "$REPO" || fail "could not set the remote to $REPO"
@@ -212,9 +228,14 @@ func desiredBuildJob(b *platformv1alpha1.Build) *batchv1.Job {
 							{Name: "PATH_IN_REPO", Value: b.Spec.Path},
 							{Name: "IMAGE", Value: b.Spec.Image + ":" + b.Spec.Revision},
 							{Name: "METHOD", Value: string(method)},
+							// Set rather than inherited, so the script and the
+							// volume mount below cannot drift: both spell this
+							// path, and one of them changing silently is how
+							// the mount ended up one level too deep.
+							{Name: "HOME", Value: buildHome},
 							// Rootless buildkit needs somewhere writable that
 							// is not the root filesystem.
-							{Name: "XDG_RUNTIME_DIR", Value: "/home/user/.local/share/buildkit"},
+							{Name: "XDG_RUNTIME_DIR", Value: buildHome + "/.local/share/buildkit"},
 							{Name: "BUILDKITD_FLAGS", Value: "--oci-worker-no-process-sandbox"},
 						},
 						SecurityContext: &corev1.SecurityContext{
@@ -264,7 +285,7 @@ func desiredBuildJob(b *platformv1alpha1.Build) *batchv1.Job {
 							// started and every build died with "could not
 							// connect to buildkitd.sock" ten seconds later,
 							// naming the socket rather than the directory.
-							{Name: "buildkit", MountPath: "/home/user/.local"},
+							{Name: "buildkit", MountPath: buildHome + "/.local"},
 						},
 					}},
 					Volumes: []corev1.Volume{
