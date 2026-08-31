@@ -40,6 +40,10 @@ var _ = Describe("Build Controller", func() {
 		digest    = "sha256:" + "ab12cd34" + "ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34ab12cd34"
 	)
 
+	// A stand-in image for pods this suite writes by hand; envtest runs no
+	// kubelet, so nothing is ever pulled.
+	const stubImage = "busybox:1"
+
 	ctx := context.Background()
 
 	// A name per spec rather than one shared name that is cleaned up between
@@ -140,7 +144,7 @@ var _ = Describe("Build Controller", func() {
 				},
 			},
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{
-				Name: buildContainer, Image: "busybox:1",
+				Name: buildContainer, Image: stubImage,
 			}}},
 		}
 		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
@@ -213,6 +217,53 @@ var _ = Describe("Build Controller", func() {
 		Expect(b.Status.Phase).To(Equal(platformv1alpha1.BuildFailed))
 		Expect(b.Status.Digest).To(BeEmpty())
 		Expect(b.Status.Message).To(ContainSubstring("no digest"))
+	})
+
+	// A build that needs two images runs the first as an init container, and an
+	// init container that dies means the main one never starts. Reading only
+	// ContainerStatuses would find nothing, and the workaround anybody reaches
+	// for — exit zero, leave the error in a shared file — hides a hard death
+	// behind a success.
+	It("reads a message left by an init container", func() {
+		create(spec)
+		reconcileNow()
+
+		job := &batchv1.Job{}
+		Expect(k8sClient.Get(ctx, key, job)).To(Succeed())
+		now := metav1.Now()
+		job.Status.StartTime = &now
+		job.Status.Conditions = []batchv1.JobCondition{
+			{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, LastTransitionTime: now},
+			{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: now},
+		}
+		job.Status.Failed = 1
+		Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name + "-pod", Namespace: namespace,
+				Labels: map[string]string{instanceLabel: name, componentLabel: buildComponent},
+			},
+			Spec: corev1.PodSpec{
+				InitContainers: []corev1.Container{{Name: "prepare", Image: stubImage}},
+				Containers:     []corev1.Container{{Name: buildContainer, Image: stubImage}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		// The main container never ran, which is what an init failure means.
+		pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+			Name: "prepare",
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				Message: `{"method":"buildpack","message":"no buildpack matched this source"}`,
+			}},
+		}}
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+		reconcileNow()
+
+		b := &platformv1alpha1.Build{}
+		Expect(k8sClient.Get(ctx, key, b)).To(Succeed())
+		Expect(b.Status.Phase).To(Equal(platformv1alpha1.BuildFailed))
+		Expect(b.Status.Message).To(Equal("no buildpack matched this source"))
 	})
 
 	It("quotes the builder's own message on failure", func() {

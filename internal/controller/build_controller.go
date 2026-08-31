@@ -147,6 +147,19 @@ func (r *BuildReconciler) observe(
 }
 
 // resultFromPods reads the termination message off whichever pod the job left.
+//
+// Init containers are read as well as the main one, and the reason is a design
+// this would otherwise have forced: a build that needs two images — a builder
+// to produce the image and a second to push it — runs the first as an init
+// container, and an init container that dies means the main container never
+// starts. Reading only ContainerStatuses would then find nothing at all, and
+// the alternative anybody reaches for is making the init container exit zero
+// and leave its error in a shared file. That hides a hard death — OOM, an image
+// that would not pull — behind a success, which is the failure this repository
+// has already paid four rounds to learn.
+//
+// Init containers first, because they run first: when both have something to
+// say, the earlier failure is the one that explains the later.
 func (r *BuildReconciler) resultFromPods(
 	ctx context.Context, build *platformv1alpha1.Build,
 ) (buildResult, bool) {
@@ -158,7 +171,10 @@ func (r *BuildReconciler) resultFromPods(
 		return buildResult{}, false
 	}
 	for i := range pods.Items {
-		for _, cs := range pods.Items[i].Status.ContainerStatuses {
+		statuses := append(
+			append([]corev1.ContainerStatus{}, pods.Items[i].Status.InitContainerStatuses...),
+			pods.Items[i].Status.ContainerStatuses...)
+		for _, cs := range statuses {
 			if cs.State.Terminated == nil || cs.State.Terminated.Message == "" {
 				continue
 			}
