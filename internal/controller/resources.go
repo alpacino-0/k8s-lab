@@ -18,9 +18,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package controller
 
 import (
+	"maps"
 	"strings"
-
-	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -29,6 +28,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
@@ -109,6 +109,60 @@ const (
 	// ingress-nginx reads its annotations as strings, so "true" is a value here
 	// rather than a boolean.
 	annotationTrue = "true"
+
+	// The certificate for a published workload, as a cert-manager object.
+	//
+	// Addressed as unstructured rather than through cert-manager's Go module.
+	// One object with six fields does not pay for a dependency, and it would
+	// buy nothing that matters here: the operator has to keep running on a
+	// cluster where this kind does not exist, and a compiled-in type does not
+	// make the kind exist.
+	certificateAPIVersion = "cert-manager.io/v1"
+	certificateKind       = "Certificate"
+
+	// The issuer the operator asks for when the installation has not named one.
+	// See WorkloadReconciler.ClusterIssuer for why that is a field.
+	defaultClusterIssuer = "letsencrypt-prod"
+
+	// clusterIssuerKind is what issuerRef points at. Cluster-scoped on purpose:
+	// a namespaced Issuer would have to exist in every tenant namespace, which
+	// means a tenant could replace the authority that signs their own hostname.
+	clusterIssuerKind = "ClusterIssuer"
+
+	// The certificate's lifetime and how early it is replaced, carried over
+	// from chart/templates/certificate.yaml where both were chart values.
+	// Let's Encrypt issues for 90 days and renews at two thirds of the lifetime
+	// by default; stating both makes the intent explicit and lets a private CA
+	// use a longer one.
+	certificateDuration    = "2160h" // 90 days
+	certificateRenewBefore = "720h"  // 30 days
+
+	// A renewal mints a new key rather than reusing the old one. The default is
+	// the other way round, so this is a decision rather than a restatement.
+	certificateKeyRotation = "Always"
+
+	certificateKeyAlgorithm       = "ECDSA"
+	certificateKeySize      int64 = 256
+
+	// tlsCondition is where a published workload reports whether its
+	// certificate exists yet. Separate from Ready; see certificateCondition.
+	tlsCondition = "TLS"
+
+	// The reasons that condition carries. Named rather than written inline
+	// because a reason is the part of a status something else keys on — a
+	// panel, an alert, a person's shell loop — and one that drifts silently
+	// breaks all of them without breaking anything visible here.
+	reasonIssued            = "Issued"
+	reasonPending           = "Pending"
+	reasonAwaitingCert      = "AwaitingCertificate"
+	reasonCertManagerAbsent = "CertManagerAbsent"
+	reasonUnreadable        = "Unreadable"
+
+	// shimAnnotation asks cert-manager's ingress-shim to create a Certificate
+	// of its own for this Ingress. This operator wrote it until it started
+	// rendering the Certificate itself, and now retracts it — see
+	// desiredIngress and the Ingress mutate in reconcileOwned.
+	shimAnnotation = "cert-manager.io/cluster-issuer"
 )
 
 func labelsFor(app *platformv1alpha1.Workload) map[string]string {
@@ -701,8 +755,21 @@ func desiredIngress(app *platformv1alpha1.Workload) *networkingv1.Ingress {
 	}
 	pathType := networkingv1.PathTypePrefix
 	meta := objectMeta(app)
+	// No cert-manager annotation. It used to be here, and asking for the
+	// certificate that way is what this change stopped doing: the annotation
+	// makes cert-manager's ingress-shim create and own a Certificate of its
+	// own, and the object it creates is then tied to the life of one Ingress.
+	// Measured, on the chart, before the operator existed — two Ingresses over
+	// one hostname and one secret, the second one refused:
+	//
+	//	certificate resource is not owned by this object.
+	//	refusing to update non-owned certificate resource
+	//
+	// and when the owning Ingress was deleted the Certificate was collected
+	// with it and the other one quietly lost its certificate. So the Certificate
+	// is rendered explicitly beside this Ingress — see desiredCertificate — and
+	// the two are joined by the secret name below and nothing else.
 	meta.Annotations = map[string]string{
-		"cert-manager.io/cluster-issuer":                 "letsencrypt-prod",
 		"nginx.ingress.kubernetes.io/ssl-redirect":       annotationTrue,
 		"nginx.ingress.kubernetes.io/force-ssl-redirect": annotationTrue,
 	}
@@ -713,7 +780,7 @@ func desiredIngress(app *platformv1alpha1.Workload) *networkingv1.Ingress {
 			IngressClassName: ptr.To("nginx"),
 			TLS: []networkingv1.IngressTLS{{
 				Hosts:      []string{app.Spec.Domain},
-				SecretName: fmt.Sprintf("%s-tls", app.Name),
+				SecretName: certificateSecretName(app),
 			}},
 			Rules: []networkingv1.IngressRule{{
 				Host: app.Spec.Domain,
@@ -734,6 +801,112 @@ func desiredIngress(app *platformv1alpha1.Workload) *networkingv1.Ingress {
 			}},
 		},
 	}
+}
+
+// certificateSecretName is the Secret the certificate is written to and the
+// Secret the Ingress reads. Spelled once, because the two are only a working
+// certificate for as long as they agree.
+func certificateSecretName(app *platformv1alpha1.Workload) string {
+	return app.Name + "-tls"
+}
+
+// certificateFor is an empty Certificate carrying nothing but its identity, for
+// the paths that read one or delete one rather than render it.
+func certificateFor(app *platformv1alpha1.Workload) *unstructured.Unstructured {
+	cert := &unstructured.Unstructured{}
+	cert.SetAPIVersion(certificateAPIVersion)
+	cert.SetKind(certificateKind)
+	cert.SetName(app.Name)
+	cert.SetNamespace(app.Namespace)
+	return cert
+}
+
+// desiredCertificate renders the cert-manager Certificate for a published
+// workload, and nothing at all for one that has no domain.
+//
+// This is chart/templates/certificate.yaml, which had been a working
+// specification for the platform's own release since before the operator
+// existed, applied to a tenant's workload: same issuer reference, same key
+// algorithm, same rotation policy, same renewal window.
+//
+// Named after the workload, like every other object rendered here, and not
+// after the secret it produces. The name is what apply's ownership check and
+// deleteIfPresent both key on, and an object named differently from its
+// siblings is one those two would have to be taught about separately.
+func desiredCertificate(app *platformv1alpha1.Workload, issuer string) *unstructured.Unstructured {
+	if app.Spec.Domain == "" {
+		return nil
+	}
+	cert := certificateFor(app)
+	cert.SetLabels(labelsFor(app))
+	cert.Object["spec"] = map[string]any{
+		"secretName": certificateSecretName(app),
+		"dnsNames":   []any{app.Spec.Domain},
+		"issuerRef": map[string]any{
+			"name": issuer,
+			"kind": clusterIssuerKind,
+		},
+		"privateKey": map[string]any{
+			"algorithm":      certificateKeyAlgorithm,
+			"size":           certificateKeySize,
+			"rotationPolicy": certificateKeyRotation,
+		},
+		"duration":    certificateDuration,
+		"renewBefore": certificateRenewBefore,
+	}
+	return cert
+}
+
+// mergeSpec writes the fields this operator renders into a foreign object's
+// spec and leaves everything else in there as it was found.
+//
+// The same rule the labels and the HPA's behaviour are already reconciled
+// under, applied to a kind whose schema this repository does not have: a
+// cert-manager release can add a field, its webhook can default one, and an
+// administrator can set one this operator has no field for. Assigning the whole
+// spec deletes all three on the next pass, and the object has another
+// controller writing to it.
+//
+// No delete pass, for the same reason reconcileLabels has none: what
+// desiredCertificate renders is a fixed set of keys, so there is never one the
+// operator wrote and has since stopped wanting. A key that starts varying needs
+// the retraction the annotations have.
+func mergeSpec(existing, desired *unstructured.Unstructured) {
+	want, ok := desired.Object["spec"].(map[string]any)
+	if !ok {
+		return
+	}
+	spec, ok := existing.Object["spec"].(map[string]any)
+	if !ok {
+		spec = make(map[string]any, len(want))
+	}
+	maps.Copy(spec, want)
+	existing.Object["spec"] = spec
+}
+
+// certificateReady reads cert-manager's own verdict off a Certificate.
+//
+// Unknown covers both "no status yet" and "a status shaped in a way this does
+// not recognise", which are the same thing to a caller: nobody has said the
+// certificate is issued.
+func certificateReady(cert *unstructured.Unstructured) (metav1.ConditionStatus, string) {
+	conditions, found, err := unstructured.NestedSlice(cert.Object, "status", "conditions")
+	if err != nil || !found {
+		return metav1.ConditionUnknown, ""
+	}
+	for _, raw := range conditions {
+		c, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t, _ := c["type"].(string); t != readyCondition {
+			continue
+		}
+		status, _ := c["status"].(string)
+		message, _ := c["message"].(string)
+		return metav1.ConditionStatus(status), message
+	}
+	return metav1.ConditionUnknown, ""
 }
 
 // quantityOrDefault keeps a zero Quantity from reaching the API server as "0",
