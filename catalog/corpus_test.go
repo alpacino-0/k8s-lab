@@ -39,7 +39,6 @@ package catalog_test
 
 import (
 	"errors"
-	"os"
 	"strings"
 	"testing"
 
@@ -49,20 +48,6 @@ import (
 // testNamespace is where these plans land. Every case needs one and none of
 // them turns on which it is.
 const testNamespace = "tenant-a"
-
-// shipped is the catalogue this repository carries, all of it.
-//
-// Not compose/testdata, which is three files. These cases are about what is
-// true across the corpus, and three of them can be true across a fixture by
-// accident.
-func shipped(t *testing.T) *catalog.Catalog {
-	t.Helper()
-	c, err := catalog.Load(os.DirFS("templates"))
-	if err != nil {
-		t.Fatalf("loading the shipped catalogue: %v", err)
-	}
-	return c
-}
 
 // planImages is every image a plan would commit.
 func planImages(p catalog.Plan) []string {
@@ -94,7 +79,7 @@ func resolves(image string) (string, error) {
 // would refuse. The resolver here fails every call, which is the worst a
 // registry can do, and every entry that installs without one still installs.
 func TestAResolverCanRescueAnEntryAndNeverTakeOneAway(t *testing.T) {
-	c := shipped(t)
+	c := corpus(t)
 	unreachable := func(string) (string, error) {
 		return "", errors.New("the registry is unreachable")
 	}
@@ -156,7 +141,7 @@ func TestAResolverCanRescueAnEntryAndNeverTakeOneAway(t *testing.T) {
 // only slightly better — the operator is told the catalogue said no and not
 // which of six services to look at.
 func TestEveryImageAResolverRefusesIsNamedInABlocker(t *testing.T) {
-	c := shipped(t)
+	c := corpus(t)
 
 	for _, e := range c.Entries() {
 		var asked []string
@@ -201,7 +186,7 @@ func TestEveryImageAResolverRefusesIsNamedInABlocker(t *testing.T) {
 // The two changes shipped together so the hole never opened. In the other order
 // it would have, and nothing else here would have noticed.
 func TestNoInstallableEntryStillNamesAVariableInItsImage(t *testing.T) {
-	c := shipped(t)
+	c := corpus(t)
 
 	for _, pin := range []struct {
 		what string
