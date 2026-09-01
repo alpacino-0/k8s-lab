@@ -1,0 +1,42 @@
+apiVersion: platform.damga.co/v1alpha1
+kind: Workload
+metadata:
+  annotations:
+    damga.co/compose-service: gotify
+  name: ci-gotify
+  namespace: damga
+spec:
+  env:
+  - name: GOTIFY_DATABASE_CONNECTION
+    value: data/gotify.db
+  - name: GOTIFY_DATABASE_DIALECT
+    value: sqlite3
+  - name: GOTIFY_DEFAULTUSER_NAME
+    value: admin
+  - name: GOTIFY_PASSSTRENGTH
+    value: "10"
+  - name: GOTIFY_PLUGINSDIR
+    value: data/plugins
+  - name: GOTIFY_REGISTRATION
+    value: "false"
+  - name: GOTIFY_SERVER_PORT
+    value: "80"
+  - name: GOTIFY_UPLOADEDIMAGESDIR
+    value: data/images
+  health:
+    livenessPath: /health
+    readinessPath: /health
+  image: gotify/server:2.7.3
+  port: 80
+  resources:
+    cpuRequest: "0"
+    memoryLimit: "0"
+    memoryRequest: "0"
+  secrets:
+  - kind: password
+    name: GOTIFY_DEFAULTUSER_PASS
+  volumes:
+  - name: gotify-data
+    path: /app/data
+    size: 1Gi
+status: {}
