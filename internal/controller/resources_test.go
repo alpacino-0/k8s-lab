@@ -475,6 +475,36 @@ func TestTheRolloutAnnotationReachesTheDeploymentObject(t *testing.T) {
 	}
 }
 
+// The other half of the same rule, and the reason restart needed its own field.
+//
+// A restart has to change the pod template, because that is the only thing the
+// deployment controller hashes — and the first attempt reached for the platform
+// annotations already on the object, which the test above refuses. This asserts
+// the narrow version: exactly one annotation, present only when asked for.
+func TestOnlyARestartPutsAnAnnotationOnThePodTemplate(t *testing.T) {
+	quiet := desiredDeployment(app(func(a *platformv1alpha1.Workload) {
+		a.Annotations = map[string]string{rolloutAnnotation: "t_alpha-api-prod-41"}
+	}))
+	if quiet.Spec.Template.Annotations != nil {
+		t.Errorf("an untouched workload's pod template carries %v — an empty map is a "+
+			"diff Argo CD reports for ever", quiet.Spec.Template.Annotations)
+	}
+
+	asked := desiredDeployment(app(func(a *platformv1alpha1.Workload) {
+		a.Annotations = map[string]string{rolloutAnnotation: "t_alpha-api-prod-41"}
+		a.Spec.RestartedAt = "2026-09-01T03:40:00Z"
+	}))
+	got := asked.Spec.Template.Annotations
+	if got[restartedAtAnnotation] != "2026-09-01T03:40:00Z" {
+		t.Errorf("restartedAt did not reach the pod template (%v); without it the "+
+			"deployment controller sees no change and no pod is replaced", got)
+	}
+	if len(got) != 1 {
+		t.Errorf("the pod template carries %d annotations, want exactly the restart one — "+
+			"anything else here rolls pods on a value that was not a restart", len(got))
+	}
+}
+
 // A Workload with nothing of ours on it must not grow an empty annotation map,
 // which shows up as a diff Argo CD reports for ever.
 //

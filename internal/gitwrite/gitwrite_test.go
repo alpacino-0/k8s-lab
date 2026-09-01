@@ -151,6 +151,32 @@ func head(t *testing.T, url string) *object.Commit {
 
 // The whole point of the package, in one case: the commit reaches the remote,
 // the record exists, and the two agree about which commit it was.
+// The record has to carry what was asked for, not only what somebody later
+// observed running.
+//
+// Found by the session building rollback: it reads the history to find the
+// image a previous deploy used, and on an install with -observe-deploys off
+// every record had an empty image — so rollback had nothing to roll back to and
+// correctly refused. The observer's image is a different fact (what ended up
+// there) and only exists where the observer runs.
+func TestTheRecordCarriesTheImageThatWasAskedFor(t *testing.T) {
+	url := remote(t)
+	store := memory.New(0)
+	w := newWriter(store)
+
+	req := request(url, manifest)
+	req.Image = "ghcr.io/example/api:2.4.1"
+	res, err := w.Deploy(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if res.Record.Image.RequestedRef != req.Image {
+		t.Errorf("record image = %q, want %q — a history with no image cannot answer "+
+			"what was running before, which is the only question a rollback asks",
+			res.Record.Image.RequestedRef, req.Image)
+	}
+}
+
 func TestDeployPushesAndOpensARecord(t *testing.T) {
 	url := remote(t)
 	store := memory.New(0)

@@ -53,7 +53,7 @@ jobs:
       # lets the package keep its argument against a build step while still
       # having tests. It had none until the one place it decides anything was
       # found deciding wrongly.
-      - run: node --test panel/app_test.js
+      - run: node --test panel/
 
   # ------------------------------------------------------- static analysis
   manifests:
@@ -571,6 +571,11 @@ jobs:
             || { echo "the control plane could write into a tenant; the write path is git"; exit 1; }
           check get workloads.platform.damga.co damga yes \
             || { echo "the backup endpoint cannot read what it reports on"; exit 1; }
+          check get pods/log damga yes \
+            || { echo "the log endpoint cannot read what it streams"; exit 1; }
+          # Reading a log is not a licence to enter the container.
+          check create pods/exec damga no \
+            || { echo "the control plane can exec into a tenant's pod"; exit 1; }
 
       - name: A Workload must reach Ready
         run: |

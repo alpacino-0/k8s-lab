@@ -108,8 +108,12 @@ func deploy(
 			// is the platform; gitwrite sets that. What is written here is the
 			// instance-local audit alias and never the login address, because
 			// a commit cannot be redacted.
-			Author:  gitwrite.Author{ID: sub.ID, Name: sub.ID, Email: sub.Email},
-			Ref:     ref,
+			Author: gitwrite.Author{ID: sub.ID, Name: sub.ID, Email: sub.Email},
+			Ref:    ref,
+			// Recorded here rather than left to the observer. The observer
+			// writes what it finds running; this writes what was asked for, and
+			// an install with -observe-deploys off has only the second.
+			Image:   req.Image,
 			Message: fmt.Sprintf("deploy %s to %s/%s", req.Image, ref.App, ref.Env),
 			Render:  renderDeploy(place, req),
 		})

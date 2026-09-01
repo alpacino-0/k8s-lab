@@ -166,6 +166,20 @@ type WorkloadSpec struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Database string `json:"database,omitempty"`
 
+	// RestartedAt cycles the pods without changing anything about what runs.
+	//
+	// A field rather than a reused annotation, and the difference was found by
+	// a test rather than reasoned out: the deployment controller hashes
+	// .spec.template alone, so anything already on the template that changes
+	// per deploy — the rollout id, for instance — would roll every pod twice on
+	// every deploy. This changes when a restart is asked for and at no other
+	// time, which is what makes it safe to put where it has to go.
+	//
+	// Free text rather than a timestamp type, because the platform writes it
+	// and nothing reads it: its only job is to differ from the last one.
+	// +kubebuilder:validation:MaxLength=64
+	RestartedAt string `json:"restartedAt,omitempty"`
+
 	// Secrets are values the platform has to invent, and the workload needs.
 	//
 	// A request, not a value. The name of the environment variable and what kind

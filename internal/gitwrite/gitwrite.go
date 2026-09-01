@@ -96,6 +96,21 @@ type Request struct {
 	Author Author
 	Ref    evidence.Ref
 
+	// Image is what this deploy asked to run.
+	//
+	// Written by the caller, at the moment it is asked for, and this is the
+	// difference between a record and an observation. The deploy observer also
+	// writes an image — the one it reads off the live Deployment — but that
+	// only exists on an install running the observer, and it says what ended up
+	// there rather than what was requested. Without this field a record on an
+	// install with -observe-deploys off carries no image at all, and anything
+	// that reads the history to answer "what was running before" gets nothing.
+	//
+	// Found by the session building rollback, which refuses rather than guesses
+	// when a record has no image — a rollback that invents a target is worse
+	// than one that declines.
+	Image string
+
 	// Message is the commit subject.
 	Message string
 
@@ -172,6 +187,7 @@ func (w *Writer) Deploy(ctx context.Context, req Request) (Result, error) {
 	rec, err := w.Evidence.Append(ctx, evidence.Record{
 		IdempotencyKey: key,
 		Ref:            req.Ref,
+		Image:          evidence.Image{RequestedRef: req.Image},
 		Actor: evidence.Actor{
 			ID: req.Author.ID, Kind: "user",
 			DisplayName: req.Author.Name, Email: req.Author.Email,

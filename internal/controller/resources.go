@@ -78,6 +78,11 @@ const (
 	// the database's data directory. Shared so the two never drift.
 	dataVolume = "data"
 
+	// restartedAtAnnotation carries the moment a restart was asked for. On the
+	// pod template on purpose — it is the only value there that a restart is
+	// allowed to move.
+	restartedAtAnnotation = "damga.co/restarted-at"
+
 	// readyCondition is the one condition every kind here reports. Named once
 	// so a page that reads .status.conditions[?(@.type=="Ready")] works against
 	// all of them.
@@ -526,7 +531,21 @@ func desiredDeployment(app *platformv1alpha1.Workload) *appsv1.Deployment {
 			Selector: &metav1.LabelSelector{MatchLabels: selectorFor(app)},
 			Strategy: strategy,
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labelsFor(app)},
+				// Labels, and one annotation that is there only when somebody
+				// asked for a restart — never the platform's annotations
+				// wholesale.
+				//
+				// The first attempt at restart carried all of them here and a
+				// test refused it with the reason: the deployment controller
+				// hashes .spec.template alone, so the rollout id — which
+				// changes on every deploy by definition — would roll every pod
+				// a second time on every deploy. A restart needs a value that
+				// changes when a restart is asked for and at no other time,
+				// which is a different field rather than a reused one.
+				ObjectMeta: metav1.ObjectMeta{
+					Labels:      labelsFor(app),
+					Annotations: restartAnnotation(app),
+				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName:            app.Name,
 					AutomountServiceAccountToken:  ptr.To(false),
@@ -932,6 +951,19 @@ func quantityOrDefault(q resource.Quantity, fallback string) resource.Quantity {
 		return resource.MustParse(fallback)
 	}
 	return q
+}
+
+// restartAnnotation is the one thing on the pod template that is allowed to
+// change without the image changing.
+//
+// nil rather than an empty map when nothing asked for a restart: a Workload with
+// nothing of ours on it must not grow an empty annotation map, which shows up as
+// a diff Argo CD reports for ever.
+func restartAnnotation(app *platformv1alpha1.Workload) map[string]string {
+	if app.Spec.RestartedAt == "" {
+		return nil
+	}
+	return map[string]string{restartedAtAnnotation: app.Spec.RestartedAt}
 }
 
 // generatedSecretName is where a workload's minted values live. Its own object
