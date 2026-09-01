@@ -67,6 +67,17 @@ func resolves(image string) (string, error) {
 	return image + "@sha256:" + strings.Repeat("a", 64), nil
 }
 
+// exposes is the same for ports: one answer, always, so a count taken with it
+// is a ceiling rather than a report on today's rate limit.
+func exposes(string) ([]int32, error) { return []int32{8080}, nil }
+
+// answered is what an installation with both resolvers working asks with. The
+// counts below are taken twice, with it and without, because the two mean
+// different things and one line printing one of them cannot say which.
+func answered() catalog.Options {
+	return catalog.Options{Namespace: testNamespace, Pin: resolves, Ports: exposes}
+}
+
 // A resolver may rescue an entry and may never take one away.
 //
 // This is the property that lets image pinning be on by default, and it is not
@@ -88,12 +99,18 @@ func TestAResolverCanRescueAnEntryAndNeverTakeOneAway(t *testing.T) {
 	var lost []string
 	compared := 0
 	for _, e := range c.Entries() {
-		without, err := c.Plan(e.Name, catalog.Options{Namespace: testNamespace})
+		// Ports answers on both sides. Without it the baseline is only the
+		// entries whose every service declares a port — three of them — and a
+		// case comparing three is not comparing the catalogue. That is what
+		// this file's other count did until it was made to name its condition.
+		without, err := c.Plan(e.Name, catalog.Options{Namespace: testNamespace, Ports: exposes})
 		if err != nil || !without.Installable() {
 			continue
 		}
 		compared++
-		with, err := c.Plan(e.Name, catalog.Options{Namespace: testNamespace, Pin: unreachable})
+		with, err := c.Plan(e.Name, catalog.Options{
+			Namespace: testNamespace, Pin: unreachable, Ports: exposes,
+		})
 		if err != nil {
 			t.Errorf("%s planned without a resolver and failed with one: %v", e.Name, err)
 			continue
@@ -125,12 +142,13 @@ func TestAResolverCanRescueAnEntryAndNeverTakeOneAway(t *testing.T) {
 	// gate somebody deletes rather than reads.
 	answering := 0
 	for _, e := range c.Entries() {
-		p, err := c.Plan(e.Name, catalog.Options{Namespace: testNamespace, Pin: resolves})
+		p, err := c.Plan(e.Name, answered())
 		if err == nil && p.Installable() {
 			answering++
 		}
 	}
-	t.Logf("installable: %d with no resolver, %d with one that answers everything", compared, answering)
+	t.Logf("installable with a port resolver answering: %d with no digest resolver, "+
+		"%d with one that answers everything", compared, answering)
 }
 
 // Every image a resolver could not resolve is named in a blocker.
@@ -150,7 +168,9 @@ func TestEveryImageAResolverRefusesIsNamedInABlocker(t *testing.T) {
 			asked = append(asked, image)
 			return "", errors.New("no such repository")
 		}
-		p, err := c.Plan(e.Name, catalog.Options{Namespace: testNamespace, Pin: refusing})
+		p, err := c.Plan(e.Name, catalog.Options{
+			Namespace: testNamespace, Pin: refusing, Ports: exposes,
+		})
 		if err != nil {
 			continue
 		}
@@ -198,7 +218,12 @@ func TestNoInstallableEntryStillNamesAVariableInItsImage(t *testing.T) {
 	} {
 		t.Run(pin.what, func(t *testing.T) {
 			for _, e := range c.Entries() {
-				p, err := c.Plan(e.Name, catalog.Options{Namespace: testNamespace, Pin: pin.fn})
+				// Ports answers here for the reason the rescue case gives: the
+				// entries this walks are the installable ones, and with it
+				// empty that is three of them rather than the catalogue.
+				p, err := c.Plan(e.Name, catalog.Options{
+					Namespace: testNamespace, Pin: pin.fn, Ports: exposes,
+				})
 				if err != nil || !p.Installable() {
 					continue
 				}
@@ -240,7 +265,7 @@ func TestThePrimaryIsTheAnswerTheProbeUsedToRecover(t *testing.T) {
 	// nothing would route: .invalid is reserved by RFC 2606 for exactly this.
 	const probe = "front-door.invalid"
 
-	multi, notFirst, installableMulti := 0, 0, 0
+	multi, notFirst, installableMulti, installableMultiResolved := 0, 0, 0, 0
 	var differ []string
 	for _, e := range c.Entries() {
 		plan, err := c.Plan(e.Name, catalog.Options{Namespace: testNamespace})
@@ -268,6 +293,15 @@ func TestThePrimaryIsTheAnswerTheProbeUsedToRecover(t *testing.T) {
 		multi++
 		if plan.Installable() {
 			installableMulti++
+		}
+		// The same question with the two resolvers answering. Taken separately
+		// because the plan above has neither, and with Options.Ports empty
+		// every service whose compose file declares no port is refused — so
+		// that count is "installable without asking a registry anything", not
+		// "installable". It read 43 and became 3 the day ports started being
+		// resolved, and the line below said neither.
+		if withResolvers, err := c.Plan(e.Name, answered()); err == nil && withResolvers.Installable() {
+			installableMultiResolved++
 		}
 
 		probed, err := c.Plan(e.Name, catalog.Options{Namespace: testNamespace, Domain: probe})
@@ -309,8 +343,64 @@ func TestThePrimaryIsTheAnswerTheProbeUsedToRecover(t *testing.T) {
 			len(differ), multi, strings.Join(differ, "\n\t"))
 	}
 
-	t.Logf("multi-workload entries: %d (%d of them installable). "+
+	t.Logf("multi-workload entries: %d — %d install with no resolver at all, "+
+		"%d with a digest and a port resolver that always answer. "+
 		"The front door is not the first workload in %d of them, which is how often "+
 		"guessing instead of reporting would name the wrong object.",
-		multi, installableMulti, notFirst)
+		multi, installableMulti, installableMultiResolved, notFirst)
+}
+
+// How much of the catalogue depends on a port nothing in the template declares.
+//
+// This is the count that says how big the third wall was, and it is worth
+// having in the repository rather than in a commit message because it needs no
+// network: it comes out of the templates alone. The two that do need one — how
+// many images answer, and what they say — are rate-limited by Docker Hub and
+// live in docs with the date they were taken.
+//
+// What the number meant, measured on a cluster on 2026-09-01: a service whose
+// compose file declared no ports left Workload.Spec.Port unset, the CRD
+// defaulted it to 8080, and the operator put an HTTP probe there. A mongo on
+// 27017 never became Ready — "dial tcp 10.244.1.3:8080: connect: connection
+// refused" — its Service published no endpoints, and the application that named
+// it could not connect. Every one of these entries was offered as installable.
+//
+// The second count is the sharper one. A portless sibling breaks the entry; a
+// portless PRIMARY breaks the thing the user clicked, and the platform would
+// have published a Service and an Ingress in front of a port nothing listens on.
+func TestHowManyEntriesRestOnAPortNothingDeclares(t *testing.T) {
+	c := corpus(t)
+
+	var offered, withPortless, portlessWorkloads, primaryPortless int
+	for _, e := range c.Entries() {
+		// No port resolver on purpose: with one the field is either filled in
+		// or the entry is blocked, and this is counting how often the template
+		// itself is silent.
+		plan, err := c.Plan(e.Name, catalog.Options{Namespace: testNamespace, Pin: resolves})
+		if err != nil {
+			continue
+		}
+		offered++
+		found := false
+		for i, w := range plan.Workloads {
+			if w.Spec.Port != 0 {
+				continue
+			}
+			found = true
+			portlessWorkloads++
+			if i == plan.Primary {
+				primaryPortless++
+			}
+		}
+		if found {
+			withPortless++
+		}
+	}
+
+	if offered == 0 {
+		t.Fatal("no entry planned, so every count below is zero for the wrong reason")
+	}
+	t.Logf("of %d entries that plan, %d have a workload whose port nothing in the template "+
+		"declares (%d workloads in all), and in %d of them that workload is the entry's own "+
+		"application", offered, withPortless, portlessWorkloads, primaryPortless)
 }
