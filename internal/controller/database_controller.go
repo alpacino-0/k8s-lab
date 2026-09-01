@@ -75,6 +75,14 @@ func (r *DatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 // normaliseDatabase fills in what the CRD's defaults would have supplied, for
 // an object built in Go that never passed through the API server.
 func normaliseDatabase(db *platformv1alpha1.Database) {
+	// The engine first, because everything below and every name this renders
+	// depends on it. Empty has to mean postgres in exactly the way the CRD's
+	// default does, or a Database built in Go is labelled differently from the
+	// same Database created through the API — and that label is inside a
+	// selector no update can change afterwards.
+	if db.Spec.Engine == "" {
+		db.Spec.Engine = platformv1alpha1.EnginePostgres
+	}
 	if db.Spec.Database == "" {
 		db.Spec.Database = defaultDatabaseName
 	}
@@ -159,7 +167,14 @@ func (r *DatabaseReconciler) reconcileDatabase(ctx context.Context, db *platform
 	// creating them would leave a schedule running against a database whose
 	// owner turned backups off — and the archives it keeps writing are the
 	// thing they asked to stop paying for.
-	if db.Spec.Backup == nil {
+	//
+	// Redis takes the same branch as "no backup asked for", and the API refuses
+	// the combination outright so this is only reached by an object built in Go.
+	// It is here anyway rather than left to the API: what the other branch
+	// renders is a CronJob that runs pg_dump against a server that has never
+	// heard of it, and the failure would arrive nightly, in a Job, addressed to
+	// nobody.
+	if db.Spec.Backup == nil || db.Spec.Engine == platformv1alpha1.EngineRedis {
 		if err := r.deleteDatabaseChild(ctx, db, &batchv1.CronJob{}, backupName(db)); err != nil {
 			return fmt.Errorf("removing the backup schedule: %w", err)
 		}

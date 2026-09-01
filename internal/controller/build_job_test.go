@@ -182,17 +182,28 @@ func TestInsecureRegistryNamesOnlyARegistry(t *testing.T) {
 
 // fakeLifecycle writes stand-ins for the five phase binaries. Each records that
 // it ran; the one named in failing prints to stderr and exits non-zero.
+// The five, in the order the platform specification mandates. Named once so the
+// stand-ins and the assertions cannot disagree about which exist.
+var lifecyclePhases = []string{"analyzer", "detector", phaseRestorer, "builder", phaseExporter}
+
+// The two that read and write the cache, named because three places assert
+// about them by name.
+const (
+	phaseRestorer = "restorer"
+	phaseExporter = "exporter"
+)
+
 func fakeLifecycle(t *testing.T, dir, failing string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, phase := range []string{"analyzer", "detector", "restorer", "builder", "exporter"} {
+	for _, phase := range lifecyclePhases {
 		body := "#!/bin/sh\nprintf '%s\\n' " + phase + " >> \"$TRACE\"\n"
 		switch phase {
 		case failing:
 			body += "printf '%s' \"$FAILURE\" >&2\nexit 51\n"
-		case "exporter":
+		case phaseExporter:
 			body += "printf '[image]\\n  tags = [\"x\"]\\n  digest = \"" + testDigest + "\"\\n' > \"$LAYERS/report.toml\"\n"
 		}
 		if err := os.WriteFile(filepath.Join(dir, phase), []byte(body), 0o755); err != nil {
@@ -226,7 +237,7 @@ func runScript(t *testing.T, script string, env map[string]string) scriptRun {
 		}
 		run.code = exit.ExitCode()
 	}
-	if b, err := os.ReadFile(env["RESULT"]); err == nil {
+	if b, err := os.ReadFile(env[envResult]); err == nil {
 		run.result = string(b)
 	}
 	return run
@@ -250,13 +261,14 @@ func buildpackEnv(t *testing.T, method string) map[string]string {
 	}
 	return map[string]string{
 		envImage:      "registry.damga-registry.svc:5000/tenant-a/app:" + testRevision,
+		envCacheImage: testCacheRef,
 		envPathInRepo: "",
 		"PREPARED":    filepath.Join(root, "prepared"),
 		"APP":         filepath.Join(root, "app"),
 		"LAYERS":      filepath.Join(root, "layers"),
 		"LIFECYCLE":   filepath.Join(root, "lifecycle"),
 		"ERR":         filepath.Join(root, "phase.err"),
-		"RESULT":      filepath.Join(root, "result"),
+		envResult:     filepath.Join(root, "result"),
 		"TRACE":       filepath.Join(root, "trace"),
 	}
 }
@@ -398,14 +410,15 @@ func TestNoDockerfileHandsOffWithoutAnswering(t *testing.T) {
 	head := git("rev-parse", "HEAD")
 
 	env := map[string]string{
-		"REPO":        origin,
-		"REVISION":    head,
-		"METHOD":      "detect",
+		envRepo:       origin,
+		envRevision:   head,
+		envMethod:     "detect",
 		envPathInRepo: "",
 		envImage:      "registry.damga-registry.svc:5000/tenant-a/app:" + head,
-		"WORKSPACE":   filepath.Join(root, "workspace"),
-		"RESULT":      filepath.Join(root, "result"),
-		"HOME":        root,
+		envCacheImage: testCacheRef,
+		envWorkspace:  filepath.Join(root, "workspace"),
+		envResult:     filepath.Join(root, "result"),
+		envHome:       root,
 	}
 	run := runScript(t, buildScript, env)
 	if run.code != 0 {
@@ -415,7 +428,7 @@ func TestNoDockerfileHandsOffWithoutAnswering(t *testing.T) {
 		t.Fatalf("it answered %q for a build it did not perform; the container after it has "+
 			"the answer, and the control plane reads the first one it finds", run.result)
 	}
-	method, err := os.ReadFile(filepath.Join(env["WORKSPACE"], "method"))
+	method, err := os.ReadFile(filepath.Join(env[envWorkspace], "method"))
 	if err != nil {
 		t.Fatalf("the decision was never written down, so the next container cannot know it: %v", err)
 	}

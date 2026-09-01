@@ -33,7 +33,8 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          Database is a PostgreSQL server this platform runs for one app environment.
+          Database is a data server this platform runs for one app environment:
+          PostgreSQL, or Redis.
 
           # Why it is not a field on Workload
 
@@ -86,7 +87,15 @@ spec:
           metadata:
             type: object
           spec:
-            description: DatabaseSpec is what the tenant asks for.
+            description: |-
+              DatabaseSpec is what the tenant asks for.
+
+              A backup schedule is PostgreSQL's alone for now. The rehearsal dumps with
+              pg_dump, restores with psql and counts rows in tables, and none of those four
+              words mean anything to Redis — so a Redis Database with a backup block is
+              refused here rather than accepted and then quietly never backed up. The
+              alternative, a CronJob that fails every night, is the same absence with an
+              alert attached.
             properties:
               backup:
                 description: |-
@@ -134,17 +143,49 @@ spec:
                 type: object
               database:
                 default: app
-                description: Database is the database name inside the server.
+                description: |-
+                  Database is the database name inside the server. PostgreSQL only: Redis
+                  numbers its databases and an application selects one in its connection
+                  string, so there is nothing here for the platform to name.
                 pattern: ^[a-z][a-z0-9_]*$
                 type: string
-              image:
+              engine:
+                default: postgres
                 description: |-
-                  Image is the PostgreSQL image to run.
+                  Engine is which server this is.
 
-                  Pinned by the tenant rather than chosen by the platform, and refused if
-                  it floats: PostgreSQL will not start on a data directory written by a
-                  newer major version, so an image that moves is an outage on the next pod
-                  restart, at a moment nothing connects to the change that caused it.
+                  Immutable, and that is not a style choice: the two write different things
+                  into the same volume, so an engine changed on a live Database points a
+                  server at a data directory written by the other one. PostgreSQL finds no
+                  PG_VERSION and Redis finds no RDB, and whichever of them starts does so
+                  against storage the tenant believes holds their data.
+                enum:
+                - postgres
+                - redis
+                type: string
+                x-kubernetes-validations:
+                - message: 'engine is immutable: the two write different things into
+                    the same volume'
+                  rule: self == oldSelf
+              image:
+                description: "Image is the server image to run.\n\nPinned by the tenant
+                  rather than chosen by the platform, and refused if it\nfloats. Both
+                  engines need that and neither needs it for the other's\nreason,
+                  which is worth writing down because the second engine arrived by\ninheriting
+                  the first one's sentence and the sentence was wrong.\n\nPostgreSQL
+                  breaks going *forward*: it will not start on a data directory\nwritten
+                  by a newer major version, so a tag that moves is an outage on the\nnext
+                  pod restart, at a moment nothing connects to the change that caused\nit.\n\nRedis
+                  breaks going *backward*, which is the other direction and a\ndifferent
+                  risk. Measured 2026-09-01 on one volume: redis:8.2.4 started on\na
+                  directory redis:7.4.10 had written and read the key back, and then\nredis:7.4.10
+                  refused the directory redis:8.2.4 had written —\n\n\t# Can't handle
+                  RDB format version 15\n\t# Fatal error loading the DB, check server
+                  logs. Exiting.\n\n— and exited. So a floating Redis tag survives
+                  the upgrade and destroys\nthe way back from it: the roll-back an
+                  operator reaches for when the new\nversion misbehaves is the thing
+                  that will not start. The pin is\nprotecting the escape route rather
+                  than the upgrade."
                 minLength: 1
                 type: string
                 x-kubernetes-validations:
@@ -223,13 +264,20 @@ spec:
                 type: string
               username:
                 default: app
-                description: Username is the role the application connects as.
+                description: |-
+                  Username is the role the application connects as. PostgreSQL only: Redis
+                  authenticates with a password and no user until ACLs are configured, and
+                  configuring them is not something this platform does yet.
                 pattern: ^[a-z][a-z0-9_]*$
                 type: string
             required:
             - image
             - storage
             type: object
+            x-kubernetes-validations:
+            - message: 'backup is not implemented for redis: the rehearsal dumps with
+                pg_dump and counts rows, and neither exists here'
+              rule: '!(has(self.backup) && self.engine == ''redis'')'
           status:
             description: DatabaseStatus reports what the platform observed.
             properties:
