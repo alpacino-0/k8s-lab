@@ -84,6 +84,9 @@ deployment script can call it unconditionally.
 | `-leader-elect` | `false` | Run the observer and the sweep on one replica only. Required if you run more than one. |
 | `-pending-timeout` | `30m` | How long an unobserved record may stay pending before it is marked unknown. Must exceed the cluster's progress deadline. |
 | `-shutdown-timeout` | `15s` | How long in-flight requests get on SIGTERM. |
+| `-notify-url-file` | *(empty)* | File holding the webhook URL a deploy notification is posted to. Empty sends none. **There is no `-notify-url`, on purpose.** |
+| `-notify-format` | `auto` | `auto`, `slack`, `discord` or `webhook`. `auto` reads it off the URL's host. |
+| `-notify-timeout` | `5s` | How long one delivery may take. |
 
 Two of these are easy to get wrong:
 
@@ -98,6 +101,54 @@ the cookie.
 **An empty `-evidence-dsn` is a demo, not an installation.** The server says so
 at startup. `bootstrap` refuses to run without one at all, because it would
 report an owner into a database that stops existing when the command returns.
+
+## Telling somebody a deploy failed
+
+```bash
+printf '%s' 'https://hooks.slack.com/services/…' > /etc/damga/notify-url
+chmod 600 /etc/damga/notify-url
+
+./damga -evidence-dsn ./damga.db -notify-url-file /etc/damga/notify-url
+```
+
+A file and not a flag value, which is the same decision `-git-token-file`
+records and for one more reason of its own: a Slack or Discord webhook URL *is*
+the credential — anyone holding it can post into that channel as you — and
+unlike a token it has no username beside it to make it look like one. A flag
+value is in the process table, in the shell history and in
+`kubectl describe pod`.
+
+The URL is never quoted back. Every refusal names the **file** instead, and a
+delivery failure names the **host**; the path, which is where both Slack and
+Discord keep the secret, is not in any message this server writes.
+
+**Four states are sent, out of nine.** `running`, `failed`, `rejected`, and
+`unknown` — the last being the sweep giving up, which is its own answer and the
+one most worth having, because silence and success look identical. `pending`,
+`syncing` and `applied` are damga narrating its own progress, and `superseded`
+means a newer deploy is about to send its own message. A channel that carries
+all nine is a channel somebody mutes, and then the one that mattered is muted
+with it.
+
+**Where it goes is read off the host.** `hooks.slack.com` gets `{"text": …}`,
+`discord.com` gets `{"content": …}`, and anything else gets the event as JSON
+with the same sentence in a `text` field — so a receiver that routes on the app
+name and one that pastes into a channel both work. `-notify-format` overrides
+the detection.
+
+**A notification nobody received does not fail the deploy**, and is not silent
+either. It is logged, and the message distinguishes the three ways it goes
+wrong: a URL that cannot be posted to at all (refused at startup, not at the
+first failed deploy), a receiver that never answered, and a receiver that
+answered and refused the body — quoting its own words, because a bare `400`
+reads as "damga sent something wrong" without saying what.
+
+> **This is not the alerting path.** `cluster/monitoring-values.yaml` still
+> routes Alertmanager to a `"null"` receiver, and `scripts/alert-test.sh` still
+> proves the chain only as far as Alertmanager's own API. That path carries
+> infrastructure alerts and arrives with the optional monitoring stack, which
+> `scripts/install.sh` does not install. This one is in every installation and
+> answers a different question: what happened to the deploy you just asked for.
 
 ## PostgreSQL
 

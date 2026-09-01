@@ -36,6 +36,7 @@ import (
 	"github.com/damgahq/damga/authz"
 	"github.com/damgahq/damga/evidence"
 	"github.com/damgahq/damga/identity"
+	"github.com/damgahq/damga/notify"
 	"github.com/damgahq/damga/placement"
 )
 
@@ -166,6 +167,23 @@ type Config struct {
 	// minutes on every Deployment this platform renders — or a rollout is given
 	// up on while it is still legitimately rolling.
 	PendingTimeout time.Duration
+
+	// NotifyURLFile is the path to a file holding the webhook URL deploy
+	// notifications are posted to. Empty sends none.
+	//
+	// A file, for the reason GitTokenFile is one and one more that is specific
+	// to this: a Slack or Discord webhook URL is a bearer credential — whoever
+	// holds it can post into that channel as you — and it is the whole
+	// credential, with no account name beside it to make it obviously secret
+	// when it turns up in a flag.
+	NotifyURLFile string
+
+	// NotifyFormat is the body shape: auto, slack, discord or webhook. Empty
+	// and auto both read it off the URL's host.
+	NotifyFormat string
+
+	// NotifyTimeout bounds one delivery. Zero is five seconds.
+	NotifyTimeout time.Duration
 }
 
 // BindFlags registers Config on a FlagSet, so the free main and an enterprise
@@ -199,6 +217,16 @@ func (c *Config) BindFlags(f *flag.FlagSet) {
 		"namespace holding the leader-election Lease; required out of cluster")
 	f.DurationVar(&c.PendingTimeout, "pending-timeout", 30*time.Minute,
 		"how long an unobserved record may stay pending before it is marked unknown")
+	// No -notify-url flag beside this one, deliberately, and the absence is the
+	// point: a webhook URL on the command line is in the process table, in the
+	// shell history and in `kubectl describe pod`. The same decision
+	// cmd/damga's bootstrap makes about a password.
+	f.StringVar(&c.NotifyURLFile, "notify-url-file", "",
+		"file holding the webhook URL deploy notifications are posted to; empty sends none")
+	f.StringVar(&c.NotifyFormat, "notify-format", string(notify.FormatAuto),
+		"notification body shape: auto, slack, discord or webhook")
+	f.DurationVar(&c.NotifyTimeout, "notify-timeout", 5*time.Second,
+		"how long one notification delivery may take")
 }
 
 // Options is the substitution surface. Two of its fields are seams and the rest
@@ -265,6 +293,12 @@ type Options struct {
 	// templates mounted should say, rather than offering an empty list that
 	// reads as a filter matching nothing.
 	Catalog CatalogSource
+
+	// Notifier delivers a message when a deploy reaches a state somebody wants
+	// to hear about. nil builds one from Config.NotifyURLFile, and no file
+	// configured means no notifier at all rather than a silent one — see
+	// notify.Wrap for why the absence is not a degraded mode.
+	Notifier notify.Notifier
 
 	// GitAuth answers how to authenticate to a repository. nil means the
 	// free build's answer, built from Config.GitTokenFile — and with no token

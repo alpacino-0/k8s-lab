@@ -12,6 +12,11 @@ permissions:
 env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}
   IMAGE_TAG: 1.0.0
+  # The owner this job bootstraps, so a later step can reach the API as
+  # somebody. Not a secret: it belongs to a cluster this job creates and
+  # deletes, reachable from nothing outside the runner. See the bootstrap call
+  # for why a literal is the least bad of the three options.
+  CI_OWNER_PASSWORD: ci-owner-password-not-a-secret
   # One string, because the build pod and the kubelet have to agree on it: the
   # image reference recorded in a Workload is what the kubelet pulls, and it is
   # the same reference the build pushed. cluster/registry.yaml explains why that
@@ -596,12 +601,21 @@ jobs:
           docker tag "damga-control-plane:${IMAGE_TAG}" damga-control-plane:upgrade-test
           kind load docker-image damga-control-plane:upgrade-test --name ci
 
-          # An owner, so the upgrade has something to lose. The output is
-          # discarded because bootstrap prints a generated password once, and
-          # this job's log is not where that belongs.
-          kubectl -n damga-system exec deploy/damga -- \
+          # An owner, so the upgrade has something to lose — and one whose
+          # password later steps can use, because bootstrap runs once per
+          # install and the notification step below needs to reach the API as
+          # somebody.
+          #
+          # A literal password in a workflow file, which is safe here and
+          # nowhere else: this cluster is created by this job, is reachable from
+          # nothing outside the runner, and is deleted with it. The alternative
+          # is worse — bootstrap prints a generated password to stdout, and
+          # capturing it means putting a credential in the job log. There is no
+          # -password flag for the same reason; -password-stdin is the only way
+          # in.
+          printf '%s' "$CI_OWNER_PASSWORD" | kubectl -n damga-system exec -i deploy/damga -- \
             /damga bootstrap -evidence-dsn /data/damga.db \
-            -email owner@example.test -tenant acme > /dev/null
+            -email owner@example.test -tenant acme -password-stdin > /dev/null
 
           # Two pollers. The tenant is measured through the ingress, the same
           # path a user takes; the control plane is measured through its ready
@@ -890,6 +904,179 @@ jobs:
             || { echo "what was written did not come back"; exit 1; }
 
           kubectl -n damga delete database ci-redis
+
+      # A deploy that fails has to reach a person, and this is the only place
+      # the whole path runs at once.
+      #
+      # What the unit tests cannot reach: the shipped binary reading a webhook
+      # URL out of a mounted Secret, the pod resolving a receiver and posting to
+      # it, and a real deploy through the real API producing the transition that
+      # sends it. The deploy is made to fail on purpose — it names a repository
+      # nothing answers on — because a failed deploy is the notification worth
+      # having, and because it is also the only deploy this job can perform:
+      # there is no git server here to succeed against.
+      #
+      # The receiver is a pod rather than a listener on the runner. The control
+      # plane then reaches it by Service name over the network it already uses,
+      # with no gateway address to guess, and `kubectl logs` is how the body
+      # comes back.
+      - name: A failed deploy must reach a webhook, saying which app and why
+        run: |
+          cat > /tmp/receiver.py <<'PY'
+          import http.server
+          import sys
+
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+              def do_POST(self):
+                  length = int(self.headers.get("content-length") or 0)
+                  sys.stdout.write(self.rfile.read(length).decode("utf-8", "replace") + "\n")
+                  sys.stdout.flush()
+                  self.send_response(200)
+                  self.end_headers()
+
+              # The default writes a line per request to stderr, which would sit
+              # in the same log the assertion greps and could satisfy it without
+              # a body ever arriving.
+              def log_message(self, *args):
+                  pass
+
+
+          http.server.HTTPServer(("0.0.0.0", 9099), Handler).serve_forever()
+          PY
+          kubectl -n damga-system create configmap notify-receiver --from-file=receiver.py=/tmp/receiver.py
+
+          kubectl apply -f - <<'YAML'
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: notify-receiver
+            namespace: damga-system
+            labels: {app: notify-receiver}
+          spec:
+            restartPolicy: Never
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 65532
+              seccompProfile: {type: RuntimeDefault}
+            containers:
+              - name: receiver
+                image: python:3.13-alpine
+                command: [python3, /app/receiver.py]
+                ports: [{containerPort: 9099}]
+                volumeMounts:
+                  - {name: script, mountPath: /app, readOnly: true}
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities: {drop: [ALL]}
+                resources:
+                  requests: {cpu: 10m, memory: 32Mi}
+                  limits: {memory: 128Mi}
+            volumes:
+              - name: script
+                configMap: {name: notify-receiver}
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: {name: notify-receiver, namespace: damga-system}
+          spec:
+            selector: {app: notify-receiver}
+            ports: [{port: 9099, targetPort: 9099}]
+          YAML
+          kubectl -n damga-system wait --for=condition=Ready pod/notify-receiver --timeout=180s
+
+          # Both credentials as mounted Secrets and neither as a flag value.
+          # The git token is a placeholder: the push must fail, and what is
+          # under test is that the failure is reported rather than that it can
+          # authenticate.
+          kubectl -n damga-system create secret generic notify-url \
+            --from-literal=url=http://notify-receiver.damga-system.svc:9099/hook
+          kubectl -n damga-system create secret generic git-token \
+            --from-literal=token=not-a-real-token
+
+          # The existing args plus two, read back rather than restated: a second
+          # copy of that list in this file is one that stops matching
+          # cluster/control-plane.yaml without anything noticing.
+          args=$(kubectl -n damga-system get deploy damga -o json \
+            | jq -c '.spec.template.spec.containers[0].args
+                     + ["-notify-url-file=/etc/damga/notify/url",
+                        "-git-token-file=/etc/damga/git/token"]')
+          kubectl -n damga-system patch deployment damga --type=json -p "$(jq -n --argjson args "$args" '[
+            {"op":"replace","path":"/spec/template/spec/containers/0/args","value":$args},
+            {"op":"add","path":"/spec/template/spec/volumes/-",
+             "value":{"name":"notify","secret":{"secretName":"notify-url"}}},
+            {"op":"add","path":"/spec/template/spec/volumes/-",
+             "value":{"name":"git","secret":{"secretName":"git-token"}}},
+            {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-",
+             "value":{"name":"notify","mountPath":"/etc/damga/notify","readOnly":true}},
+            {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-",
+             "value":{"name":"git","mountPath":"/etc/damga/git","readOnly":true}}
+          ]')"
+          kubectl -n damga-system rollout status deployment/damga --timeout=300s
+
+          # Said at startup, so a URL that cannot be posted to is a process that
+          # does not start. Asserted here as well, because the alternative to
+          # reading it is discovering later that notifications were off and the
+          # body assertion below had been vacuous.
+          kubectl -n damga-system logs deploy/damga | grep -q 'deploy notifications are on' || {
+            echo "the control plane started without notifications; the rest of this step proves nothing"
+            kubectl -n damga-system logs deploy/damga --tail=40
+            exit 1
+          }
+
+          kubectl -n damga-system port-forward svc/damga 9000:80 >/dev/null 2>&1 &
+          PF=$!
+          trap 'kill $PF 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:9000/healthz >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          jar=$(mktemp)
+          curl -sf -c "$jar" -X POST http://127.0.0.1:9000/api/v1/login \
+            -H 'Content-Type: application/json' \
+            -d "{\"email\":\"owner@example.test\",\"password\":\"${CI_OWNER_PASSWORD}\"}" \
+            > /dev/null || { echo "the owner bootstrapped earlier could not sign in"; exit 1; }
+          tenant=$(curl -sf -b "$jar" http://127.0.0.1:9000/api/v1/me | jq -r '.memberships[0].tenantId')
+          [ -n "$tenant" ] && [ "$tenant" != "null" ] || { echo "no tenant came back from /me"; exit 1; }
+
+          curl -sf -b "$jar" -X POST "http://127.0.0.1:9000/api/v1/tenants/${tenant}/apps" \
+            -H 'Content-Type: application/json' \
+            -d '{"app":"notify-probe","env":"prod",
+                 "repoUrl":"https://127.0.0.1:1/nope.git","branch":"main",
+                 "path":"apps/notify-probe","namespace":"notify-probe"}' > /dev/null
+
+          # Nothing answers on 127.0.0.1:1 inside that pod, so the push is
+          # refused at once. The record is appended before the push is
+          # attempted, which is what makes the failure reportable at all.
+          code=$(curl -s -o /tmp/deploy.out -w '%{http_code}' -b "$jar" -X POST \
+            "http://127.0.0.1:9000/api/v1/tenants/${tenant}/apps/notify-probe/envs/prod/deploys" \
+            -H 'Content-Type: application/json' -d '{"image":"registry.example.test/acme/api:1"}')
+          echo "the deploy answered ${code}: $(cat /tmp/deploy.out)"
+          [ "$code" = "502" ] || {
+            echo "the deploy was expected to fail its push and answered ${code}; no failure was recorded"
+            exit 1
+          }
+
+          for _ in $(seq 1 30); do
+            kubectl -n damga-system logs pod/notify-receiver | grep -q notify-probe && break
+            sleep 1
+          done
+          body=$(kubectl -n damga-system logs pod/notify-receiver)
+          echo "::group::what the receiver was posted"
+          echo "$body"
+          echo "::endgroup::"
+
+          # Not "a request arrived". A receiver that answers 200 to an empty
+          # body would pass that, and so would one posted a message about a
+          # different application.
+          for want in notify-probe prod failed 'the commit was never pushed'; do
+            grep -q "$want" <<<"$body" || {
+              echo "the notification never said '${want}', so it cannot tell anybody what happened"
+              exit 1
+            }
+          done
 
       # The product's headline feature, on a real cluster for the first time.
       #
