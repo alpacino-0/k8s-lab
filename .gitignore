@@ -34,6 +34,10 @@ Dockerfile.cross
 # excluded by contents rather than as a whole, because git does not descend into
 # an excluded directory to find a negation.
 docs/*
+# And one tracked file that exists to say the others are missing: a worktree is
+# built from a commit, so a note in no commit is a note nobody standing in a
+# worktree can read. See docs/WORKING-NOTES.md.
+!docs/WORKING-NOTES.md
 !docs/DEPLOY.md
 !docs/CONTROL-PLANE.md
 !docs/BACKUP-SURVEY.md
