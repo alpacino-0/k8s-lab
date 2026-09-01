@@ -52,8 +52,10 @@ type Result struct {
 	// configuration mistake in the application.
 	//
 	// Anything else naming one of these is asking for a value it cannot be
-	// given. There are 109 templates with a postgres service and this is how a
-	// caller tells that case apart from a credential it may freely invent.
+	// given. 109 of the 369 templates that parse convert a service into a
+	// Database — computed, with the rest, by
+	// TestTheCorpusCountsBehindTheDocComments — and this is how a caller tells
+	// that case apart from a credential it may freely invent.
 	DatabaseSources []Source
 
 	// Notes is what did not convert. Never empty for a non-trivial template,
@@ -80,8 +82,16 @@ type Generated struct {
 	// source must receive one value: n8n declares N8N_RUNNERS_AUTH_TOKEN twice,
 	// once in each of its two services, both as ${SERVICE_PASSWORD_N8N}, and a
 	// caller that mints per key gives the task runner a token the broker does
-	// not accept. 111 of the 369 templates that parse share a source between
+	// not accept. 64 of the 369 templates that parse share a source between two
 	// services this way.
+	//
+	// This said 111 until the count was computed rather than remembered, and
+	// 111 is still a true number about the same corpus — it is what you get
+	// once a service that became a Database is counted as one of the two, and
+	// those are in DatabaseSources below rather than here, because their value
+	// must not be minted at all. The two fields split a set that one sentence
+	// used to describe. Both counts are computed by
+	// TestTheCorpusCountsBehindTheDocComments.
 	Sources []Source
 
 	// Value is what Key becomes once every source has a value: the template's
@@ -89,7 +99,8 @@ type Generated struct {
 	// already resolved.
 	//
 	// Usually just "${NAME}". It is a whole string for the 51 templates that
-	// build one around a credential — a connection string is a user and a
+	// build one around a credential — counted with the rest by
+	// TestTheCorpusCountsBehindTheDocComments — a connection string is a user and a
 	// password inside a URL — and those are the reason this is a template
 	// rather than a bare source name. Resolving them to their defaults, which
 	// is what happens to every other interpolation here, writes the empty
