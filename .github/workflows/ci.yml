@@ -900,6 +900,27 @@ jobs:
             -n kube-system -f cluster/metrics-server-values.yaml --wait --timeout 5m >/dev/null
           echo "metrics-server ready in $(($(date +%s)-start))s"
 
+          # Ready is not the same as having a sample, and this step learned the
+          # difference the hard way: metrics-server reported Ready in 25s and
+          # metrics.k8s.io answered "not answering in this cluster" a moment
+          # later, because a scrape has to happen before there is anything to
+          # serve. The session that wrote this measured Ready locally and found
+          # data waiting; on a slower runner the two came apart.
+          #
+          # Polled rather than slept, so the wait is as long as it needs to be
+          # and the number below says what it actually took.
+          start=$(date +%s)
+          for _ in $(seq 1 60); do
+            kubectl top pods -n damga --no-headers >/dev/null 2>&1 && break
+            sleep 2
+          done
+          kubectl top pods -n damga --no-headers >/dev/null 2>&1 \
+            || { echo "metrics.k8s.io never served a sample; kubectl top says:";
+                 kubectl top pods -n damga 2>&1 | head -5;
+                 kubectl -n kube-system logs deploy/metrics-server --tail=30 || true;
+                 exit 1; }
+          echo "metrics.k8s.io served its first sample $(($(date +%s)-start))s after Ready"
+
           cat > /tmp/check-after.py <<'PY'
           import json, sys
           d = json.load(open(sys.argv[1]))
