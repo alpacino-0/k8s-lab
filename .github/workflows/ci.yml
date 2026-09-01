@@ -175,6 +175,29 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
 
+      # The control plane joined this job the same day it started being
+      # published. Before that it was built in the cluster job and thrown away
+      # with the cluster, so nothing left the machine unscanned. A published
+      # image that no gate has looked at is a different thing, and the two
+      # changes belong in the same commit rather than one push apart.
+      - name: Build the control plane image
+        run: docker build -f Dockerfile -t "damga-control-plane:${IMAGE_TAG}" .
+
+      - name: Control plane container must not run as root
+        run: |
+          uid=$(docker inspect "damga-control-plane:${IMAGE_TAG}" --format '{{.Config.User}}')
+          echo "control plane user: $uid"
+          case "$uid" in 0|root|""|0:*|root:*) echo "control plane image runs as root"; exit 1 ;; esac
+
+      - name: Scan the control plane image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: damga-control-plane:${{ env.IMAGE_TAG }}
+          format: table
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
   # ------------------------------------------------------------- operator
   operator:
     name: Build and test the operator
