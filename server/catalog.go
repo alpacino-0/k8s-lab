@@ -587,14 +587,28 @@ func planEntry(src CatalogSource, name string, o catalog.Options) (catalog.Plan,
 // Three refusals, and only the first belongs to the template. The other two are
 // this platform's own limits, which is why they are spelled out rather than
 // folded into "cannot be installed": a user who is told n8n is unsupported will
-// go and look for a different n8n, and a user who is told the write path holds
-// one workload per environment has been told something true.
+// go and look for a different n8n, and a user who is told which value nothing
+// here can mint has been told something they can act on.
 //
-// Measured by running this function over the upstream corpus of 341 offered
-// entries: 59 install as they stand, and 146 once images resolve to digests —
-// Options.Pin is the difference and it is empty. 117 of the 341 are stopped by
-// the object count alone, which is the write path's limit rather than the
-// converter's.
+// This is also the number the product is judged by, so it is measured through
+// this function rather than through the planner behind it. catalog.Plan's own
+// Installable() is a narrower question — whether the plan has blockers — and
+// answers a larger number than a user ever sees, because it does not know about
+// the values this platform cannot mint.
+//
+// Measured 2026-09-01 over the 341 entries the upstream corpus offers, by
+// walking every one of them through this function:
+//
+//	81   with -no-image-pinning
+//	202  with the resolver the flag turns off, over the real internet
+//	206  with a resolver that never fails, which is the ceiling the other two
+//	     are measured against
+//
+// The gap between 202 and 206 is ten references out of 228 that did not
+// resolve, and none of them is this platform's doing: five are vanity or
+// self-hosted registries rate limiting one address, three want a credential,
+// two are ghcr.io packages that are not public. Five of those ten are
+// address-dependent, so 202 is a floor rather than a constant.
 func whyRefused(p catalog.Plan) []string {
 	_, unmintable := plannedSecrets(p)
 	out := make([]string, 0, len(p.Blockers)+len(unmintable))
