@@ -110,6 +110,15 @@ belongs next to the fix.
 **Numbers are measured, not estimated.** If a comment or a README claims a
 duration, a count, or a rate, it came from a run. Say where it came from.
 
+**Measure a number twice, with different code.** A count that is wrong is
+usually not implausible — it is a number nobody can look at and doubt. The
+corpus counts in `compose/corpus_test.go` came out 45 and 105 on the first run,
+because the loop that counted them also filled a map and left it early. Nothing
+about 45 looks wrong. It was caught by having measured the same thing already,
+with throwaway code, and getting 64 and 111. Neighbouring numbers that match a
+known value tell you the method agrees with whoever wrote the comment; they do
+not tell you this run was right. Only the second measurement does that.
+
 **A rule that is not tested is decoration.** Every fix is bound to a test that
 fails with its own message when the fix is reverted — a test satisfied for the
 wrong reason keeps passing after the guard it was written for is gone.
