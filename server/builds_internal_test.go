@@ -239,6 +239,9 @@ func TestCreateBuildHandsTheClusterWhatItValidated(t *testing.T) {
 	}
 }
 
+// The resource these cases name, which is also the one the endpoint creates.
+const buildsResource = "builds"
+
 // A cluster that refuses the create because the control plane has not been
 // granted the right is not a bad gateway. It is the same missing permission the
 // empty seam stands for, arriving one step later, and it is fixed in the same
@@ -246,7 +249,7 @@ func TestCreateBuildHandsTheClusterWhatItValidated(t *testing.T) {
 func TestCreateBuildTranslatesAForbiddenIntoTheMissingPermission(t *testing.T) {
 	h := newHarness(t)
 	h.stores.builds = &recordingCreator{err: apierrors.NewForbidden(
-		schema.GroupResource{Group: "platform.damga.co", Resource: "builds"}, "",
+		schema.GroupResource{Group: "platform.damga.co", Resource: buildsResource}, "",
 		errors.New("builds.platform.damga.co is forbidden"))}
 
 	code, body := h.createBuild(accMember, `{
@@ -273,5 +276,86 @@ func TestCreateBuildRefusesAViewer(t *testing.T) {
 	}
 	if h.stores.builds.(*recordingCreator).got != nil {
 		t.Error("a refused request reached the cluster")
+	}
+}
+
+// A full namespace is not a missing permission, and until this existed it was
+// reported as one.
+//
+// Both arrive as Forbidden, so the endpoint answered 501 "the control plane is
+// not permitted to create builds in damga-build" — a sentence that is true of a
+// missing RoleBinding, sends whoever reads it to the chart, and is what a user
+// would have seen on the two hundredth build of an installation whose records
+// nothing was collecting. It is the shape this repository has lost rounds to
+// twice: one sentence that is true for more than one cause.
+//
+// The three refusals here are the three causes, and each has to be told apart
+// from the other two.
+func TestCreateBuildTellsAFullQuotaApartFromAMissingPermission(t *testing.T) {
+	// The answer the other two causes must not produce, named because it is
+	// the whole point: for a long time it was the answer to all three.
+	const notPermitted = "not permitted"
+
+	forbidden := func(detail string) error {
+		return apierrors.NewForbidden(
+			schema.GroupResource{Group: "platform.damga.co", Resource: buildsResource}, "",
+			errors.New(detail))
+	}
+
+	for _, tc := range []struct {
+		what   string
+		err    error
+		code   int
+		says   string
+		unsaid string
+	}{
+		{
+			what: "the namespace is full",
+			// The admission plugin's wording. Read from Kubernetes rather than
+			// measured here: a quota is enforced only where a controller
+			// computes its usage, and envtest runs none — measured, five
+			// creates against a quota of two all succeeded. The CI step that
+			// fills a real quota is where this string is checked.
+			err: forbidden("exceeded quota: build-quota, requested: " +
+				"count/builds.platform.damga.co=1, used: count/builds.platform.damga.co=200, " +
+				"limited: count/builds.platform.damga.co=200"),
+			code:   http.StatusServiceUnavailable,
+			says:   "no room",
+			unsaid: notPermitted,
+		},
+		{
+			what: "the quota cannot count the type",
+			// This one is measured, by this repository, in the CI round it
+			// cost: cluster/build-namespace.yaml records the message and the
+			// ordering that fixes it.
+			err:    forbidden("status unknown for quota: build-quota"),
+			code:   http.StatusInternalServerError,
+			says:   "before the quota that counts it",
+			unsaid: notPermitted,
+		},
+		{
+			what:   "the control plane may not create builds",
+			err:    forbidden("builds.platform.damga.co is forbidden"),
+			code:   http.StatusNotImplemented,
+			says:   notPermitted,
+			unsaid: "quota",
+		},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			h := newHarness(t)
+			h.stores.builds = &recordingCreator{err: tc.err}
+
+			code, body := h.createBuild(accMember, `{
+				"repo":"https://github.com/acme/api","revision":"`+testRevision+`"}`)
+			if code != tc.code {
+				t.Errorf("%s = %d, want %d: %s", tc.what, code, tc.code, body)
+			}
+			if !strings.Contains(body, tc.says) {
+				t.Errorf("the answer does not name this cause (%q): %s", tc.says, body)
+			}
+			if strings.Contains(body, tc.unsaid) {
+				t.Errorf("the answer describes a different cause (%q): %s", tc.unsaid, body)
+			}
+		})
 	}
 }

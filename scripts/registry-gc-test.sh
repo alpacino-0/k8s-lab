@@ -16,6 +16,12 @@
 #   4. The store shrank, read off the volume before and after — not taken from
 #      the job's own report. A job that prints two numbers and collects nothing
 #      is precisely the failure the first three assertions can be fooled by.
+#   5. The build cache survived the sweep that pruned the images, and did not
+#      spend one of the retained slots. A collector that counts it as an image
+#      keeps nine builds where the manifest says ten.
+#   6. A cache last written long ago is collected. Backdated on the volume, so
+#      that "nothing was collected" and "there was nothing to collect" cannot
+#      produce the same green.
 #
 # The images are pushed with curl rather than built. What is under test is the
 # store, and to a registry a layer is bytes with a digest; building one would
@@ -156,6 +162,14 @@ for tag in "${TAGS[@]}"; do
   sleep 1
 done
 
+# The build cache, pushed as the builder pushes it: a tag in the same repository
+# as the images built from it. internal/controller/build_job.go writes this name
+# on every build, and the collector has to treat it as neither an image nor
+# rubbish — see the two assertions about it below.
+CACHE_TAG="${CACHE_TAG:-buildcache}"
+CACHE_LAYER=$(push_image "$CACHE_TAG") || { echo "could not push the cache tag" >&2; exit 1; }
+note "$CACHE_TAG -> ${CACHE_LAYER:0:19}…"
+
 BEFORE=$(store_kib)
 note "store before: ${BEFORE} KiB"
 
@@ -217,6 +231,51 @@ note "store after: ${AFTER} KiB (freed ${FREED} KiB, two ${LAYER_MB}MiB layers =
 [[ "$FREED" -ge "$MIN" ]] && pass "the store shrank by ${FREED} KiB" \
                           || fail "the store gave back ${FREED} KiB and the two pruned images hold at \
 least ${MIN} KiB — the manifests went and the bytes stayed"
+
+# 5. the cache is not an image, and did not spend an image's slot
+#
+# RETAIN was 1 for that run. Four tags were pushed and the newest image is the
+# one that had to survive; if the collector counted the cache as a tag, the
+# cache is the newest thing in the repository and the image before it goes
+# instead — which is nine builds kept where the manifest says ten, and nobody
+# would see it until a rollback found nothing.
+code=$(manifest_code "$CACHE_TAG")
+[[ "$code" == 200 ]] && pass "the fresh cache survived (manifest $code)" \
+                     || fail "the cache answers $code — a cache that is collected on the next \
+sweep is a cache that is rebuilt on every build, which is the opposite of what it is for"
+
+# 6. a cache nothing has refreshed is collected
+#
+# Backdated on the volume rather than waited for, because the alternative is a
+# test that takes a fortnight. The link's mtime is what the job reads, and it is
+# what the store writes when it accepts a push — so moving it is the same input
+# an abandoned repository produces, arrived at sooner.
+CACHE_LINK="/var/lib/registry/docker/registry/v2/repositories/$REPO/_manifests/tags/$CACHE_TAG/current/link"
+if kubectl -n "$NAMESPACE" exec deploy/registry -- touch -t 202001010000 "$CACHE_LINK" 2>/dev/null; then
+  JOB2="${JOB}-stale"
+  kubectl -n "$NAMESPACE" create job "$JOB2" --from=cronjob/registry-gc \
+          --dry-run=client -o json |
+    jq '(.spec.template.spec.containers[0].env[] | select(.name == "RETAIN") | .value) = "1"' |
+    kubectl -n "$NAMESPACE" apply -f - >/dev/null || {
+      echo "could not create the second collector job" >&2
+      exit 1
+    }
+  for _ in $(seq 1 60); do
+    s2=$(kubectl -n "$NAMESPACE" get job "$JOB2" -o jsonpath='{.status.succeeded}' 2>/dev/null)
+    f2=$(kubectl -n "$NAMESPACE" get job "$JOB2" -o jsonpath='{.status.failed}' 2>/dev/null)
+    [[ "${s2:-0}" -ge 1 || "${f2:-0}" -ge 1 ]] && break
+    sleep 5
+  done
+  kubectl -n "$NAMESPACE" logs "job/$JOB2" --tail=-1 2>/dev/null | sed 's/^/  | /'
+  kubectl -n "$NAMESPACE" delete job "$JOB2" --ignore-not-found --wait=false >/dev/null 2>&1
+
+  code=$(manifest_code "$CACHE_TAG")
+  [[ "$code" == 404 ]] && pass "a cache last written in 2020 was collected (manifest $code)" \
+                       || fail "the stale cache answers $code — a repository nobody builds any \
+more keeps its cache for ever, and nothing in the store says why it is growing"
+else
+  fail "could not backdate the cache link; the stale-cache rule was not exercised at all"
+fi
 
 # The kept image is left behind on purpose only if this cannot remove it: the
 # repository is a probe's, not a tenant's, and it would otherwise sit in the

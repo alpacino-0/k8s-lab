@@ -89,6 +89,34 @@ type BuildCreator interface {
 	CreateBuild(ctx context.Context, build *platformv1alpha1.Build) error
 }
 
+// A quota refusal arrives as Forbidden, which is what every permission failure
+// also arrives as — so until these two existed, a full namespace was reported
+// as "the control plane is not permitted to create builds", with 501. That
+// sentence is true of a missing RoleBinding and sends whoever reads it to the
+// chart, while the actual cause is a namespace with no room in it. It is the
+// same shape this repository has been bitten by twice: one sentence that is
+// true for several causes.
+//
+// The two are told apart by the word the API server uses. A quota refusal names
+// the quota; an authorization refusal names a user, a verb and a resource and
+// never the word quota. Read from the admission plugin's message rather than
+// measured here, because a quota is only enforced where a controller computes
+// its usage and envtest runs none: measured, five creates against a quota of
+// two all succeeded. The CI step "the build quota refuses out loud" is where
+// this is checked against a real one.
+func isQuotaExhausted(err error) bool {
+	return apierrors.IsForbidden(err) && strings.Contains(err.Error(), "exceeded quota")
+}
+
+// isQuotaUncounted is the other half, and it is not fullness at all: a quota
+// that names a resource the API server has never heard of cannot compute a
+// usage for it, and refuses every create until it can. This repository has the
+// message written down from the run that produced it — see
+// cluster/build-namespace.yaml — which is why it is matched exactly.
+func isQuotaUncounted(err error) bool {
+	return apierrors.IsForbidden(err) && strings.Contains(err.Error(), "status unknown for quota")
+}
+
 // createBuildRequest is one commit to turn into one image.
 //
 // It names a repository because nothing else in the platform knows one. A
@@ -166,6 +194,26 @@ func createBuild(g guard, st stores) http.Handler {
 			return
 		}
 		switch err := st.builds.CreateBuild(r.Context(), build); {
+		case isQuotaUncounted(err):
+			// The quota counts a type the API server has not been told about.
+			// Its own words name the quota and not the missing type, which is
+			// why this sentence exists: this repository lost a CI round to it
+			// once, and the fix is an ordering — the Build CRD goes in before
+			// the quota that counts it. See cluster/build-namespace.yaml.
+			problem(w, http.StatusInternalServerError,
+				"this installation's build quota cannot count Build objects: the Build CRD has "+
+					"to be installed before the quota that counts it. The API server said: "+
+					err.Error())
+			return
+		case isQuotaExhausted(err):
+			// Full, which is a different thing from forbidden and used to be
+			// reported as it. 503 rather than 500: nothing is broken, there is
+			// no room, and the operator's collector frees some as builds finish.
+			problem(w, http.StatusServiceUnavailable,
+				"this installation has no room for another build record in "+BuildNamespace+
+					": the namespace quota is full and the records are collected as builds "+
+					"finish. The API server said: "+err.Error())
+			return
 		case apierrors.IsForbidden(err):
 			// The wiring exists and the permission does not. Named apart from
 			// every other cluster failure because it is the one an operator
@@ -297,10 +345,10 @@ func buildFor(registry, tenantID, app string, req createBuildRequest) (*platform
 				// Builds outlive the request that made them and share a
 				// namespace with every other tenant's, so this is the only way
 				// to answer "whose build is this" from the cluster.
-				"damga.co/tenant":              tenantID,
-				"damga.co/app":                 app,
-				"damga.co/revision":            revision,
-				"app.kubernetes.io/managed-by": "damga",
+				platformv1alpha1.BuildTenantLabel:   tenantID,
+				platformv1alpha1.BuildAppLabel:      app,
+				platformv1alpha1.BuildRevisionLabel: revision,
+				"app.kubernetes.io/managed-by":      "damga",
 			},
 		},
 		Spec: platformv1alpha1.BuildSpec{
