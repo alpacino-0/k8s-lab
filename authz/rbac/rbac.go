@@ -58,6 +58,15 @@ func (a *Authorizer) Authorize(
 		return authz.Decision{Allow: true, Reason: role + " may read"}, nil
 	case authz.ActionAppDeploy, authz.ActionAppRollback, authz.ActionEnvCreate, authz.ActionEvidenceExport:
 		return authz.Decision{Allow: role != roleViewer, Reason: role + " deploy right"}, nil
+	case authz.ActionAppRestart, authz.ActionAppScale:
+		// Weaker than deploying, and separate from it on purpose. Neither can
+		// introduce code: a restart replaces pods with the image that is
+		// already committed, and a scale changes how many of them there are.
+		// Folding them into app:deploy would mean an install that wants
+		// somebody who may keep the lights on without shipping releases has no
+		// way to say so — and the action set is closed precisely so that a new
+		// endpoint forces this decision instead of borrowing a neighbour's.
+		return authz.Decision{Allow: role != roleViewer, Reason: role + " may change how an app runs"}, nil
 	case authz.ActionAppDelete:
 		// Grouped with deploying rather than with administration, and it was
 		// tenant:admin for one release because this action did not exist yet.
