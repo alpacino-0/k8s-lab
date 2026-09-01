@@ -63,3 +63,113 @@ test('no reason from the API is no reason invented', () => {
   assert.deepStrictEqual(refusals({ installable: false }), []);
   assert.deepStrictEqual(refusals(null), []);
 });
+
+// --- the install form -------------------------------------------------------
+
+const {
+  installTargets, defaultPath, installBody, installOutcome,
+} = require('./assets/catalog.js');
+
+// The three values this page used to invent, and the reason inventing them was
+// worse than leaving them blank.
+test('the form offers what the tenant already has and invents nothing', () => {
+  const targets = installTargets([
+    { app: 'api', env: 'prod', repoUrl: 'https://git/acme', branch: 'main', namespace: 'damga' },
+    { app: 'web', env: 'prod', repoUrl: 'https://git/acme', branch: 'main', namespace: 'damga' },
+    { app: 'api', env: 'dev', repoUrl: 'https://git/acme-dev', branch: 'work', namespace: 'damga' },
+  ]);
+  assert.deepStrictEqual(targets.repos, ['https://git/acme', 'https://git/acme-dev']);
+  assert.deepStrictEqual(targets.namespaces, ['damga'], 'the same namespace twice is one option');
+  assert.deepStrictEqual(targets.branches, ['main', 'work']);
+});
+
+// A tenant with nothing deployed has nothing to offer, and that is the case the
+// page must not paper over: nothing in this platform creates a namespace, so a
+// name it made up would be committed and then refused by the cluster.
+test('a tenant with nothing deployed yields no options rather than a guess', () => {
+  const empty = installTargets([]);
+  assert.deepStrictEqual(empty, { repos: [], namespaces: [], branches: [] });
+  assert.deepStrictEqual(installTargets(undefined).namespaces, []);
+});
+
+// Two environments that resolve to one file: the platform refuses the second,
+// and a page that offered `apps/${app}` would walk every user into it.
+test('the environment is in the path, so two of them are two places', () => {
+  assert.strictEqual(defaultPath('api', 'prod'), 'apps/api/prod');
+  assert.notStrictEqual(defaultPath('api', 'prod'), defaultPath('api', 'dev'));
+});
+
+test('the dry run and the install send the same body', () => {
+  const entry = { name: 'gotify' };
+  const form = { app: 'notes', env: 'staging', repoUrl: 'https://git/acme', branch: 'main', namespace: 'damga' };
+
+  const preview = installBody(entry, form, { dryRun: true });
+  const real = installBody(entry, form);
+  assert.strictEqual(preview.dryRun, true);
+  assert.strictEqual(real.dryRun, undefined);
+
+  const { dryRun, ...previewRest } = preview;
+  assert.deepStrictEqual(previewRest, real,
+    'a preview of a different request is not a preview');
+  assert.strictEqual(real.path, 'apps/notes/staging', 'the path follows the name and the environment');
+  assert.strictEqual(real.namespace, 'damga');
+  assert.strictEqual(real.repoUrl, 'https://git/acme');
+});
+
+test('an explicit path is kept and whitespace is not sent', () => {
+  const body = installBody({ name: 'g' }, { app: ' notes ', env: ' prod ', path: ' apps/x ' });
+  assert.strictEqual(body.path, 'apps/x');
+  assert.strictEqual(installBody({ name: 'g' }, { app: 'notes', env: 'prod' }).path, 'apps/notes/prod');
+});
+
+// The one that matters. 201 means the placement was written and the manifest
+// was committed; it does not mean anything is running, and the two are minutes
+// and a whole subsystem apart.
+test('a successful install says committed, and says nothing is running yet', () => {
+  const out = installOutcome(201, {
+    app: { app: 'notes', env: 'prod' },
+    deploy: { seq: 4, state: 'pending' },
+  });
+  assert.strictEqual(out.ok, true);
+  assert.match(out.text, /committed/);
+  assert.doesNotMatch(out.text, /running/,
+    'the headline must not claim the thing that has not happened');
+  assert.match(out.note, /pending/, 'the deploy state is the API\'s answer and is quoted');
+  assert.match(out.note, /Nothing is running/);
+  assert.match(out.note, /notes/, 'the reader is told where to watch it');
+});
+
+test('a refused install lists every reason the endpoint gave', () => {
+  const out = installOutcome(422, {
+    installable: false,
+    refusals: ['this template becomes 2 objects', 'NOTES_KEY asks for a "user" value'],
+  });
+  assert.strictEqual(out.ok, false);
+  assert.strictEqual(out.reasons.length, 2,
+    'one reason at a time sends the reader round the loop by the endpoint\'s choice');
+});
+
+test('a name already taken is not reported as a broken install', () => {
+  const out = installOutcome(409, { detail: 'this app and environment already exist' });
+  assert.strictEqual(out.ok, false);
+  assert.match(out.text, /already/);
+  assert.strictEqual(out.note, 'this app and environment already exist');
+});
+
+// Silence is the failure this whole task was about. Every other status has to
+// produce a sentence, and it has to be the server's where there is one.
+test('no status ends in silence', () => {
+  for (const [status, body] of [
+    [501, { detail: 'this installation cannot start builds' }],
+    [503, { detail: 'this installation has no catalogue' }],
+    [500, null],
+    [400, { detail: 'an install needs a repository to write its manifests to' }],
+  ]) {
+    const out = installOutcome(status, body);
+    assert.strictEqual(out.ok, false);
+    assert.ok(out.text && out.text.length > 0, `HTTP ${status} produced no sentence`);
+    if (body && body.detail) {
+      assert.strictEqual(out.text, body.detail, 'the server said it better than this page can');
+    }
+  }
+});

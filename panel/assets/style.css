@@ -166,4 +166,26 @@ p[data-ok="false"] { color: var(--bad); }
   border-left: 3px solid var(--warn); background: var(--panel); border-radius: var(--radius);
 }
 .install { margin-top: .7rem; }
+
+/* The install form. It had none, because there was no form: the page sent an
+   invented environment, an invented namespace and an empty repository. */
+.install-form { display: grid; gap: .5rem; margin: .8rem 0; }
+.install-field { display: grid; gap: .2rem; font-size: .85rem; }
+.install-field span { color: var(--muted); }
+.install-field input {
+  padding: .4rem .55rem; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--bg); color: inherit;
+}
+/* What the page cannot fill in for the reader, and why. Not muted into the
+   background: on the first install of a new tenant this is the whole
+   instruction, and nothing else on the page says it. */
+.install-note {
+  margin: .4rem 0; padding: .45rem .6rem; font-size: .82rem;
+  border-left: 3px solid var(--accent); background: var(--panel); border-radius: var(--radius);
+}
+/* The outcome. Green says the manifest was committed and never that anything is
+   running — the sentence beside it carries that, and both are always shown. */
+.install-status { margin: .6rem 0 0; font-size: .88rem; }
+.install-status.ok { color: var(--ok); }
+.install-status.bad { color: var(--bad); }
 a { color: var(--accent); }
