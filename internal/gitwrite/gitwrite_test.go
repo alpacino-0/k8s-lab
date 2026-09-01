@@ -462,7 +462,8 @@ func keysOf(m map[string][]byte) []string {
 	return out
 }
 
-// What Render returns is written; what it leaves out is left alone.
+// What Render returns is written; what it leaves out is left alone, unless the
+// request said which files are its own.
 //
 // A characterisation test, and it is here because the semantics are load-bearing
 // and were incidental. Render's map is a set of files to write, not the desired
@@ -471,13 +472,17 @@ func keysOf(m map[string][]byte) []string {
 // to assume the other reading will leave a manifest in git that the control
 // plane believes it has retracted.
 //
-// It matters most for anything conditional. The signature policy is written
-// beside the workload manifest only while the app is connected to a repository;
-// disconnecting it cannot take the file away through this path, so a policy
-// enforcing an identity nothing is connected to any more would stay in git,
-// keep being applied, and reject every deploy of that app. Until this path can
-// express a deletion, the rule is that a conditional file may be added and
-// changed here but never withdrawn — which is why nothing offers to disconnect.
+// This case still holds, and the request it builds is the reason: request()
+// sets no Owns, so nothing here is removable. That is the contract every caller
+// written before Owns existed depends on, and it is why the field defaults to
+// removing nothing rather than to removing what a render omitted.
+//
+// The other half now exists and is in multifile_test.go: a request that answers
+// "this file is mine" gets omission read as removal, for those files only. It
+// had to, because "added and changed but never withdrawn" is a rule with a
+// cost — a service dropped from a template keeps its manifest, Argo CD keeps
+// applying it, and the object the platform believes it retracted goes on
+// running.
 func TestRenderWritesWhatItReturnsAndLeavesTheRestAlone(t *testing.T) {
 	url := remote(t)
 	w := newWriter(memory.New(0))
