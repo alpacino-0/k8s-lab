@@ -31,7 +31,8 @@ import (
 // +kubebuilder:printcolumn:name="Restored",type=date,JSONPath=`.status.lastRestore.finishedAt`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// Database is a PostgreSQL server this platform runs for one app environment.
+// Database is a data server this platform runs for one app environment:
+// PostgreSQL, or Redis.
 //
 // # Why it is not a field on Workload
 //
@@ -74,24 +75,66 @@ type Database struct {
 }
 
 // DatabaseSpec is what the tenant asks for.
+//
+// A backup schedule is PostgreSQL's alone for now. The rehearsal dumps with
+// pg_dump, restores with psql and counts rows in tables, and none of those four
+// words mean anything to Redis — so a Redis Database with a backup block is
+// refused here rather than accepted and then quietly never backed up. The
+// alternative, a CronJob that fails every night, is the same absence with an
+// alert attached.
+// +kubebuilder:validation:XValidation:rule="!(has(self.backup) && self.engine == 'redis')",message="backup is not implemented for redis: the rehearsal dumps with pg_dump and counts rows, and neither exists here"
 type DatabaseSpec struct {
-	// Image is the PostgreSQL image to run.
+	// Engine is which server this is.
 	//
-	// Pinned by the tenant rather than chosen by the platform, and refused if
-	// it floats: PostgreSQL will not start on a data directory written by a
-	// newer major version, so an image that moves is an outage on the next pod
-	// restart, at a moment nothing connects to the change that caused it.
+	// Immutable, and that is not a style choice: the two write different things
+	// into the same volume, so an engine changed on a live Database points a
+	// server at a data directory written by the other one. PostgreSQL finds no
+	// PG_VERSION and Redis finds no RDB, and whichever of them starts does so
+	// against storage the tenant believes holds their data.
+	// +kubebuilder:validation:Enum=postgres;redis
+	// +kubebuilder:default=postgres
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="engine is immutable: the two write different things into the same volume"
+	Engine DatabaseEngine `json:"engine,omitempty"`
+
+	// Image is the server image to run.
+	//
+	// Pinned by the tenant rather than chosen by the platform, and refused if it
+	// floats. Both engines need that and neither needs it for the other's
+	// reason, which is worth writing down because the second engine arrived by
+	// inheriting the first one's sentence and the sentence was wrong.
+	//
+	// PostgreSQL breaks going *forward*: it will not start on a data directory
+	// written by a newer major version, so a tag that moves is an outage on the
+	// next pod restart, at a moment nothing connects to the change that caused
+	// it.
+	//
+	// Redis breaks going *backward*, which is the other direction and a
+	// different risk. Measured 2026-09-01 on one volume: redis:8.2.4 started on
+	// a directory redis:7.4.10 had written and read the key back, and then
+	// redis:7.4.10 refused the directory redis:8.2.4 had written —
+	//
+	//	# Can't handle RDB format version 15
+	//	# Fatal error loading the DB, check server logs. Exiting.
+	//
+	// — and exited. So a floating Redis tag survives the upgrade and destroys
+	// the way back from it: the roll-back an operator reaches for when the new
+	// version misbehaves is the thing that will not start. The pin is
+	// protecting the escape route rather than the upgrade.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:XValidation:rule="self.contains('@') || self.split('/')[int(self.split('/').size()) - 1].contains(':')",message="image must carry an explicit tag or digest"
 	// +kubebuilder:validation:XValidation:rule="!self.endsWith(':latest')",message="image must not use the :latest tag"
 	Image string `json:"image"`
 
-	// Database is the database name inside the server.
+	// Database is the database name inside the server. PostgreSQL only: Redis
+	// numbers its databases and an application selects one in its connection
+	// string, so there is nothing here for the platform to name.
 	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9_]*$`
 	// +kubebuilder:default=app
 	Database string `json:"database,omitempty"`
 
-	// Username is the role the application connects as.
+	// Username is the role the application connects as. PostgreSQL only: Redis
+	// authenticates with a password and no user until ACLs are configured, and
+	// configuring them is not something this platform does yet.
 	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9_]*$`
 	// +kubebuilder:default=app
 	Username string `json:"username,omitempty"`
@@ -122,6 +165,19 @@ type DatabaseSpec struct {
 	// default they can arrive at by not reading.
 	Backup *DatabaseBackup `json:"backup,omitempty"`
 }
+
+// DatabaseEngine is which server a Database runs.
+type DatabaseEngine string
+
+const (
+	// EnginePostgres is the default, and it is the default because it is what
+	// every Database was before there was a choice. A default that moved would
+	// re-render existing objects onto a different server.
+	EnginePostgres DatabaseEngine = "postgres"
+	// EngineRedis is absorbed from chart/templates/redis.yaml — with its
+	// eviction policy reversed, for the reason written at redisArgs.
+	EngineRedis DatabaseEngine = "redis"
+)
 
 // DatabaseBackup describes the schedule and the rehearsal.
 type DatabaseBackup struct {

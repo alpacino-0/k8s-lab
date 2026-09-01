@@ -101,10 +101,61 @@ const (
 	// the container that builds.
 	workspaceVolume = "workspace"
 
-	// The two inputs both containers need: where the result is pushed, and
-	// which directory of the repository is the application.
+	// The three inputs both containers need: where the result is pushed, where
+	// the layers worth keeping are kept, and which directory of the repository
+	// is the application.
 	envImage      = "IMAGE"
+	envCacheImage = "CACHE_IMAGE"
 	envPathInRepo = "PATH_IN_REPO"
+	envRepo       = "REPO"
+	envRevision   = "REVISION"
+	envMethod     = "METHOD"
+
+	// And the paths both scripts read with a real default, so a test can point
+	// them somewhere and run the thing rather than assert about its text.
+	envWorkspace = "WORKSPACE"
+	envResult    = "RESULT"
+
+	// The variable the platform specification lists as a base-image one that
+	// SHOULD be in the lifecycle's environment; see buildpackHome.
+	envHome = "HOME"
+
+	// cacheTag is where a repository's reusable layers live, in the registry,
+	// beside the images built from it.
+	//
+	// A registry reference and not a volume, and that is the design rather than
+	// a preference. The obvious alternative is a PersistentVolumeClaim the
+	// builds share, and it was measured before it was rejected — because the
+	// reason to reject it is not the one it looks like.
+	//
+	// Measured 2026-09-01, the three-node kind cluster this repository runs,
+	// ten Jobs mounting one ReadWriteOnce claim, which is what the build
+	// namespace's count/jobs.batch of 10 permits:
+	//
+	//   all ten pods were scheduled, all ten ran, all ten Completed
+	//   all ten landed on one node, and all ten mounted the claim read-write
+	//   each of the ten appended a line and then counted the file: all read 10
+	//   no Multi-Attach, no Pending pod, no warning event at all
+	//
+	// So ReadWriteOnce does not serialise anything here. It is one *node*, not
+	// one pod, and the scheduler co-locates the pods precisely because the
+	// volume is node-bound — which turns the guard into its opposite: ten
+	// builds writing one cache directory at once, silently, and a build queue
+	// pinned to whichever node holds the volume. A corrupt cache from that
+	// reads later as a broken build, and nothing in the ten pods' output says
+	// where it came from.
+	//
+	// The registry has neither problem. Ten builds read one cache concurrently
+	// because a pull is a read; two builds of the same repository finishing at
+	// once push the same reference and the last writer wins, which costs the
+	// loser's cache and nothing else. It puts no build on any particular node.
+	// And it survives the pod, which is the whole point: the disk this job has
+	// dies with it.
+	//
+	// It cannot collide with an image this build pushes. buildImageRef tags
+	// with the revision, which the CRD pins to forty hex characters, and this
+	// is a word.
+	cacheTag = "buildcache"
 
 	// buildpackHome is set because the platform specification lists HOME as a
 	// base-image variable that SHOULD be in the lifecycle's environment and is
@@ -130,7 +181,6 @@ const (
 // the script for real. It defaults to the same path the pod spec sets, so the
 // container behaves identically whether or not anybody set it.
 const resultPrelude = `set -eu
-: "${IMAGE:?}"
 
 RESULT=${RESULT:-` + BuildResultPath + `}
 RAN=unknown
@@ -159,6 +209,29 @@ fail() { say "$1"; exit 1; }
 # first version did exactly that, and the only reason it was not shipped is that
 # reading it back was cheaper than watching it run.
 trap 'rc=$?; [ "$rc" = 0 ] || [ -n "$SAID" ] || say "the build exited with status $rc; see the job log"' EXIT
+
+# Inputs are checked with an explicit test and not with ${VAR:?}, which is what
+# this did until the check for the cache reference was added to it and the new
+# guard was found not to guard.
+#
+# Measured 2026-09-01, the three failure shapes this script can take, under the
+# trap above:
+#
+#   fail "..."                    exit 1, its own message written
+#   any command failing, set -e   exit 1, the trap's generic message written
+#   : "${VAR:?}"                  exit 0, nothing written at all
+#
+# The third is the one that matters and it is the one this file exists to
+# prevent. A shell aborted by ${VAR:?} runs its EXIT trap with $? still 0, so
+# the trap concludes nothing went wrong; the shell then exits 0, the container
+# succeeds carrying an empty termination message, and a build that never
+# started is indistinguishable from one that did. The message goes to the pod
+# log, which is the place the control plane does not read.
+#
+# need() routes the same question through fail(), which is the shape that was
+# measured to work.
+need() { [ -n "$2" ] || fail "the build was started with no $1"; }
+need IMAGE "${IMAGE:-}"
 `
 
 // buildScript clones, decides how to build, and builds from a Dockerfile.
@@ -173,9 +246,18 @@ trap 'rc=$?; [ "$rc" = 0 ] || [ -n "$SAID" ] || say "the build exited with statu
 // the job — and a termination message written here would be the one the control
 // plane reads, because it reads the first container that left a parseable one.
 const buildScript = resultPrelude + `
-: "${REPO:?}" "${REVISION:?}" "${METHOD:?}"
+need REPO "${REPO:-}"
+need REVISION "${REVISION:-}"
+need METHOD "${METHOD:-}"
+need CACHE_IMAGE "${CACHE_IMAGE:-}"
 
 WORKSPACE=${WORKSPACE:-/workspace}
+# Read from the environment with the real default, for the reason the buildpack
+# script already does it with every path it touches: a rule nothing executes is
+# decoration, and these two are what a test needs in order to run this branch
+# for real rather than assert that a string contains a flag.
+META=${META:-/tmp/meta.json}
+BUILD_ERR=${BUILD_ERR:-/tmp/build.err}
 
 # A subdirectory the container creates itself, not the mount point.
 #
@@ -216,24 +298,62 @@ case "$RAN" in
     # the actual reason — a directory that was still read-only — was in a pod
     # log the control plane never reads. A build fails for reasons that belong
     # to the user's code, so the user's own tool has to be the one talking.
+    # The two cache flags, against one reference: the layers this build may
+    # reuse, and the layers the next build of this repository will.
+    #
+    # Measured on 2026-09-01 against this repository's own app/, pushing to a
+    # registry in a container, with a throwaway buildkit for every run because
+    # every build in the cluster is a new pod:
+    #
+    #   cold, no cache flags                    26s
+    #   the identical build again, no flags     19s   npm ci ran again
+    #   these flags, cache reference absent     21s   exit 0, see below
+    #   these flags, cache warm                  6s   npm ci reported CACHED
+    #
+    # The third line is the one that had to be checked rather than assumed. A
+    # missing cache reference prints
+    #
+    #   ERROR: failed to configure registry cache importer: ... not found
+    #
+    # into the build log and the build still succeeds — measured, exit 0, image
+    # and cache both pushed. So the first build of a repository carries a line
+    # that reads like a failure and is not, and nothing here should treat it as
+    # one: fail() fires on a non-zero exit, and this exit is zero.
+    #
+    # mode=max rather than the default min, and type=inline not at all. Both of
+    # those keep only the layers that end up *in* the pushed image, and the
+    # dependency install this exists for is a stage that does not: app/ runs
+    # npm ci in stage one and copies node_modules out in stage two, which is
+    # the ordinary shape of a Dockerfile and exactly the shape a min-mode cache
+    # stores nothing useful for.
+    #
+    # ignore-error on the export, because the cache is an optimisation and the
+    # image is the product. A registry that takes the image and refuses the
+    # cache — out of space, a retention rule, a pull-through mirror that is
+    # read-only — must not turn a build that worked into a build that failed.
+    #
+    # And the import is safe on the first build of a repository, when the
+    # reference does not exist: measured in the same run, exit 0.
     buildctl-daemonless.sh build \
       --frontend dockerfile.v0 \
       --local context="$SRC" --local dockerfile="$SRC" \
       --output "type=image,name=${IMAGE},push=true,registry.insecure=true" \
-      --metadata-file /tmp/meta.json 2>/tmp/build.err \
-      || fail "$(tail -c 700 /tmp/build.err)"
+      --import-cache "type=registry,ref=${CACHE_IMAGE},registry.insecure=true" \
+      --export-cache "type=registry,ref=${CACHE_IMAGE},mode=max,ignore-error=true,registry.insecure=true" \
+      --metadata-file "$META" 2>"$BUILD_ERR" \
+      || fail "$(tail -c 700 "$BUILD_ERR")"
     # Whitespace-tolerant, because buildctl writes the metadata file
     # indented: "containerimage.digest": "sha256:..." has a space after the
     # colon and the first version of this pattern did not allow one. The build
     # had already run and pushed; only the reading failed, and the platform
     # reported "no digest" — which reads as a broken build rather than as a
     # broken sed.
-    DIGEST=$(tr -d '\n' < /tmp/meta.json \
+    DIGEST=$(tr -d '\n' < "$META" \
       | sed -n 's/.*"containerimage\.digest"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     # And if it is still empty, hand over the file rather than a verdict about
     # it. A parser that cannot find what it wants knows less about why than the
     # bytes it was given.
-    [ -n "$DIGEST" ] || fail "the build finished but no digest could be read from: $(head -c 400 /tmp/meta.json)"
+    [ -n "$DIGEST" ] || fail "the build finished but no digest could be read from: $(head -c 400 "$META")"
     printf '{"digest":"%s","method":"%s"}' "$DIGEST" "$RAN" > "$RESULT"
     ;;
   buildpack)
@@ -272,6 +392,8 @@ esac
 // has to arrive carrying the builder's own words, and a rule nothing executes
 // is decoration.
 const buildpackScript = resultPrelude + `
+need CACHE_IMAGE "${CACHE_IMAGE:-}"
+
 PREPARED=${PREPARED:-` + preparedPath + `}
 APP=${APP:-/workspace}
 LAYERS=${LAYERS:-/layers}
@@ -326,16 +448,26 @@ phase "$LIFECYCLE/analyzer" -layers="$LAYERS" "$IMAGE"
 # Which buildpacks want this repository. Exits 20 or 21 when none do, which is
 # the honest answer to "we could not work out what this is".
 phase "$LIFECYCLE/detector" -app="$APP" -layers="$LAYERS"
-# Layers this build can reuse. Restores from the previous image only: there is
-# no cache directory, because the only disk this pod has dies with it. A cache
-# that survives a build needs a volume or a cache image, and neither is wired.
-phase "$LIFECYCLE/restorer" -layers="$LAYERS"
+# Layers this build can reuse, from two different places. The previous image
+# gives back the layers that ship in it; -cache-image gives back the ones that
+# never do — the module cache, the compiler's own intermediate output — which is
+# where a rebuild's time actually goes.
+#
+# A cache image rather than -cache-dir, for the reason written at cacheTag: the
+# only disk this pod has dies with it, and the volume that would outlive it is
+# ReadWriteOnce against a namespace that admits ten concurrent builds.
+phase "$LIFECYCLE/restorer" -layers="$LAYERS" -cache-image="$CACHE_IMAGE"
 # The user's code, compiled by somebody else's buildpack.
 phase "$LIFECYCLE/builder" -app="$APP" -layers="$LAYERS"
 # Assembles the layers onto the run image and pushes. No -process-type: the
 # buildpacks name their own default, and naming one here that no buildpack
 # provides fails the export.
-phase "$LIFECYCLE/exporter" -app="$APP" -layers="$LAYERS" -report="$LAYERS/report.toml" "$IMAGE"
+# The same reference on the way out, or the restorer above has nothing to find.
+# The exporter treats a cache it cannot write as a warning and still exports the
+# image, which is the behaviour the Dockerfile path has to ask for by name with
+# ignore-error.
+phase "$LIFECYCLE/exporter" -app="$APP" -layers="$LAYERS" -cache-image="$CACHE_IMAGE" \
+  -report="$LAYERS/report.toml" "$IMAGE"
 
 # Whitespace-tolerant for the reason the Dockerfile path already learned: the
 # file is indented TOML, digest = "sha256:..." carries spaces around the equals
@@ -487,6 +619,7 @@ func buildkitSide(
 			{Name: "REVISION", Value: b.Spec.Revision},
 			{Name: envPathInRepo, Value: b.Spec.Path},
 			{Name: envImage, Value: buildImageRef(b)},
+			{Name: envCacheImage, Value: buildCacheRef(b)},
 			{Name: "METHOD", Value: string(method)},
 		},
 		SecurityContext: &corev1.SecurityContext{
@@ -523,9 +656,10 @@ func buildkitSide(
 func lifecycleSide(b *platformv1alpha1.Build, limits corev1.ResourceRequirements) corev1.Container {
 	env := []corev1.EnvVar{
 		{Name: envImage, Value: buildImageRef(b)},
+		{Name: envCacheImage, Value: buildCacheRef(b)},
 		{Name: envPathInRepo, Value: b.Spec.Path},
 		{Name: "CNB_PLATFORM_API", Value: platformAPI},
-		{Name: "HOME", Value: buildpackHome},
+		{Name: envHome, Value: buildpackHome},
 	}
 	if host := insecureRegistry(b.Spec.Image); host != "" {
 		// The same concession the Dockerfile path already makes one line at a
@@ -572,6 +706,17 @@ func lifecycleSide(b *platformv1alpha1.Build, limits corev1.ResourceRequirements
 // build whose output is called :latest cannot answer which commit is running.
 func buildImageRef(b *platformv1alpha1.Build) string {
 	return b.Spec.Image + ":" + b.Spec.Revision
+}
+
+// buildCacheRef is where the layers worth keeping are kept: the same repository
+// as the images, under one tag shared by every revision of it. See cacheTag for
+// why this is a registry reference and not a volume.
+//
+// Per repository and not per revision, which is the entire point — a cache
+// tagged with the commit could only ever be read by a build of that same
+// commit, which is a build that does not need one.
+func buildCacheRef(b *platformv1alpha1.Build) string {
+	return b.Spec.Image + ":" + cacheTag
 }
 
 // insecureRegistry is the registry host the lifecycle is told not to use TLS
