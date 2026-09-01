@@ -227,7 +227,16 @@ func TestTheControlPlaneRunsAnImageThisPipelinePublishes(t *testing.T) {
 		t.Fatal("cluster/control-plane.yaml names no image")
 	}
 	ref := string(found[1])
-	if !strings.HasPrefix(ref, controlPlaneRepo+":") {
+	// Either form. A digest is where that line is going — the comment on it
+	// says so, and gitops/operator.yaml and gitops/application.yaml already
+	// carry one — and a tag is what it can be until a publish has happened to
+	// take the digest from. Accepting only the tag would make this test the
+	// thing that blocks the step it exists to lead to, which is what it did
+	// when it was first written.
+	switch {
+	case strings.HasPrefix(ref, controlPlaneRepo+"@sha256:"),
+		strings.HasPrefix(ref, controlPlaneRepo+":"):
+	default:
 		t.Fatalf("the control plane runs %q, which is not %s", ref, controlPlaneRepo)
 	}
 	if strings.HasSuffix(ref, ":unpublished") {
