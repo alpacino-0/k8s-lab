@@ -274,7 +274,7 @@ jobs:
         with:
           cluster_name: ci
           config: kind-config.yaml
-          node_image: kindest/node:v1.35.0
+          node_image: kindest/node:v1.36.1
 
       # Applied first, so the release has to satisfy them rather than being
       # grandfathered in — and so the API server has picked the bindings up
