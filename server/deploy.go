@@ -192,30 +192,34 @@ func renderDeploy(place placement.Placement, req deployRequest) renderFunc {
 		if err != nil {
 			return nil, err
 		}
-		out := map[string][]byte{manifest.File: body}
-
-		// Everything else this platform wrote in the directory is carried
-		// forward byte for byte.
-		//
-		// A placement's directory holds one workload today and will hold
-		// several the day a catalogue entry with more than one service can be
-		// installed — an extra Workload, a Database, each in its own file. A
-		// deploy is "this app, a new image": it has an opinion about exactly
-		// one of those objects and none at all about the rest, so it returns
-		// them unchanged rather than omitting them.
-		//
-		// Omitting them would be the same bytes as asking for them to be
-		// deleted the moment a caller sets gitwrite's Owns, and "deploy a new
-		// image" is not a sentence that should be able to remove a database.
-		// Carrying them forward is also why this render sets no Owns of its
-		// own: it never stops producing a file it owns, so there is nothing
-		// for a deletion rule to act on.
-		for name, existing := range current {
-			if name == manifest.File || !manifest.Owns(existing) {
-				continue
-			}
-			out[name] = existing
-		}
-		return out, nil
+		return carryForward(map[string][]byte{manifest.File: body}, current), nil
 	}
+}
+
+// carryForward adds every other manifest this platform wrote in the directory,
+// byte for byte.
+//
+// A placement's directory holds several objects now: a catalogue entry with a
+// worker and a database installs as three manifests, each in its own file. The
+// renders in this package all change exactly one of them — a deploy is "this
+// app, a new image", a scale is a replica count — and have no opinion at all
+// about the rest.
+//
+// Returning them unchanged rather than omitting them is what makes that
+// harmless, because omission is how this platform asks gitwrite for a file to
+// be removed. A render that forgets a sibling is a deploy that deletes a
+// database the moment its request carries an Owns rule, and the install's does.
+// It is one function rather than a loop in each render so that adding a render
+// is adding a call rather than remembering a rule.
+//
+// It is also why none of these renders sets Owns itself: a render that never
+// stops producing a file it owns has nothing for a deletion rule to act on.
+func carryForward(out, current map[string][]byte) map[string][]byte {
+	for name, existing := range current {
+		if _, mine := out[name]; mine || !manifest.Owns(existing) {
+			continue
+		}
+		out[name] = existing
+	}
+	return out
 }
