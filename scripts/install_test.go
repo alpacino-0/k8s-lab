@@ -1,0 +1,257 @@
+/*
+Copyright 2026 Orhan Yavuz.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+// Package scripts holds the tests for the shell this repository ships.
+//
+// A Go file for a shell script, and the reason is the gate: `go test ./...` is
+// what CI runs, and a rule proved by a script nothing runs is decoration. What
+// is under test here is scripts/install.sh's DRY_RUN plan — the real command
+// sequence, emitted by the same run() every mutation goes through, rather than
+// a second list maintained beside it that would stop matching in silence.
+package scripts
+
+import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+)
+
+// The three flags install.sh requires, named once. A test that spells a flag
+// wrong asks the script something it refuses, and a refusal is what several of
+// these cases expect — so the misspelling would pass.
+const (
+	flagDomain = "--domain"
+	flagEmail  = "--email"
+	flagTenant = "--tenant"
+
+	someDomain = "demo.example.test"
+	someEmail  = "you@example.test"
+	someTenant = "acme"
+)
+
+// plan runs the installer's dry run and returns its output as lines.
+//
+// DRY_RUN needs no cluster, no root and no network, which is what makes it
+// runnable in the same gate as everything else.
+func plan(t *testing.T) []string {
+	t.Helper()
+	cmd := exec.Command("bash", "./install.sh",
+		flagDomain, someDomain,
+		flagEmail, someEmail,
+		flagTenant, someTenant)
+	cmd.Env = append(os.Environ(), "DRY_RUN=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install.sh --dry-run failed: %v\n%s", err, out)
+	}
+	return strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+}
+
+// firstLineWith is the index of the first line containing want, or -1.
+func firstLineWith(lines []string, want string) int {
+	for i, line := range lines {
+		if strings.Contains(line, want) {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestTheCRDsGoInBeforeTheQuotaThatCountsThem.
+//
+// cluster/build-namespace.yaml puts a quota on count/builds.platform.damga.co.
+// A ResourceQuota that counts a type the API server has never heard of cannot
+// compute a usage for it, and until it can, every create in that namespace is
+// refused with "status unknown for quota" — a message that names the quota and
+// not the missing type. Measured in this repository: applying the quota before
+// the operator's CRDs made the first build of every CI run fail on the
+// platform's own guard rail.
+//
+// Reordering those two lines in install.sh fails here, and the message says
+// which way round they have to be. Nothing else in the plan would notice: the
+// apply succeeds, and the failure arrives at the first build, on somebody
+// else's machine.
+func TestTheCRDsGoInBeforeTheQuotaThatCountsThem(t *testing.T) {
+	lines := plan(t)
+
+	crds := firstLineWith(lines, "config/crd")
+	quota := firstLineWith(lines, "build-namespace.yaml")
+	switch {
+	case crds < 0:
+		t.Fatal("the plan never installs the CRDs")
+	case quota < 0:
+		t.Fatal("the plan never applies cluster/build-namespace.yaml")
+	case crds > quota:
+		t.Errorf("the plan applies the build namespace (line %d) before the CRDs (line %d); "+
+			"the quota on count/builds.platform.damga.co cannot compute a usage for a type "+
+			"the API server has not heard of, and refuses every create until it can",
+			quota+1, crds+1)
+	}
+}
+
+// TestThePlanNamesOnlyFilesThatExist.
+//
+// Every path in the plan that points into this repository is one an operator's
+// run will reach minutes in, on a machine that is already half installed. A
+// file renamed here and not there is a failure that costs a rollback rather
+// than a compile.
+func TestThePlanNamesOnlyFilesThatExist(t *testing.T) {
+	root, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatalf("resolving the repository root: %v", err)
+	}
+	checked := 0
+	for _, line := range plan(t) {
+		if !strings.HasPrefix(line, "RUN ") {
+			continue
+		}
+		for token := range strings.FieldsSeq(line) {
+			if !strings.HasPrefix(token, root+"/") {
+				continue
+			}
+			checked++
+			if _, err := os.Stat(token); err != nil {
+				t.Errorf("the plan names %s, which is not there: %v", token, err)
+			}
+		}
+	}
+	if checked == 0 {
+		// The assertion above passes trivially if the plan stops naming repo
+		// paths, which is exactly what a rewrite that inlines the manifests
+		// would look like.
+		t.Error("the plan named no files inside this repository; this test proved nothing")
+	}
+}
+
+// TestThePlanNeverPrintsACredential.
+//
+// The database password is generated inside a function, so the plan can print
+// the function's name and not its arguments. Hoisting that `kubectl create
+// secret` up into a run line — the obvious tidy-up — would put a live password
+// in the terminal of anybody who asked what the installer was going to do, and
+// in whatever captured that output.
+func TestThePlanNeverPrintsACredential(t *testing.T) {
+	for i, line := range plan(t) {
+		for _, forbidden := range []string{"--from-literal", "POSTGRES_PASSWORD", "openssl rand"} {
+			if strings.Contains(line, forbidden) {
+				t.Errorf("line %d of the plan carries %q: %s", i+1, forbidden, line)
+			}
+		}
+	}
+}
+
+// TestTheRegistryHostIsWhateverTheClusterWasToldItIs.
+//
+// This string lives in cluster/registry.yaml, in scripts/bootstrap.sh, in CI
+// and in the control plane's -registry flag. install.sh reads it out of
+// cluster/control-plane.yaml rather than adding a fifth copy, and this asserts
+// the value it reads is the one the rest of the repository uses — a parse that
+// starts matching the wrong line would otherwise produce an installer that
+// redirects containerd to a registry nothing pushes to.
+func TestTheRegistryHostIsWhateverTheClusterWasToldItIs(t *testing.T) {
+	body, err := os.ReadFile("bootstrap.sh")
+	if err != nil {
+		t.Fatalf("reading bootstrap.sh: %v", err)
+	}
+	found := regexp.MustCompile(`REGISTRY_HOST="([^"]+)"`).FindSubmatch(body)
+	if found == nil {
+		t.Fatal("bootstrap.sh no longer names REGISTRY_HOST; this test cannot compare")
+	}
+	want := "PLAN registry=" + string(found[1]) + " "
+
+	lines := plan(t)
+	if len(lines) == 0 || !strings.HasPrefix(lines[0], want) {
+		t.Errorf("install.sh resolved a different registry from bootstrap.sh:\n got %q\nwant prefix %q",
+			lines[0], want)
+	}
+}
+
+// TestTheInstallerAndTheRunbookPinTheSameVersions.
+//
+// docs/DEPLOY.md is the same sequence written for a person, and the two carry
+// the ingress controller's and cert-manager's versions separately because one
+// is prose and the other is a variable. Two copies of a version is the shape
+// this repository has already been bitten by twice, and the way it bites is
+// quiet: the page says one thing, the installer does another, and the person
+// following the page by hand gets a different cluster from the person who ran
+// the script.
+func TestTheInstallerAndTheRunbookPinTheSameVersions(t *testing.T) {
+	script, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatalf("reading install.sh: %v", err)
+	}
+	runbook, err := os.ReadFile("../docs/DEPLOY.md")
+	if err != nil {
+		t.Fatalf("reading docs/DEPLOY.md: %v", err)
+	}
+
+	for _, pin := range []struct{ name, pattern string }{
+		{"the ingress controller", `INGRESS_VERSION="([^"]+)"`},
+		{"cert-manager", `CERT_MANAGER_VERSION="([^"]+)"`},
+	} {
+		found := regexp.MustCompile(pin.pattern).FindSubmatch(script)
+		if found == nil {
+			t.Errorf("install.sh no longer pins %s; this test cannot compare", pin.name)
+			continue
+		}
+		version := string(found[1])
+		if !strings.Contains(string(runbook), version) {
+			t.Errorf("install.sh installs %s %s and docs/DEPLOY.md never mentions that version",
+				pin.name, version)
+		}
+	}
+}
+
+// TestTheInstallerRefusesAnIncompleteOrWrongCommandLine.
+//
+// Exit 2 and not 1, so that a wrapper can tell "you typed this wrong" from
+// "the install failed halfway".
+func TestTheInstallerRefusesAnIncompleteOrWrongCommandLine(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"no domain", []string{flagEmail, someEmail, flagTenant, someTenant}},
+		{"no email", []string{flagDomain, someDomain, flagTenant, someTenant}},
+		{"no tenant", []string{flagDomain, someDomain, flagEmail, someEmail}},
+		{"an issuer that is neither", []string{
+			flagDomain, someDomain, flagEmail, someEmail,
+			flagTenant, someTenant, "--issuer", "self-signed",
+		}},
+		{"an option it does not have", []string{
+			flagDomain, someDomain, flagEmail, someEmail,
+			flagTenant, someTenant, "--force",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command("bash", append([]string{"./install.sh"}, tc.args...)...)
+			cmd.Env = append(os.Environ(), "DRY_RUN=1")
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("install.sh accepted it:\n%s", out)
+			}
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 2 {
+				t.Errorf("exit %v, want 2:\n%s", err, out)
+			}
+		})
+	}
+}
