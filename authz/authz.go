@@ -30,6 +30,8 @@ const (
 	ActionAppView        Action = "app:view"
 	ActionAppDeploy      Action = "app:deploy"
 	ActionAppRollback    Action = "app:rollback"
+	ActionAppRestart     Action = "app:restart"
+	ActionAppScale       Action = "app:scale"
 	ActionAppDelete      Action = "app:delete"
 	ActionAppConnect     Action = "app:connect"
 	ActionEnvCreate      Action = "env:create"

@@ -243,6 +243,14 @@ var tenantRoutes = []struct {
 	{http.MethodGet, "/apps/{app}/envs/{env}/export", export},
 	// The only one that writes, and it writes to git and to nothing else.
 	{http.MethodPost, "/apps/{app}/envs/{env}/deploys", deployRoute},
+	// A rollback is a new commit carrying an old image, not a rewind of the
+	// branch: Argo CD tracks the branch, so moving it backwards puts selfHeal
+	// in a fight with whoever moved it.
+	{http.MethodPost, "/apps/{app}/envs/{env}/deploys/{seq}/rollback", rollbackRoute},
+	// Answers 501, and the handler says why: a restart is a change to the pod
+	// template, and no field of a Workload reaches the pod template.
+	{http.MethodPost, "/apps/{app}/envs/{env}/restart", restartRoute},
+	{http.MethodPost, "/apps/{app}/envs/{env}/scale", scaleRoute},
 }
 
 // handler builds the routes, then hands the mux to the Routes hook and wraps
