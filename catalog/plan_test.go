@@ -32,7 +32,7 @@ import (
 func planOf(t *testing.T, c *catalog.Catalog, name string, o catalog.Options) catalog.Plan {
 	t.Helper()
 	if o.Namespace == "" {
-		o.Namespace = "tenant-a"
+		o.Namespace = testNamespace
 	}
 	p, err := c.Plan(name, o)
 	if err != nil {
