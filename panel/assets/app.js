@@ -2,7 +2,7 @@
 // verdict here is computed locally, because a panel that can reach a different
 // conclusion from the CLI about the same deploy is worse than no panel.
 
-const state = { account: null, memberships: [], tenant: null, ref: null };
+const state = { account: null, memberships: [], tenant: null, ref: null, apps: [] };
 
 // The 401 case, given a name. Without one, "the session ended" and "the page
 // has a bug" are the same rejected promise, and every failure renders as the
@@ -191,6 +191,12 @@ async function pickTenant(tenantId) {
   state.tenant = tenantId;
   state.ref = null;
   const { apps } = await api(`/api/v1/tenants/${encodeURIComponent(tenantId)}/apps`);
+  // Kept because the catalogue's install form is built from them: a repository
+  // this tenant has already deployed to is one that exists and that damga can
+  // push to, and a namespace something is already running in is one that
+  // exists. Re-fetching them there would be a second answer that can differ
+  // from the list on screen.
+  state.apps = apps;
 
   const nav = $("apps");
   nav.replaceChildren();
@@ -288,7 +294,16 @@ function showCatalog() {
   const root = el("div", { class: "catalogue-view" });
   render(root);
 
-  const load = mountFrom("damgaCatalog", (m) => m.mountCatalog(root, tenantBase()));
+  const load = mountFrom("damgaCatalog", (m) => m.mountCatalog(root, tenantBase(), {
+    apps: state.apps,
+    // An install writes a placement, so the navigation beside it is out of date
+    // the moment one succeeds. Reloading the tenant is what makes the new app
+    // appear where every other app is — and it is deliberately not a jump into
+    // it: the commit is made and nothing is running yet, and moving the reader
+    // somewhere that says "nothing has been deployed here" would read as the
+    // install having failed.
+    onInstalled: () => { pickTenant(state.tenant).catch(fail); },
+  }));
   if (!load) {
     // The script tag is missing. Said rather than left as a blank pane, for
     // the reason the health view leaves its box empty and the page still
