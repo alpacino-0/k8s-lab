@@ -232,7 +232,7 @@ func Convert(t Template, o Options) (Result, error) {
 			res.Notes = append(res.Notes, notes...)
 			continue
 		}
-		w, notes, gen := asWorkload(t, name, svc, o, name == primary)
+		w, notes, gen := asWorkload(t, name, svc, o, primary)
 		if name == primary {
 			front = len(res.Workloads)
 		}
@@ -413,8 +413,12 @@ func identifier(v, field string, note func(field, detail string)) string {
 // asWorkload is the main conversion, and most of it is deciding what to say
 // about the parts that do not fit.
 func asWorkload(
-	t Template, name string, svc Service, o Options, isPrimary bool,
+	t Template, name string, svc Service, o Options, primary string,
 ) (platformv1alpha1.Workload, []Note, []Generated) {
+	// The name and not a bool, because rewriting a sibling address needs to
+	// know which service is the application: a reference to that one is the
+	// single case that cannot be repointed here. See rewriteSiblings.
+	isPrimary := name == primary
 	var notes []Note
 	var generated []Generated
 	note := func(field, detail string) { notes = append(notes, Note{Service: name, Field: field, Detail: detail}) }
@@ -490,7 +494,7 @@ func asWorkload(
 		w.Spec.Env = append(w.Spec.Env, platformv1alpha1.EnvVar{Name: k, Value: literal(v)})
 	}
 
-	notes = append(notes, siblingNotes(t, name, w.Spec.Env, generated)...)
+	notes = append(notes, repointSiblings(t, name, primary, w.Spec.Env, generated)...)
 
 	// Volumes.
 	for _, v := range svc.Volumes {
@@ -563,57 +567,148 @@ var siblingHost = regexp.MustCompile(
 	`(?://|@)([a-zA-Z0-9][a-zA-Z0-9._-]*)(?::[0-9]+)?(?:[/?]|$)` +
 		`|(?:^|=)([a-zA-Z0-9][a-zA-Z0-9._-]*):[0-9]+(?:[/?]|$)`)
 
-// siblingNotes reports every value that addresses another service in the same
-// template by its compose name.
+// repointSiblings rewrites every address that names another service in this
+// template, and says what it did and what it could not.
 //
 // Compose puts every service on one network under its own name, so `db:5432`
 // resolves. Here each service becomes its own object under a derived name —
 // the template's, then the service's — and `db` resolves to nothing. The
-// application starts, retries, and reports that its database is down.
+// application starts, retries, and reports that its database is down. Measured
+// on a real cluster on 2026-09-01: cryptgeon's log is "cannot reach redis", and
+// grafana-with-postgresql dies on "dial tcp: lookup postgresql ... no such
+// host" while its Service is grafana-with-postgresql-postgresql. Every entry
+// that brings a Database has this shape.
 //
-// Measured: 112 of the 199 multi-service templates address a sibling this way.
-// Not rewritten, because the same string is sometimes a database name rather
-// than a host and guessing wrong would corrupt a value instead of losing one.
-func siblingNotes(t Template, self string, env []platformv1alpha1.EnvVar, gen []Generated) []Note {
-	values := make(map[string]string, len(env)+len(gen))
-	for _, e := range env {
-		values[e.Name] = e.Value
+// This wrote a note and changed nothing until 2026-09-01. The note was right
+// about every particular — the old name, the new one, the field — which is what
+// made rewriting possible without widening anything: the information was
+// already in hand.
+//
+// # The one it still cannot fix
+//
+// A reference to the template's own primary service. That workload is renamed
+// again when it is installed, to the app name the person chose, and this
+// package is not told what that will be — server/catalog.go's renderInstall
+// picks it. Writing the convert-time name here would produce a value that
+// resolves to nothing while looking repaired, which is worse than leaving the
+// compose name and saying so. Those keep a note.
+//
+// What is deliberately NOT done is widening siblingHost. Its comment records
+// the measurement: a bare `db` matches everything a host does and is as often a
+// database name, and the first version reported `DB_NAME=db`. Rewriting that
+// one would put a Service name where a database name belongs — turning an
+// application that says its dependency is down into one that connects and
+// cannot find its data. Silence on `SOME_HOST=db` is still the better of the
+// two mistakes, and it stays silence.
+func repointSiblings(
+	t Template, self, primary string, env []platformv1alpha1.EnvVar, gen []Generated,
+) []Note {
+	var (
+		notes   []Note
+		fixed   = map[string]string{}
+		unfixed = map[string]bool{}
+	)
+	// Env and Generated in one pass over one list of pointers, so a value that
+	// carries a credential is repointed exactly like one that does not. A
+	// Generated value is a template with ${NAME} left in it; only the host is
+	// touched, so the placeholders survive.
+	type slot struct {
+		field string
+		value *string
 	}
-	for _, g := range gen {
-		values[g.Key] = g.Value
+	slots := make([]slot, 0, len(env)+len(gen))
+	for i := range env {
+		slots = append(slots, slot{field: env[i].Name, value: &env[i].Value})
 	}
-	keys := make([]string, 0, len(values))
-	for k := range values {
-		keys = append(keys, k)
+	for i := range gen {
+		slots = append(slots, slot{field: gen[i].Key, value: &gen[i].Value})
 	}
-	slices.Sort(keys)
 
-	var notes []Note
-	seen := map[string]bool{}
-	for _, k := range keys {
-		for _, m := range siblingHost.FindAllStringSubmatch(values[k], -1) {
-			host := m[1]
-			if host == "" {
-				host = m[2]
-			}
-			if host == self || seen[host] {
+	for _, sl := range slots {
+		rewritten, found := rewriteSiblings(t, self, primary, *sl.value)
+		*sl.value = rewritten
+		for _, f := range found {
+			if f.to == "" {
+				if !unfixed[f.host] {
+					unfixed[f.host] = true
+					notes = append(notes, Note{
+						Service: self, Field: sl.field,
+						Detail: fmt.Sprintf(
+							"addresses %q, which is this template's own application. What that "+
+								"runs under is chosen when it is installed, not here, so this one "+
+								"reference is left as compose wrote it and does not resolve",
+							f.host),
+					})
+				}
 				continue
 			}
-			if _, isSibling := t.Services[host]; !isSibling {
-				continue
+			if _, seen := fixed[f.host]; !seen {
+				fixed[f.host] = f.to
+				notes = append(notes, Note{
+					Service: self, Field: sl.field,
+					Detail: fmt.Sprintf(
+						"addresses %q, which is what compose calls that service and not what it "+
+							"is called here; it has been repointed at %s",
+						f.host, f.to),
+				})
 			}
-			seen[host] = true
-			notes = append(notes, Note{
-				Service: self, Field: k,
-				Detail: fmt.Sprintf(
-					"addresses %q, which is what compose calls that service and not what it is "+
-						"called here; it becomes %s. Nothing resolves %q and the application will "+
-						"report that its dependency is down",
-					host, objectName(t.Name+"-"+host), host),
-			})
 		}
 	}
 	return notes
+}
+
+// found is one sibling address, and the name it was repointed at. An empty To
+// is one that was left alone.
+type found struct {
+	host string
+	to   string
+}
+
+// rewriteSiblings replaces the host part of every sibling address in one value.
+//
+// The host part and nothing else: `redis://redis:6379/0` becomes
+// `redis://cryptgeon-redis:6379/0`, with the scheme, the port and the path
+// untouched. That is why this works on the submatch offsets rather than on
+// strings.ReplaceAll, which would also rewrite a password that happened to
+// equal the service name.
+func rewriteSiblings(t Template, self, primary, value string) (string, []found) {
+	matches := siblingHost.FindAllStringSubmatchIndex(value, -1)
+	if len(matches) == 0 {
+		return value, nil
+	}
+	var (
+		out  strings.Builder
+		out2 []found
+		last int
+	)
+	for _, m := range matches {
+		// One of the two alternatives matched; the other group is -1.
+		lo, hi := m[2], m[3]
+		if lo < 0 {
+			lo, hi = m[4], m[5]
+		}
+		if lo < 0 {
+			continue
+		}
+		host := value[lo:hi]
+		if host == self {
+			continue
+		}
+		if _, isSibling := t.Services[host]; !isSibling {
+			continue
+		}
+		if host == primary {
+			out2 = append(out2, found{host: host})
+			continue
+		}
+		to := objectName(t.Name + "-" + host)
+		out.WriteString(value[last:lo])
+		out.WriteString(to)
+		last = hi
+		out2 = append(out2, found{host: host, to: to})
+	}
+	out.WriteString(value[last:])
+	return out.String(), out2
 }
 
 // unsupported says what each dropped field would have meant, rather than that

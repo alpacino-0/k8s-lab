@@ -587,3 +587,102 @@ services:
 		t.Errorf("the note does not name the variable compose had no value for: %s", notes)
 	}
 }
+
+// Only the host changes. Everything else in the value is left exactly as
+// compose wrote it.
+//
+// The value here is deliberately absurd: the scheme, the password, the host and
+// the path are all the string "redis". A rewrite that replaced the name instead
+// of the host would produce "app-redis://redis:redis@app-redis:6379/app-redis"
+// — a URL with an invented scheme and a corrupted password, which is a worse
+// outcome than the broken hostname it set out to fix. Replacing the matched
+// span rather than the substring is what keeps the other four alone.
+func TestOnlyTheHostPartOfASiblingAddressIsRewritten(t *testing.T) {
+	tpl, err := compose.Parse("app", []byte(`
+services:
+  app:
+    image: example/app:1.0
+    ports: ["8080:8080"]
+    environment:
+      - REDIS_URL=redis://redis:redis@redis:6379/redis
+  redis:
+    image: redis:7-alpine
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	res, err := compose.Convert(tpl, compose.Options{Namespace: "t"})
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+
+	var got string
+	for _, w := range res.Workloads {
+		for _, e := range w.Spec.Env {
+			if e.Name == "REDIS_URL" {
+				got = e.Value
+			}
+		}
+	}
+	if want := "redis://redis:redis@app-redis:6379/redis"; got != want {
+		t.Errorf("REDIS_URL = %q, want %q", got, want)
+	}
+
+	// And it is said, because a value the platform changed is a thing compose
+	// said that this platform said back differently. Without this the rewrite
+	// is invisible: the entry installs, works, and nobody can tell from the
+	// notes that an address was moved — which is the same blindness in the
+	// other direction as leaving one broken silently.
+	notes := strings.Join(noteStrings(res), "\n")
+	if !strings.Contains(notes, "has been repointed at app-redis") {
+		t.Errorf("nothing says the address was repointed: %s", notes)
+	}
+}
+
+// A reference to the template's own application is left alone, and said out
+// loud.
+//
+// It cannot be repointed here: that workload is renamed again when it is
+// installed, to the app name the person typed, and this package is never told
+// what that will be. Writing the convert-time name would produce a value that
+// resolves to nothing while looking repaired — the one outcome worse than
+// leaving it, because nothing downstream would report it.
+//
+// Both halves are asserted. Rewriting it and keeping the note is a lie in the
+// notes; rewriting it and dropping the note is an entry that installs and does
+// not work with nothing to read.
+func TestAReferenceToTheApplicationItselfIsLeftAndReported(t *testing.T) {
+	tpl, err := compose.Parse("suite", []byte(`
+services:
+  web:
+    image: example/web:1.0
+    ports: ["3000:3000"]
+  worker:
+    image: example/worker:1.0
+    environment:
+      - API_URL=http://web:3000/api
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	res, err := compose.Convert(tpl, compose.Options{Namespace: "t"})
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+
+	var got string
+	for _, w := range res.Workloads {
+		for _, e := range w.Spec.Env {
+			if e.Name == "API_URL" {
+				got = e.Value
+			}
+		}
+	}
+	if want := "http://web:3000/api"; got != want {
+		t.Errorf("API_URL = %q, want it left as compose wrote it (%q)", got, want)
+	}
+	notes := strings.Join(noteStrings(res), "\n")
+	if !strings.Contains(notes, "left as compose wrote it") || !strings.Contains(notes, `"web"`) {
+		t.Errorf("nothing says the reference to the application was left alone: %s", notes)
+	}
+}
