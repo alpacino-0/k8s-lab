@@ -58,6 +58,17 @@ rules:
   - apiGroups: [""]
     resources: [pods/log]
     verbs: [get]
+  # Live CPU and memory for one tenant's app, which is what turns a restart
+  # count into a diagnosis: a pod restarting every four minutes with memory at
+  # 98% of its limit is a different conversation from one that is crashing.
+  #
+  # metrics-server serves this API and an install may not have one — k3s ships
+  # it, kind does not — so the endpoint reports its absence by name rather than
+  # showing zeros. This grant is what separates "no metrics-server here" from
+  # "the control plane may not look", which are two different fixes.
+  - apiGroups: ["metrics.k8s.io"]
+    resources: [pods]
+    verbs: [get, list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

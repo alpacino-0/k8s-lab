@@ -271,6 +271,10 @@ var tenantRoutes = []struct {
 	// A GET that stays open, and therefore the one endpoint that cannot inherit
 	// the CSRF control below: it always allows GET. See logs.
 	{http.MethodGet, "/apps/{app}/envs/{env}/logs", logs},
+	// Also a GET returning one tenant's own state, so it carries the same
+	// Origin check logs does rather than inheriting the exemption. See
+	// appMetrics.
+	{http.MethodGet, "/apps/{app}/envs/{env}/metrics", appMetrics},
 	// The only one that writes, and it writes to git and to nothing else.
 	{http.MethodPost, "/apps/{app}/envs/{env}/deploys", deployRoute},
 	// A rollback is a new commit carrying an old image, not a rewind of the
