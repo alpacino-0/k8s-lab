@@ -166,15 +166,10 @@ either way rather than claiming otherwise.
 
 ## What is not here yet
 
-- **Nothing triggers a build.** `POST …/builds` exists and a push to the
-  repository does not reach it: there is no webhook and nothing polls. A build
-  happens because somebody asked for one.
 - **The build endpoint answers `501` on an install with no cluster.** It is a
   seam, and a control plane started without one has nothing to fill it with.
   Said plainly rather than answered with an empty success, which would read as
   a build that was started.
-- **No log streaming.** The panel shows what was deployed and what happened to
-  it; it cannot show you what the process printed.
 - **No account management in the panel.** After `bootstrap` there is no screen
   for inviting anyone.
 - **No move.** An app is registered against one repository and branch; changing

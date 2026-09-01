@@ -56,10 +56,23 @@ tested as far as Alertmanager, and its receiver is still `null`.
 
 The catalogue installs 202 of the 341 templates it offers, and the rest are
 refused by name rather than silently: mostly an image the API will not accept
-and values this platform cannot mint. One of them, gotify, is proven end to end
-in CI — installed from the catalogue into a real cluster and answering on its
-own endpoint. The other 201 are what `whyRefused` says will install, which is
-not the same as having watched them run.
+and values this platform cannot mint. Of the ones it accepts, 146 are a single
+workload and 60 are more than one, and that distinction is the honest headline:
+
+**A single-workload entry works. A multi-workload entry installs and does not
+run.** Measured on 2026-09-01 against a real cluster, both causes independent
+of each other. The platform renames objects — compose says `redis`, the object
+becomes `cryptgeon-redis` — and nothing rewrites the reference the first
+workload was given, so it looks up a host that does not exist; all 28 entries
+that bring a database have this. And the network fence that keeps tenants apart
+also keeps an entry's own workloads apart: egress to the internet is open,
+traffic between two workloads of the same application is not.
+
+Neither is a surprise about Kubernetes and both are ours to fix. Until they
+are, treat the 60 as installable rather than working. Two of the single-workload
+entries — gotify and next-image-transformation — are proven end to end,
+installed from the catalogue into a real cluster and answering on their own
+endpoints, and gotify is asserted on every CI run.
 
 ## What was removed, and why
 

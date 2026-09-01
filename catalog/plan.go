@@ -92,8 +92,12 @@ type Plan struct {
 	// two keys naming one source have to receive the same one — across services
 	// as well as within them. Minting per key instead is a plan that installs
 	// cleanly and does not work, and it is the common case rather than the
-	// exotic one: 111 of the 369 templates that parse share a source between
-	// two services.
+	// exotic one. Counted, and the count is computed on every run rather than
+	// written here: see compose/corpus_test.go, which logs how many of the
+	// templates that parse share a source between two services and how many do
+	// so only once a service that became a Database is counted as one of them.
+	// The two numbers differ, and a single figure in this position used to mean
+	// both.
 	Mint []compose.Source
 
 	// Notes is what did not convert, for a person to read.

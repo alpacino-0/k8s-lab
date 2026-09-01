@@ -53,10 +53,23 @@ Alertmanager'a kadar kurulu ve sınanıyor, receiver'ı hâlâ `null`.
 
 Katalog, sunduğu 341 şablonun 202'sini kuruyor; kalanı sessizce değil adıyla
 reddediliyor — çoğunlukla API'nin kabul etmediği bir imaj ve bu platformun
-üretemediği değerler yüzünden. İçlerinden biri, gotify, CI'da uçtan uca
-kanıtlanıyor: katalogdan gerçek bir kümeye kuruluyor ve kendi ucundan cevap
-veriyor. Diğer 201'i ise `whyRefused`'ın "kurulur" dediği şey, ki bu onların
-koştuğunu görmüş olmakla aynı şey değil.
+üretemediği değerler yüzünden. Kabul ettiklerinin 146'sı tek workload, 60'ı
+birden fazla, ve dürüst manşet bu ayrım:
+
+**Tek workload'lı bir girdi çalışıyor. Çok workload'lı bir girdi kuruluyor ve
+çalışmıyor.** 2026-09-01'de gerçek bir kümeye karşı ölçüldü, iki sebep de
+birbirinden bağımsız. Platform nesneleri yeniden adlandırıyor — compose `redis`
+diyor, nesne `cryptgeon-redis` oluyor — ve ilk workload'a verilen referansı
+kimse yeniden yazmıyor, o da var olmayan bir adı arıyor; veritabanı getiren 28
+girdinin tamamında bu var. Ve kiracıları birbirinden ayıran ağ çiti, bir
+girdinin kendi workload'larını da birbirinden ayırıyor: internete çıkış açık,
+aynı uygulamanın iki workload'ı arasındaki trafik değil.
+
+İkisi de Kubernetes hakkında bir sürpriz değil ve ikisi de bizim düzeltmemiz.
+Düzelene kadar o 60'ı çalışıyor değil, kurulabilir sayın. Tek workload'lı
+girdilerden ikisi — gotify ve next-image-transformation — uçtan uca kanıtlı:
+katalogdan gerçek bir kümeye kuruluyor ve kendi uçlarından cevap veriyorlar,
+gotify her CI koşusunda iddia ediliyor.
 
 ## Ne kaldırıldı, neden
 
