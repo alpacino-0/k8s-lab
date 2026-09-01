@@ -19,10 +19,16 @@ aksini iddia etmek dürüst olmaz. Fark ikinci makinede ortaya çıkıyor:
 İkinci fark yedekler. Bu alandaki herkes yedek alıyor. Bu, her yedeği geçici bir
 veritabanına geri yükleyip satırları kaynağa karşı sayıyor ve cevabı sayfaya
 yazıyor — böylece *"yedeğimiz var"* ile *"yedek çalışıyor"* aynı cümle olmaktan
-çıkıyor. Taranan on sekiz platformdan hiçbiri bunu yapmıyor.
+çıkıyor. **Deploy ettiğin platformların hiçbiri bunu yapmıyor.** Pratik yeni
+değil — Veeam yıllardır yedeği izole bir lab'da açıp doğruluyor — ama geliştirici
+platformlarında yok, ve dışarıdan takılan küçük bir servis pazarı tam da bu
+yüzden var. Bu cümlenin arkasındaki tarama, her satırı kaynağıyla birlikte:
+[docs/BACKUP-SURVEY.md](docs/BACKUP-SURVEY.md).
 
-**Her şey ücretsiz ve açık kaynak.** Ücretli katman, kurumsal modül ve özellik
-saklayan özel bir repo yok.
+**Her şey ücretsiz ve açık kaynak.** Her özellik bu depoda — kurumsal sürüm
+yok, saklanan hiçbir şey yok. Projenin ileride bir şey için ücret alıp
+almayacağı karara bağlanmadı; bağlandığı gün bu satır bunu açıkça yazacak, ve
+bir kez yayımlanmış olan yayımlanmış kalır.
 
 ## Bugün ne var
 
