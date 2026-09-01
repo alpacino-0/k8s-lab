@@ -26,27 +26,52 @@ import (
 	"github.com/damgahq/damga/catalog"
 )
 
-// corpus is the upstream templates the converter is tested against, read from
+// corpus is the catalogue this repository ships, all 371 files of it, read from
 // where they already are rather than copied.
 //
-// One copy in the repository, and it is the one the licence note sits next to.
-// A second copy under this package would be a second thing to keep in step, and
-// the first time they disagreed the disagreement would be invisible.
+// It read ../compose/testdata until 2026-09-01, three files kept for the
+// compose package's own parser tests, and the comment here said there was one
+// copy in the repository and that a second would be a thing to keep in step
+// whose disagreement would be invisible. Both halves stopped being true when
+// the templates were vendored: there are two copies of n8n.yaml — byte-identical
+// today, which is exactly what an invisible disagreement looks like before it
+// happens — and this package was reading the one without the licence note.
+//
+// So the catalogue reads the catalogue. compose/testdata stays where it is and
+// keeps its own readers in compose/compose_test.go, which want three files it
+// can quote in full rather than 371 it cannot.
 func corpus(t *testing.T) *catalog.Catalog {
 	t.Helper()
-	c, err := catalog.Load(os.DirFS("../compose/testdata"))
+	c, err := catalog.Load(os.DirFS("templates"))
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf("loading the shipped catalogue: %v", err)
 	}
 	return c
 }
 
-// Upstream withdraws a template with a header comment and 28 of the 371 files
-// carry it. Offering those is offering applications whose own authors took them
-// down — and plausible, which is one of them, converts into an entry that
-// cannot work.
+// Upstream withdraws a template with a header comment. Offering those is
+// offering applications whose own authors took them down — and plausible, which
+// is one of them, converts into an entry that cannot work.
+//
+// How many carry it is logged rather than written down here. It was a comment
+// saying "28 of the 371 files" while this ran against three, which is the shape
+// of a number that has stopped being checkable: nothing computed it, nothing
+// would notice it going stale, and the only reader who could tell was the one
+// who went and counted.
 func TestAWithdrawnTemplateIsNotOffered(t *testing.T) {
 	c := corpus(t)
+
+	withdrawn := 0
+	for _, s := range c.Skipped {
+		if strings.Contains(s.Reason, "withdrawn") {
+			withdrawn++
+		}
+	}
+	if withdrawn == 0 {
+		t.Error("no template was skipped as withdrawn, so the header is not being read at all")
+	}
+	t.Logf("%d of the %d files carry the withdrawal header",
+		withdrawn, len(c.Entries())+len(c.Skipped))
 
 	if _, ok := c.Get("plausible"); ok {
 		t.Error("plausible carries `# ignore: true` and was offered anyway")
