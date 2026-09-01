@@ -264,3 +264,68 @@ func fakeDigest(image string) (string, error) {
 	}
 	return image + "@sha256:" + strings.Repeat("a", 64), nil
 }
+
+// The group label survives the install path, because the operator's east-west
+// ingress rule selects on it.
+//
+// Measured on a cluster on 2026-09-01, before it did: checkmate installed with
+// one ingress rule — ingress-nginx and nothing else — and its own second
+// workload could not reach it. Adding damga.co/from-compose to the Workload by
+// hand produced the second rule immediately, and a probe carrying the group
+// label then connected to mongo on 27017 while one without it timed out. The
+// rule was correct; nothing was giving it anything to select.
+//
+// So this asserts the seam between two changes that were made separately and
+// did not meet: compose.Convert sets the label, the operator selects on it, and
+// renderInstall rebuilt ObjectMeta in between and kept only the name, the
+// namespace and the annotations.
+func TestTheInstalledObjectsKeepTheirComposeGroup(t *testing.T) {
+	c, err := catalog.Load(os.DirFS(shippedTemplates))
+	if err != nil {
+		t.Fatalf("loading %s: %v", shippedTemplates, err)
+	}
+	// An entry with a second workload, which is the only shape the label
+	// matters for: with one object there is no sibling to admit.
+	const entry = "checkmate"
+	plan, err := c.Plan(entry, catalog.Options{Namespace: e2eNamespace, Pin: fakeDigest})
+	if err != nil {
+		t.Fatalf("%s: %v", entry, err)
+	}
+	if len(plan.Workloads) < 2 {
+		t.Fatalf("%s has %d workloads; this case needs an entry with a sibling",
+			entry, len(plan.Workloads))
+	}
+	secrets, _ := plannedSecrets(plan)
+	place := placement.Placement{
+		TenantID: "t_ci", App: "p-" + entry, Env: envProd,
+		RepoURL: "https://example.test/ci", Branch: branchMain, Path: "apps/x",
+		Namespace: e2eNamespace,
+	}
+	files, err := renderInstall(place, plan, plan.Primary, secrets)("", nil)
+	if err != nil {
+		t.Fatalf("rendering: %v", err)
+	}
+
+	for name, body := range files {
+		app, err := manifest.Parse(body)
+		if err != nil {
+			// Databases render through a different type; the label matters for
+			// them too, and the string check below covers both.
+			if !strings.Contains(string(body), composeGroup) {
+				t.Errorf("%s carries no %s label, so the operator will render it a "+
+					"NetworkPolicy that its own siblings cannot pass", name, composeGroup)
+			}
+			continue
+		}
+		if app.Labels[composeGroup] == "" {
+			t.Errorf("%s carries no %s label, so the operator will render it a "+
+				"NetworkPolicy that admits ingress-nginx and nothing else — and the "+
+				"entry's other workload cannot reach it", name, composeGroup)
+		}
+	}
+}
+
+// composeGroup is the label compose.Convert sets and the operator's east-west
+// ingress rule selects on. Spelled here rather than imported because both of
+// those live in packages this one does not depend on for it.
+const composeGroup = "damga.co/from-compose"

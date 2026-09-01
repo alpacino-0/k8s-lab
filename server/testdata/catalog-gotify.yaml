@@ -3,6 +3,8 @@ kind: Workload
 metadata:
   annotations:
     damga.co/compose-service: gotify
+  labels:
+    damga.co/from-compose: gotify
   name: ci-gotify
   namespace: damga
 spec:
