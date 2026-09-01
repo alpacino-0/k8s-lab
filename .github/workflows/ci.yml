@@ -765,6 +765,125 @@ jobs:
             exit 1
           fi
 
+      # The observability half of "could I run this instead of Coolify": the
+      # user seeing whether their own application is healthy.
+      #
+      # It runs twice on purpose, either side of installing metrics-server,
+      # because this endpoint has two honest answers and only one of them is
+      # ever exercised by a unit test with a fake in it. Without metrics-server
+      # the pod facts still have to arrive and the response has to name the
+      # component it is missing; with it, the numbers have to appear. An
+      # endpoint that answered the same both ways would be reporting an app
+      # that uses no memory.
+      - name: An app's own metrics must answer, and name what they cannot
+        run: |
+          set -euo pipefail
+          # The owner this install does not have yet. Through kubectl exec
+          # because there is no HTTP equivalent, which is the point of it.
+          printf 'ci-metrics-password' | kubectl -n damga-system exec -i deploy/damga -- \
+            /damga bootstrap -evidence-dsn /data/damga.db \
+            -tenant ci -email ci@example.test -password-stdin > /tmp/bootstrap.out
+          # The path takes the tenant id and not the slug, which is the one
+          # thing about this API a reader gets wrong first.
+          tenant=$(grep -o 't_[a-z0-9]*' /tmp/bootstrap.out | head -1)
+          [ -n "$tenant" ] || { echo "bootstrap printed no tenant id:"; cat /tmp/bootstrap.out; exit 1; }
+
+          kubectl -n damga-system port-forward svc/damga 18080:80 >/dev/null 2>&1 &
+          forward=$!
+          trap 'kill "$forward" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            curl -sf --max-time 2 http://127.0.0.1:18080/healthz >/dev/null && break
+            [ "$i" = 30 ] && { echo "the port-forward never answered /healthz"; exit 1; }
+          done
+
+          api() { curl -s -b /tmp/jar -c /tmp/jar "$@"; }
+          api -X POST -H 'Content-Type: application/json' \
+            -d '{"email":"ci@example.test","password":"ci-metrics-password"}' \
+            http://127.0.0.1:18080/api/v1/login -o /dev/null -w 'login=%{http_code}\n' | grep -q 'login=200' \
+            || { echo "the owner bootstrap.out named cannot log in"; exit 1; }
+          # ci-probe is the Workload the step above left Ready. The placement is
+          # what turns its name into a namespace; without one this endpoint
+          # answers 404 and is right to.
+          api -X POST -H 'Content-Type: application/json' \
+            -d '{"app":"ci-probe","env":"prod","repoUrl":"https://example.test/ci","branch":"main","path":"apps/ci-probe/prod","namespace":"damga"}' \
+            "http://127.0.0.1:18080/api/v1/tenants/$tenant/apps" -o /dev/null -w 'createApp=%{http_code}\n' \
+            | grep -q 'createApp=201' || { echo "could not register ci-probe"; exit 1; }
+
+          metrics="http://127.0.0.1:18080/api/v1/tenants/$tenant/apps/ci-probe/envs/prod/metrics"
+
+          # Written to a file and given the answer as an argument. A heredoc
+          # and a stdin redirect on one command do not compose: the redirect
+          # wins and python reads the JSON as its own source, which fails with
+          # "name 'true' is not defined" and looks like a broken response.
+          cat > /tmp/check-before.py <<'PY'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          pods = d.get("pods") or []
+          if len(pods) != 2:
+              sys.exit(f"pods = {len(pods)}, want the two replicas ci-probe runs: {d}")
+          if any(p.get("phase") != "Running" for p in pods):
+              sys.exit(f"a replica is not Running: {pods}")
+          # The facts that need nothing but the API server have to be here.
+          if any("restarts" not in p for p in pods):
+              sys.exit(f"a replica reports no restart count: {pods}")
+          note = d.get("usage", {}).get("note", "")
+          if "metrics-server" not in note:
+              sys.exit(f"usage.note = {note!r}, want it to name the component that is absent")
+          if any(p["cpu"].get("usage") for p in pods):
+              sys.exit(f"usage appeared with no metrics-server installed: {pods}")
+          # And the requests the Workload asked for, which is what makes a
+          # usage figure mean anything once there is one.
+          if not all(p["memory"].get("limit") for p in pods):
+              sys.exit(f"no memory limit reported: {pods}")
+          print("without metrics-server: pod facts present, usage named as missing")
+          PY
+          # First answer: no metrics-server in this cluster.
+          api "$metrics" > /tmp/metrics-before.json
+          python3 /tmp/check-before.py /tmp/metrics-before.json
+
+          # Second answer: with it. The repository's own values, which do not
+          # turn TLS verification off — the kubelet serving certificates this
+          # job approved earlier are what make that possible.
+          helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ >/dev/null
+          start=$(date +%s)
+          helm upgrade --install metrics-server metrics-server/metrics-server \
+            -n kube-system -f cluster/metrics-server-values.yaml --wait --timeout 5m >/dev/null
+          echo "metrics-server ready in $(($(date +%s)-start))s"
+
+          cat > /tmp/check-after.py <<'PY'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          src = d.get("usage", {}).get("source")
+          if src != "metrics.k8s.io":
+              sys.exit(f"usage.source = {src!r} with metrics-server installed: {d.get('usage')}")
+          pods = d.get("pods") or []
+          measured = [p for p in pods if p["cpu"].get("usage") and p["memory"].get("usage")]
+          if not measured:
+              # A crash-looping pod is never scraped, and the endpoint says so
+              # rather than reporting zero. Either answer is correct; silence
+              # is not.
+              note = d.get("usage", {}).get("note", "")
+              if "no sample" not in note:
+                  sys.exit(f"no pod carries usage and nothing says why: {d}")
+              print("with metrics-server: answered, and no sample yet for these pods")
+          else:
+              p = measured[0]
+              # Nanocores are what metrics.k8s.io reports and nobody reads.
+              if p["cpu"]["usage"].endswith("n"):
+                  sys.exit(f"cpu usage {p['cpu']['usage']} is in nanocores; kubectl top says milli")
+              print(f"with metrics-server: cpu={p['cpu']['usage']} memory={p['memory']['usage']} "
+                    f"of limit {p['memory'].get('limit')} ({p['memory'].get('ofLimitPercent')}%)")
+          PY
+          api "$metrics" > /tmp/metrics-after.json
+          python3 /tmp/check-after.py /tmp/metrics-after.json
+
+          # Removed again, so the steps after this one see the cluster they were
+          # written against. Nothing here is asserting on the HPA, and an
+          # autoscaler that suddenly has metrics is a change to somebody else's
+          # step rather than to this one.
+          helm uninstall metrics-server -n kube-system >/dev/null
+          kubectl -n damga delete workload ci-probe >/dev/null 2>&1 || true
+
       # Reading the rendered pod back rather than the operator's own source. The
       # unit tests already prove the renderer intends this; this proves the API
       - name: The rendered pod must actually carry the hardening
