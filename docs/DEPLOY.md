@@ -16,8 +16,52 @@ public address yet.
 |---|---|
 | Server | 1 vCPU / 2 GB RAM is comfortable; 1 GB works. Hetzner CX22 or similar, ~€4-5/month |
 | Domain | A record pointing at the server's IP. A subdomain is fine |
-| Local tools | `kubectl`, `helm` |
-| Images | Already published: `ghcr.io/damgahq/damga`, public, amd64 + arm64. If you fork this and publish your own, note that a new organisation's GHCR packages start private and the visibility has to be flipped once by hand |
+| Tools | `kubectl`, `helm`, `openssl`, `sed`. On the server, if you use `scripts/install.sh`; on your own machine if you follow the sections by hand |
+| This repository | checked out **on the server**. Every manifest and the chart are applied from it, and `scripts/install.sh` lives in it |
+| Images | Published: `ghcr.io/damgahq/damga` (the reference tenant) and `ghcr.io/damgahq/damga-operator`, public, amd64 + arm64. **Not published:** `ghcr.io/damgahq/damga-control-plane`, which section 9 names — build that one yourself for now. If you fork this and publish your own, note that a new organisation's GHCR packages start private and the visibility has to be flipped once by hand |
+
+---
+
+## The one command
+
+```bash
+sudo ./scripts/install.sh --domain demo.your-domain.com \
+    --email you@example.com --tenant acme
+```
+
+That is sections 1 to 10 below, in order, on one machine. Re-running it is safe:
+every step re-applies what is already there, and the database password is
+created once and then left alone — replacing it would leave a PostgreSQL whose
+password no longer matches the one the app presents, which fails as a refused
+connection with nothing anywhere saying the credential moved.
+
+Before it touches anything:
+
+```bash
+DRY_RUN=1 ./scripts/install.sh --domain demo.your-domain.com \
+    --email you@example.com --tenant acme
+```
+
+prints every command it would run, in order, and changes nothing. The plan comes
+out of the same wrapper every mutation goes through rather than a second list
+kept beside the script, so it cannot describe a sequence the script does not
+perform. `scripts/install_test.go` reads that plan, and is where the ordering
+rule in section 5 is enforced — reversing those two steps fails `go test ./...`
+with a message saying which way round they go.
+
+| Flag | When |
+|---|---|
+| `--issuer letsencrypt-prod` | the default is `letsencrypt-staging`, deliberately: rehearse against the server that does not rate-limit failures |
+| `--skip-k3s` | k3s is already there, or the kubeconfig points elsewhere |
+| `--skip-node-config` | do not write the containerd redirect or restart k3s |
+| `--control-plane-image <ref>` | see section 9; the manifest's default is not published yet |
+| `--skip-control-plane` | the platform and the reference tenant only |
+
+> **What was measured.** The dry run, the order it emits, that it never prints a
+> generated credential, and that every path in it exists in this repository —
+> all four run in `go test ./...`. **Not measured:** a real run against a real
+> k3s server. Every step in the script is a step from this page, so it inherits
+> this page's marks and adds no confidence of its own.
 
 ---
 
@@ -86,6 +130,10 @@ cp cluster/issuers-letsencrypt.yaml.example cluster/issuers-letsencrypt.yaml
 kubectl apply -f cluster/issuers-letsencrypt.yaml
 ```
 
+`scripts/install.sh` substitutes the address into the template and pipes it
+straight to `kubectl`, writing no second file — one template, and no copy beside
+it to edit and then forget.
+
 Rehearse against staging first (`--set ingress.tls.clusterIssuer=letsencrypt-staging`),
 confirm a certificate is issued, then switch to `letsencrypt-prod`.
 
@@ -122,7 +170,34 @@ kubectl get namespace damga -o jsonpath='{.metadata.labels}' | tr ',' '\n'
 > its filesystem, and needs to reach the internet. Nothing verifies an image
 > now. That is a deliberate trade, recorded rather than quietly dropped.
 
-## 5. The image store
+## 5. The types the platform reconciles
+
+```bash
+kubectl apply -f config/crd/bases
+```
+
+`Workload`, `Database` and `Build`. They go in **before** the next section, and
+that ordering is the one thing on this page that is not a matter of taste.
+
+`cluster/build-namespace.yaml` puts a quota on
+`count/builds.platform.damga.co`. A ResourceQuota that counts a type the API
+server has never heard of cannot compute a usage for it, and until it can every
+create in that namespace is refused with `status unknown for quota` — a message
+that names the quota and not the missing type. Measured: applying the quota
+first made the first build of every CI run fail on the platform's own guard
+rail.
+
+`make -f Makefile.operator install` installs the same three types through
+kustomize, and wants Go, make and a download on a machine whose only job is to
+run one server. Measured equivalent: `kustomize build config/crd` (v5.8.1) and
+the three files in `config/crd/bases` parse to the same three objects, field for
+field — `config/crd/kustomization.yaml` carries no active patches.
+
+Installing the types is not installing the controller. Nothing reconciles a
+`Workload` until the operator is running, and this page does not install it; see
+[What this page does not install](#what-this-page-does-not-install).
+
+## 6. The image store
 
 Needed as soon as the platform builds anything: a build pushes an image here and
 the kubelet pulls it back out. Nothing else on this page depends on it.
@@ -212,7 +287,7 @@ that the store on the volume shrank.
 > run: `systemctl restart k3s` — that k3s was restarted whole rather than
 > through its unit.
 
-## 6. Database credentials
+## 7. Database credentials
 
 The password never goes into a values file or a shell history:
 
@@ -227,7 +302,7 @@ kubectl -n damga create secret generic db-credentials \
 `postgres.auth.existingSecret`, so the chart renders no PostgreSQL secret of its
 own — the credentials exist only in the cluster, never in this repository.
 
-## 7. Deploy
+## 8. Deploy the reference tenant
 
 ```bash
 helm upgrade --install app ./chart \
@@ -250,7 +325,60 @@ public address is the difference between a limit and a suggestion.
 `WaitForFirstConsumer` storage class and stays `Pending` until the first backup
 job mounts it, which would block the release forever.
 
-## 8. Verify
+## 9. The control plane
+
+```bash
+kubectl apply -f cluster/control-plane.yaml
+kubectl -n damga-system rollout status deployment/damga --timeout=300s
+```
+
+The panel, the API and the deploy write path — the product, as opposed to the
+reference tenant the previous section deployed. The manifest carries a
+ServiceAccount whose identity is deliberately lopsided: cluster-wide reads, one
+namespace it may create a `Build` in, and no delete anywhere.
+
+> **This will not pull yet, and that is a fact about this repository rather than
+> about your server.** `cluster/control-plane.yaml` names
+> `ghcr.io/damgahq/damga-control-plane:latest`. The publish job builds two
+> images — `ghcr.io/damgahq/damga`, the reference tenant, and
+> `ghcr.io/damgahq/damga-operator` — and no third. CI exercises the control
+> plane by building it into a kind cluster, which is why nothing has caught it.
+> Until that image is published, build it from the `Dockerfile` at the
+> repository root, push it somewhere this cluster can reach, and name it:
+>
+> ```bash
+> ./scripts/install.sh ... --control-plane-image ghcr.io/you/damga-control-plane:1
+> ```
+>
+> By hand, that is one command after the apply above:
+>
+> ```bash
+> kubectl -n damga-system set image deployment/damga \
+>   damga=ghcr.io/you/damga-control-plane:1
+> ```
+
+## 10. The first owner
+
+```bash
+kubectl -n damga-system exec -it deploy/damga -- \
+  damga bootstrap -evidence-dsn /data/damga.db \
+  -email you@example.com -tenant acme
+```
+
+One account and one tenant. It prints a generated password once and keeps only
+an argon2id hash, so copy it before the terminal scrolls.
+
+`kubectl exec` streams over the CRI exec channel, which is not the container log
+a collector tails — so the password is shown to whoever ran the command and to
+nobody else. Printing the same string from the running server would put it in
+Loki for the retention period. Running it a second time exits `3` and changes
+nothing, which is why the installer calls it unconditionally.
+
+There is no "create the first account" page, and no setup token printed at
+startup. [docs/CONTROL-PLANE.md](CONTROL-PLANE.md) says what each of those
+alternatives gives away.
+
+## 11. Verify
 
 ```bash
 curl -sI https://demo.your-domain.com | head -3          # 200, valid certificate
@@ -272,7 +400,69 @@ kubectl -n damga get certificate
 kubectl -n damga describe certificate damga-tls | tail -20
 ```
 
+### The control plane, from a browser and from a terminal
+
+The control plane is not on the public address — nothing routes to it and no
+Ingress in this repository claims a host for it. Reach it over a port-forward:
+
+```bash
+kubectl -n damga-system port-forward svc/damga 9000:80
+```
+
+Then <http://localhost:9000> for the panel, or the CLI against the same API:
+
+```bash
+go build -o damga-cli ./cmd/damga-cli
+
+./damga-cli login --server http://localhost:9000 --email you@example.com
+./damga-cli apps
+./damga-cli verify <app> <env>
+```
+
+`damga-cli` calls the endpoints the panel calls and cannot call anything else:
+its route table is walked by a test that starts a real control plane and asks it
+for every row, so an endpoint the CLI believes in and the API does not have
+fails in `go test ./...` rather than in somebody's terminal.
+
+Two things worth knowing before the first run:
+
+- **The session is bound to the host that issued it.** Signing in against
+  `http://localhost:9000` and then passing `--server http://127.0.0.1:9000`
+  gets a refusal, because the control plane binds a session to its host and
+  answers a mismatch with the same "not signed in" it gives an expired one. The
+  CLI knows both hosts and says which; the server deliberately does not.
+- **`verify` exits non-zero when the chain does not hold** (`4`, and `3` for a
+  session that is gone), so a cron job can ask without reading the output.
+
+> **What was measured.** Every command above ran against a control plane started
+> in-process by the CLI's own test suite: `login`, `whoami`, `apps`,
+> `apps create`, `apps delete`, `status`, `history`, `verify` and `retention`
+> answered the real server. **Not measured against a real server:** `build`,
+> `deploy`, `backup` and `export` — `deploy` needs a git token this install does
+> not have and `build` needs an operator it does not run, so those four are
+> proved against a recorded stand-in only, and what is proved about them is the
+> request they send, not the answer they get.
+
 ---
+
+## What this page does not install
+
+Named here rather than discovered on the machine.
+
+- **The operator.** The types from section 5 exist and nothing reconciles them,
+  so a `Workload` is a row in etcd and not a Deployment. It needs an image and
+  `make -f Makefile.operator deploy`, which wants kustomize and Go on the
+  server. `ghcr.io/damgahq/damga-operator` **is** published, so only the deploy
+  step is missing here.
+- **Argo CD.** A deploy writes a commit and nothing applies it. `make gitops`
+  installs Argo CD against a local cluster; there is no equivalent on this page.
+- **A git token.** `cluster/control-plane.yaml` passes no `-git-token-file`, so
+  `POST .../deploys` refuses with a message naming that flag. Everything the
+  panel reads works without it.
+
+Each of these is a step, not a redesign. What they add up to is that this page
+gets you a platform you can log into and look at, and not yet one that ships a
+commit to a running pod.
 
 ## What a single node costs you
 
@@ -309,10 +499,19 @@ second node appears. No redeploy.
 
 ```bash
 helm uninstall app -n damga
-kubectl delete namespace damga
+kubectl delete namespace damga damga-system damga-registry damga-build
+# The types last: deleting a CRD deletes every object of that type, so doing it
+# before the namespaces above removes the objects the operator would otherwise
+# get a chance to finalise.
+kubectl delete -f config/crd/bases
 # on the server
 /usr/local/bin/k3s-uninstall.sh
+rm -f /etc/rancher/k3s/registries.yaml
 ```
+
+`k3s-uninstall.sh` removes the cluster whole, so the first three commands only
+matter when the machine is being kept. **Not verified:** the order above is
+reasoned from how finalisers work and has not been run against a live install.
 
 ---
 
