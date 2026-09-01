@@ -891,6 +891,120 @@ jobs:
 
           kubectl -n damga delete database ci-redis
 
+      # The product's headline feature, on a real cluster for the first time.
+      #
+      # Every step above proves a piece the platform wrote for itself. This one
+      # takes an entry a user would click — a third-party image, its own
+      # environment, its own volume, a credential it expects somebody to invent
+      # — and asserts the whole way to the application answering for itself.
+      #
+      # What it does not cover is said plainly: the real install path writes
+      # this manifest through a git commit that Argo CD applies, and this job
+      # has neither a git remote nor Argo CD. So it applies the manifest
+      # directly, and TestTheEndToEndManifestIsWhatTheCatalogueProduces renders
+      # the same file through renderInstall and fails if a byte differs — which
+      # is what stops the committed copy becoming a fixture that proves nothing.
+      - name: An application installed from the catalogue must serve its own API
+        run: |
+          start=$(date +%s)
+
+          # The control plane is already running, and that is itself most of the
+          # proof that its image carries the templates: catalogSource is fatal
+          # when -catalog-dir names a directory catalog.Load refuses, and it
+          # refuses an empty one. Measured further back than that — take the
+          # re-include out of .dockerignore and the image build fails at the
+          # COPY with "/workspace/catalog/templates: not found", so a catalogue
+          # that is missing cannot get as far as this job.
+          #
+          # What is asserted here is the flag that connects the image to the
+          # server, because a deployment that quietly lost it would serve
+          # everything except this and look entirely healthy.
+          kubectl -n damga-system get deployment damga \
+            -o jsonpath='{.spec.template.spec.containers[0].args}' \
+            | grep -q -- '-catalog-dir=' || {
+            echo "the control plane is running without -catalog-dir, so its catalogue is off"
+            echo "and every /catalog request answers 503; see cluster/control-plane.yaml"
+            exit 1
+          }
+
+          kubectl apply -f server/testdata/catalog-gotify.yaml
+          kubectl -n damga wait --for=condition=Ready workload/ci-gotify --timeout=300s || {
+            echo "::group::why the catalogue install did not become Ready"
+            kubectl -n damga get workload ci-gotify -o jsonpath='{.status.conditions}' | tr ',' '\n'
+            kubectl -n damga get pod,pvc,secret -l app.kubernetes.io/instance=ci-gotify -o wide
+            kubectl -n damga describe pod -l app.kubernetes.io/instance=ci-gotify | tail -40
+            kubectl -n damga logs -l app.kubernetes.io/instance=ci-gotify --tail=60 || true
+            kubectl -n damga get events --sort-by=.lastTimestamp | tail -20
+            echo "::endgroup::"
+            exit 1
+          }
+          ready=$(date +%s)
+
+          # From ingress-nginx and not from this namespace. The Workload's own
+          # NetworkPolicy allows ingress from there and refuses everything else,
+          # so a probe run beside it answers 000 — which reads as an application
+          # that never started rather than as the fence doing its job.
+          probe() { # $1 name, $2 the shell command, already JSON-quoted
+            kubectl -n ingress-nginx run "$1" --rm -i --restart=Never \
+              --image=curlimages/curl:8.11.1 --quiet \
+              --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"'"$1"'","image":"curlimages/curl:8.11.1","command":["sh","-c",'"$2"'],"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"resources":{"requests":{"cpu":"10m","memory":"32Mi"},"limits":{"memory":"64Mi"}}}]}}' \
+              -- sh
+          }
+
+          # Ready is not the claim. Gotify answering its own /health with green,
+          # and green for the database it keeps on the volume the catalogue
+          # asked for, is: a pod can be Ready with its storage unmounted.
+          probe catalogue-health '"echo status=$(curl -s -o /dev/null -w %{http_code} --max-time 15 http://ci-gotify.damga.svc/health); echo body:; curl -s --max-time 15 http://ci-gotify.damga.svc/health"' \
+            | tee /tmp/gotify.out
+          answered=$(date +%s)
+          grep -q '"health":"green"' /tmp/gotify.out || {
+            echo "::group::the application did not report itself healthy"
+            echo "what the probe saw:"; cat /tmp/gotify.out
+            echo "-- status= above is an HTTP code; no line at all means the probe"
+            echo "-- pod produced no output, which is a different failure."
+            kubectl -n damga get deploy,pod,svc,endpoints,networkpolicy -o wide || true
+            kubectl -n damga logs -l app.kubernetes.io/instance=ci-gotify --tail=60 || true
+            echo "::endgroup::"
+            exit 1
+          }
+
+          # And the credential the platform invented has to be the one the
+          # application is using. The template asks for SERVICE_PASSWORD_GOTIFY,
+          # the operator mints it into ci-gotify-generated, and gotify takes it
+          # as its admin password — if any link in that chain is broken the
+          # value in the Secret still looks perfectly correct.
+          pass=$(kubectl -n damga get secret ci-gotify-generated \
+            -o jsonpath='{.data.GOTIFY_DEFAULTUSER_PASS}' | base64 -d)
+          [ -n "$pass" ] || { echo "the operator minted no GOTIFY_DEFAULTUSER_PASS"; exit 1; }
+          case "$pass" in *[!A-Za-z0-9_-]*)
+            echo "the minted password is outside the alphabet this step can pass through a shell"
+            exit 1 ;;
+          esac
+          # Both directions, because an application that accepts anything would
+          # pass the first assertion on its own. Only the status codes are
+          # printed; the password never is.
+          probe catalogue-auth '"echo minted=$(curl -s -o /dev/null -w %{http_code} --max-time 15 -u admin:'"$pass"' http://ci-gotify.damga.svc/current/user); echo wrong=$(curl -s -o /dev/null -w %{http_code} --max-time 15 -u admin:definitely-not-it http://ci-gotify.damga.svc/current/user)"' \
+            | tee /tmp/gotify-auth.out
+          grep -q 'minted=200' /tmp/gotify-auth.out || {
+            echo "the password the operator minted is not the one the application accepts:"
+            echo "the Secret exists and its value never reached the container"
+            cat /tmp/gotify-auth.out; exit 1
+          }
+          grep -q 'wrong=401' /tmp/gotify-auth.out || {
+            echo "the application accepted a password nobody minted, so the check above"
+            echo "proves nothing about where the real one came from"
+            cat /tmp/gotify-auth.out; exit 1
+          }
+
+          # The number docs/DURUM.md section 4 item 6 was waiting for. Printed
+          # rather than asserted: it is a measurement of this runner on this
+          # day, and a threshold here would fail on a slow one without anything
+          # being wrong.
+          echo "catalogue install: apply to Ready $((ready-start))s," \
+               "apply to a healthy answer $((answered-start))s"
+
+          kubectl -n damga delete workload ci-gotify
+
       - name: A Build must produce an image the cluster can pull
         run: |
           cat <<EOF | kubectl apply -f -

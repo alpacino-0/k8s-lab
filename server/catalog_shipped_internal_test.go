@@ -23,7 +23,7 @@ package server
 import (
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 
@@ -90,13 +90,27 @@ func TestTheShippedCatalogueLoadsAndCanInstallTheEndToEndEntry(t *testing.T) {
 		}
 		byReason[firstReason(refusals[0])]++
 	}
-	sort.Strings(installable)
+	slices.Sort(installable)
 
 	t.Logf("shipped catalogue: %d offered, %d skipped, %d install as they stand",
 		len(entries), len(c.Skipped), len(installable))
-	for _, reason := range []string{"image", "object count", "generated values"} {
+	for _, reason := range []string{reasonImage, reasonObjects, reasonSecrets} {
 		t.Logf("  refused first by %-16s %d", reason, byReason[reason])
 	}
+
+	// An upper bound on what -pin-images buys, and it is an upper bound rather
+	// than a count: this resolver answers for every image, and a real registry
+	// answers 404 for a tag that was deleted. Logged next to the figure above
+	// so the two are read together — the flag is off by default, so the number
+	// that describes a default install is the one above.
+	pinned := 0
+	for _, e := range entries {
+		p, err := c.Plan(e.Name, catalog.Options{Namespace: "t", Pin: fakeDigest})
+		if err == nil && len(whyRefused(p)) == 0 {
+			pinned++
+		}
+	}
+	t.Logf("  with -pin-images and a registry that answers: %d would install (upper bound)", pinned)
 
 	plan, err := c.Plan(e2eTemplate, catalog.Options{Namespace: "t"})
 	if err != nil {
@@ -145,17 +159,25 @@ func TestTheVendoredTemplatesCarryTheirAttribution(t *testing.T) {
 	}
 }
 
+// The three limits a refusal can come from, named once so the bucketing below
+// and the log above cannot drift into disagreeing about the spelling.
+const (
+	reasonImage   = "image"
+	reasonObjects = "object count"
+	reasonSecrets = "generated values"
+)
+
 // firstReason buckets a refusal by which of the three limits produced it, so the
 // log above says where the catalogue is actually stopped rather than how many
 // sentences it printed.
 func firstReason(refusal string) string {
 	switch {
-	case strings.Contains(refusal, "image"):
-		return "image"
+	case strings.Contains(refusal, reasonImage):
+		return reasonImage
 	case strings.Contains(refusal, "objects"):
-		return "object count"
+		return reasonObjects
 	default:
-		return "generated values"
+		return reasonSecrets
 	}
 }
 
@@ -224,4 +246,17 @@ func TestTheEndToEndManifestIsWhatTheCatalogueProduces(t *testing.T) {
 			"UPDATE_GOLDEN=1 go test ./server/ -run TestTheEndToEndManifestIsWhatTheCatalogueProduces"+
 			"\n--- committed ---\n%s\n--- produced ---\n%s", installGolden, want, got)
 	}
+}
+
+// fakeDigest stands in for the registry client so the count above is a property
+// of the corpus rather than of the network. It never fails, which is why what it
+// produces is a ceiling.
+func fakeDigest(image string) (string, error) {
+	if strings.Contains(image, "@") {
+		return image, nil
+	}
+	if i := strings.LastIndex(image, ":"); i > strings.LastIndex(image, "/") {
+		image = image[:i]
+	}
+	return image + "@sha256:" + strings.Repeat("a", 64), nil
 }

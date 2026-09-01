@@ -393,12 +393,14 @@ else
   fi
   run kubectl -n "$SYSTEM_NAMESPACE" rollout status deployment/damga --timeout=300s
   # Said now rather than discovered later, and it names one cause rather than
-  # the symptom. The flag is in the manifest — checked above — so a catalogue
-  # that is still missing means the templates are not in the image, which is a
-  # build-context problem and not a configuration one.
+  # the symptom. The flag is in the manifest — checked above — and an image
+  # built from this tree cannot lack the templates, because the build fails at
+  # the COPY when they are missing. So the one way to reach this note and still
+  # have no catalogue is an image built before the templates were vendored,
+  # which is exactly what --control-plane-image makes easy to pass in.
   note "the catalogue is served from ${CATALOG_DIR} inside the image;"
-  note "if /catalog answers 503 after this, the image was built without"
-  note "catalog/templates — check that .dockerignore still re-includes it"
+  note "if /catalog answers 503 after this, the running image predates the"
+  note "vendored templates — rebuild it from this tree"
 fi
 
 step "the first owner"

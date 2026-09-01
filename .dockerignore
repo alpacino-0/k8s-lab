@@ -33,10 +33,12 @@ app/**
 
 # The one-click catalogue, which -catalog-dir points at inside the image.
 #
-# Re-included by name because this file ignores everything by default. Without
-# it the image builds, starts, serves the API, and answers 503 on /catalog with
-# "no templates are mounted" — an install that looks configured and offers
-# nothing, which is the same failure the panel's re-inclusion above records.
+# Re-included by name because this file ignores everything by default. Measured
+# by taking this line out and building: the build fails at the COPY with
+# `"/workspace/catalog/templates": not found`, which is the good version of this
+# failure and the reason the Dockerfile copies the directory rather than
+# tolerating its absence. The bad version is the one the panel's re-inclusion
+# above records — an image that starts, serves, and quietly has nothing.
 #
 # The README and the licence come with them on purpose: the image is a
 # redistribution of Apache-2.0 work, and the licence has to travel with it.
