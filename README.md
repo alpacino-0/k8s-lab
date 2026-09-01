@@ -164,7 +164,7 @@ variables the kubelet injects.
 
 | Command | What it does |
 |---|---|
-| `make test` | Unit and integration tests (29 tests, no cluster needed) |
+| `make test` | Unit and integration tests (33 tests, no cluster needed) |
 | `make lint` | ESLint + `helm lint` + renders every values profile |
 | `make deploy` | Rebuild the image and upgrade the release |
 | `make smoke` | End-to-end checks against the running deployment |
@@ -483,12 +483,12 @@ up costs users, being hasty to scale down causes thrashing.
 
 ### CI/CD
 
-Eight jobs ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) — five on
-every push, three more on `main`:
+Seven jobs ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) — five on
+every push, two more on `main`:
 
 | Job | Gate |
 |---|---|
-| `test` | ESLint and 29 tests for the API |
+| `test` | ESLint and 33 tests for the API |
 | `manifests` | `helm lint`, renders all values profiles, kubeconform schema validation, `terraform fmt -check` and `validate`, hadolint on every Dockerfile |
 | `image` | Builds each image, asserts each is non-root, boots the API image read-only, Trivy scan (fails on CRITICAL/HIGH) |
 | `operator` | The Go suite, plus a check that the committed generated code matches what the types produce |

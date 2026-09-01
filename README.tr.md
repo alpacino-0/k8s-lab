@@ -159,7 +159,7 @@ değişkenleri.
 
 | Komut | Ne yapar |
 |---|---|
-| `make test` | Birim ve entegrasyon testleri (29 test, cluster gerekmez) |
+| `make test` | Birim ve entegrasyon testleri (33 test, cluster gerekmez) |
 | `make lint` | ESLint + `helm lint` + tüm values profillerini üretir |
 | `make deploy` | İmajı yeniden derler ve sürümü günceller |
 | `make smoke` | Çalışan deployment'a karşı uçtan uca kontroller |
@@ -468,12 +468,12 @@ Büyüme anında, küçülme kasten yavaştır: büyümede geç kalmanın bedeli
 
 ### CI/CD
 
-Sekiz job ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) — beşi her
-push'ta, üçü yalnız `main`'de:
+Yedi job ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) — beşi her
+push'ta, ikisi yalnız `main`'de:
 
 | Job | Neyi denetler |
 |---|---|
-| `test` | API için ESLint + 29 test |
+| `test` | API için ESLint + 33 test |
 | `manifests` | `helm lint`, values profilleri, kubeconform şema denetimi, `terraform fmt -check` ve `validate`, her Dockerfile için hadolint |
 | `image` | İmajları derler, hiçbirinin root olmadığını doğrular, API imajını salt-okunur başlatır, Trivy taraması |
 | `operator` | Go test paketi, ve commit'lenmiş üretilmiş kodun tiplerden çıkanla aynı olduğunun denetimi |
