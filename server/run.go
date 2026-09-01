@@ -241,6 +241,9 @@ var tenantRoutes = []struct {
 	// whole value is that it does not change.
 	{http.MethodGet, "/apps/{app}/envs/{env}/backup", backupRoute},
 	{http.MethodGet, "/apps/{app}/envs/{env}/export", export},
+	// A GET that stays open, and therefore the one endpoint that cannot inherit
+	// the CSRF control below: it always allows GET. See logs.
+	{http.MethodGet, "/apps/{app}/envs/{env}/logs", logs},
 	// The only one that writes, and it writes to git and to nothing else.
 	{http.MethodPost, "/apps/{app}/envs/{env}/deploys", deployRoute},
 }
