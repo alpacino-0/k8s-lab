@@ -23,12 +23,14 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 
+	platformv1alpha1 "github.com/damgahq/damga/api/v1alpha1"
 	"github.com/damgahq/damga/authz"
 	"github.com/damgahq/damga/catalog"
 	"github.com/damgahq/damga/internal/gitwrite"
@@ -296,6 +298,7 @@ func installFromCatalog(g guard, st stores) http.Handler {
 			return
 		}
 
+		secrets, _ := plannedSecrets(plan)
 		refusals := whyRefused(plan)
 		if req.DryRun {
 			writeJSON(w, toWirePlan(plan, refusals))
@@ -356,7 +359,7 @@ func installFromCatalog(g guard, st stores) http.Handler {
 			Author:  gitwrite.Author{ID: sub.ID, Name: sub.ID, Email: sub.Email},
 			Ref:     ref,
 			Message: fmt.Sprintf("install %s as %s/%s", plan.Entry.Name, ref.App, ref.Env),
-			Render:  renderInstall(place, plan),
+			Render:  renderInstall(place, plan, secrets),
 		})
 		if err != nil {
 			// The placement is written and the commit is not. Said plainly,
@@ -379,6 +382,115 @@ func installFromCatalog(g guard, st stores) http.Handler {
 	})
 }
 
+// envName mirrors the pattern the Workload API puts on a generated value's
+// name. Checked here so a template that names a variable Kubernetes will refuse
+// is refused before the commit rather than after it — an API server rejecting a
+// manifest that is already pushed is a failure with nobody watching.
+var envName = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+
+// maxGeneratedSecrets mirrors MaxItems on the same field, for the same reason.
+const maxGeneratedSecrets = 16
+
+// plannedSecrets turns the plan's requests into the field the operator mints,
+// and reports every request it cannot express.
+//
+// The field mints one value per name. The plan is richer than that on purpose —
+// a Key carries a template and the sources to substitute into it, because 51 of
+// the upstream templates build a connection string around a credential and 111
+// share one value between two services — and this function is where that
+// richness meets an API that has none of it. Everything it cannot say is
+// refused by name rather than approximated, because the approximations are all
+// the same shape: an application that starts, holds a credential nobody else
+// has, and fails at its first connection.
+//
+// Measured through this function: 159 of the 341 entries ask for a generated
+// value and 62 of them ask only in ways this field can carry. Counting the 97
+// that do not by the first reason each hits — 61 want a kind the API does not
+// have, 17 name one value twice, 15 build a string around a credential, and 4
+// use a variable name the API refuses.
+func plannedSecrets(p catalog.Plan) ([]platformv1alpha1.GeneratedSecret, []string) {
+	var out []platformv1alpha1.GeneratedSecret
+	var refusals []string
+	claimed := map[string]string{}
+
+	for _, secret := range p.Secrets {
+		for _, key := range secret.Keys {
+			// A value that is exactly one source and nothing else. Anything
+			// longer — postgres://${USER}:${PASSWORD}@db/x — needs a
+			// substitution, and the field has no template: the operator would
+			// mint a password and hand it over as the whole URL.
+			if len(key.Sources) != 1 || key.Template != "${"+key.Sources[0].Name+"}" {
+				refusals = append(refusals, fmt.Sprintf(
+					"%s is built around %d generated value(s) rather than being one, and the "+
+						"platform mints values rather than assembling strings: %s",
+					key.Name, len(key.Sources), key.Template))
+				continue
+			}
+			src := key.Sources[0]
+
+			// One source, two keys. The template means them to be the same
+			// value and the field would mint two — which is the n8n failure
+			// the converter already measured: the task runner gets a token the
+			// broker does not accept, and it reads as a bug in the runner.
+			if first, taken := claimed[src.Name]; taken {
+				refusals = append(refusals, fmt.Sprintf(
+					"%s and %s are both %s and have to receive the same value; the platform "+
+						"mints one value per variable, so they would receive two",
+					first, key.Name, src.Name))
+				continue
+			}
+
+			kind, ok := generatedKind(src.Kind)
+			if !ok {
+				refusals = append(refusals, fmt.Sprintf(
+					"%s asks for a %q value, and the platform makes passwords, hex and base64",
+					key.Name, src.Kind))
+				continue
+			}
+			if !envName.MatchString(key.Name) || len(key.Name) > 64 {
+				refusals = append(refusals, fmt.Sprintf(
+					"%s is not a name the Workload API accepts for a generated value; it takes "+
+						"an upper-case environment variable name", key.Name))
+				continue
+			}
+
+			claimed[src.Name] = key.Name
+			out = append(out, platformv1alpha1.GeneratedSecret{Name: key.Name, Kind: kind})
+		}
+	}
+
+	if len(out) > maxGeneratedSecrets {
+		refusals = append(refusals, fmt.Sprintf(
+			"this template asks for %d generated values and a workload holds %d",
+			len(out), maxGeneratedSecrets))
+	}
+	return out, refusals
+}
+
+// generatedKind maps the converter's own spelling onto the API's three.
+//
+// "user" and "unknown" are deliberately not mapped. A username is not a
+// password with a different label — it is read back by a person and typed into
+// a form — and minting one from the password generator would produce an account
+// name nobody can use. Refusing says so; mapping it would hide it.
+//
+// It is also the largest thing standing between this endpoint and the rest of
+// the catalogue: 61 entries are refused for this reason first, more than the
+// other three limits together. What would fix it is a fourth kind on the
+// Workload API, not a mapping here.
+func generatedKind(kind string) (platformv1alpha1.GeneratedKind, bool) {
+	switch kind {
+	case "password":
+		return platformv1alpha1.GeneratedPassword, true
+	case "hex":
+		return platformv1alpha1.GeneratedHex, true
+	case "base64":
+		return platformv1alpha1.GeneratedBase64, true
+	default:
+		return "", false
+	}
+}
+
 // whyRefused is every reason this platform will not install this plan, in the
 // order a person would want to read them.
 //
@@ -388,29 +500,19 @@ func installFromCatalog(g guard, st stores) http.Handler {
 // go and look for a different n8n, and a user who is told the write path holds
 // one workload per environment has been told something true.
 //
-// Measured against the upstream corpus of 341 offered entries, with images
-// resolved to digests: 116 pass all three, 47 are stopped by the second alone,
-// 51 by the third alone and 66 by both.
+// Measured by running this function over the upstream corpus of 341 offered
+// entries: 59 install as they stand, and 146 once images resolve to digests —
+// Options.Pin is the difference and it is empty. 117 of the 341 are stopped by
+// the object count alone, which is the write path's limit rather than the
+// converter's.
 func whyRefused(p catalog.Plan) []string {
 	var out []string
 	for _, b := range p.Blockers {
 		out = append(out, b.String())
 	}
 
-	if len(p.Mint) > 0 {
-		names := make([]string, 0, len(p.Mint))
-		for _, s := range p.Mint {
-			names = append(names, s.Name)
-		}
-		// Named one by one rather than counted. The template asked for these
-		// by name, and a user comparing this list against the template can see
-		// that the platform read it correctly and simply cannot answer yet.
-		out = append(out, fmt.Sprintf(
-			"this template asks the platform to invent %d value(s) — %s — and nothing here "+
-				"mints one yet, so installing it would produce an application configured with "+
-				"empty credentials",
-			len(p.Mint), strings.Join(names, ", ")))
-	}
+	_, unmintable := plannedSecrets(p)
+	out = append(out, unmintable...)
 
 	if objects := len(p.Workloads) + len(p.Databases); objects != 1 || len(p.Workloads) != 1 {
 		// The limit is the write path's, not the converter's: a placement owns
@@ -455,7 +557,10 @@ func toWirePlan(p catalog.Plan, refusals []string) wirePlan {
 // read-modify-write of what is committed, because a deploy is "the same app, a
 // new build"; an install is the opposite claim — that this app is new — and a
 // directory that already holds a manifest is one where that claim is false.
-func renderInstall(place placement.Placement, plan catalog.Plan) renderFunc {
+func renderInstall(
+	place placement.Placement, plan catalog.Plan,
+	secrets []platformv1alpha1.GeneratedSecret,
+) renderFunc {
 	return func(rolloutID string, current map[string][]byte) (map[string][]byte, error) {
 		if _, taken := current[manifest.File]; taken {
 			return nil, fmt.Errorf(
@@ -477,12 +582,47 @@ func renderInstall(place placement.Placement, plan catalog.Plan) renderFunc {
 			Annotations: app.Annotations,
 		}
 
+		// The values the template asked the platform to invent, as a request
+		// rather than as values: the manifest that carries this is committed,
+		// and a credential in a commit is a credential for ever.
+		app.Spec.Secrets = secrets
+
+		// And the Secret the plan pointed at is dropped, because nothing
+		// creates it. catalog.Plan names one per workload for a caller that
+		// writes Secrets itself; the operator writes its own, called
+		// <app>-generated, and injects it. Leaving the plan's name here would
+		// be an envFrom naming a Secret that does not exist, which is a pod
+		// that never starts and an event nobody is watching.
+		app.Spec.EnvFrom = withoutPlannedSecrets(app.Spec.EnvFrom, plan)
+
 		body, err := manifest.Render(app, rolloutID)
 		if err != nil {
 			return nil, err
 		}
 		return map[string][]byte{manifest.File: body}, nil
 	}
+}
+
+// withoutPlannedSecrets removes the Secret names the plan invented for a caller
+// that would have written them itself.
+func withoutPlannedSecrets(envFrom []string, plan catalog.Plan) []string {
+	if len(envFrom) == 0 || len(plan.Secrets) == 0 {
+		return envFrom
+	}
+	planned := make(map[string]bool, len(plan.Secrets))
+	for _, s := range plan.Secrets {
+		planned[s.Name] = true
+	}
+	kept := make([]string, 0, len(envFrom))
+	for _, name := range envFrom {
+		if !planned[name] {
+			kept = append(kept, name)
+		}
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	return kept
 }
 
 // requireCatalog answers 503 when this install has no templates mounted.

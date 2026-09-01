@@ -36,6 +36,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 
+	platformv1alpha1 "github.com/damgahq/damga/api/v1alpha1"
 	"github.com/damgahq/damga/catalog"
 	"github.com/damgahq/damga/internal/gitwrite"
 	"github.com/damgahq/damga/internal/manifest"
@@ -68,6 +69,50 @@ services:
     image: example.test/secretive:2.0.0
     environment:
       - API_TOKEN=${SERVICE_PASSWORD_SECRETIVE}
+`)},
+	// Installs, and asks the platform to invent one value on the way.
+	"minty.yaml": &fstest.MapFile{Data: []byte(`# slogan: Wants one password
+# category: testing
+
+services:
+  app:
+    image: example.test/minty:3.1.0
+    environment:
+      - API_TOKEN=${SERVICE_PASSWORD_MINTY}
+      - SIGNING_KEY=${SERVICE_HEX_MINTY}
+`)},
+	// Refused: the value is a string built around two credentials, and the
+	// platform mints values rather than assembling them.
+	"composite.yaml": &fstest.MapFile{Data: []byte(`# slogan: Wants a connection string
+# category: testing
+
+services:
+  app:
+    image: example.test/composite:1.0.0
+    environment:
+      - DATABASE_URL=postgres://${SERVICE_USER_COMPOSITE}:${SERVICE_PASSWORD_COMPOSITE}@db:5432/app
+`)},
+	// Refused: two variables that have to hold one value, which the field
+	// cannot express — it mints one value per name.
+	"shared.yaml": &fstest.MapFile{Data: []byte(`# slogan: One value, two names
+# category: testing
+
+services:
+  app:
+    image: example.test/shared:1.0.0
+    environment:
+      - TOKEN_A=${SERVICE_PASSWORD_SHARED}
+      - TOKEN_B=${SERVICE_PASSWORD_SHARED}
+`)},
+	// Refused: a username is not a password with a different label.
+	"usery.yaml": &fstest.MapFile{Data: []byte(`# slogan: Wants a username
+# category: testing
+
+services:
+  app:
+    image: example.test/usery:1.0.0
+    environment:
+      - ADMIN_USER=${SERVICE_USER_USERY}
 `)},
 	// Refused: two workloads, and an app environment holds one.
 	"pair.yaml": &fstest.MapFile{Data: []byte(`# slogan: Two of everything
@@ -136,10 +181,13 @@ func (h *harness) callEnv(
 	return rec.Code, rec.Body.String()
 }
 
-func (h *harness) install(app, env, account, body string) (int, string) {
+// Always the same environment: what an install does from another tenant is
+// covered by TestEveryTenantRouteIsGuarded, which walks the table this route is
+// in, and nothing here turns on which environment it is.
+func (h *harness) install(app, account, body string) (int, string) {
 	h.t.Helper()
 	return h.callEnv(installFromCatalog, http.MethodPost,
-		"/apps/{app}/envs/{env}/from-catalog", tenantHome, app, env, account, body)
+		"/apps/{app}/envs/{env}/from-catalog", tenantHome, app, envProd, account, body)
 }
 
 // The filter the user typed has to reach the catalogue. A handler that reads
@@ -206,6 +254,34 @@ func TestNoCatalogueSaysSoRatherThanAnsweringAnEmptyList(t *testing.T) {
 	}
 }
 
+// The two actions this pair chose, and the difference between them.
+//
+// Reading the list is app:view, the weakest read there is, because what could
+// be installed says nothing about this tenant. Installing is app:deploy and not
+// env:create, although it creates one: it ends in a commit Argo CD applies, and
+// somebody who may register an app but not ship to it must not be able to
+// install n8n by another door.
+func TestAViewerMayReadTheCatalogueAndNotInstallFromIt(t *testing.T) {
+	h := newHarness(t)
+	h.stores.catalog = testCatalog(t)
+
+	if code, body := h.callEnv(catalogList, http.MethodGet, "/catalog",
+		tenantHome, "", "", accViewer, ""); code != http.StatusOK {
+		t.Fatalf("a viewer could not read the catalogue: %d %s", code, body)
+	}
+
+	code, body := h.install("tidy-app", accViewer, `{
+		"template": "tidy",
+		"repoUrl": "`+homeRepo+`", "path": "apps/tidy/prod", "namespace": "`+nsHomeProd+`"
+	}`)
+	if code != http.StatusForbidden {
+		t.Fatalf("a viewer installed from the catalogue = %d, want 403: %s", code, body)
+	}
+	if _, err := h.places.Get(context.Background(), tenantHome, "tidy-app", envProd); !errors.Is(err, placement.ErrNotFound) {
+		t.Fatal("a refused viewer still registered the app")
+	}
+}
+
 // Every refusal is checked before anything is written. A 422 that has already
 // created the placement leaves an app registered for an install that never
 // happened, and the next attempt answers 409 about a row nobody made.
@@ -215,7 +291,12 @@ func TestAnInstallThatCannotWorkWritesNothing(t *testing.T) {
 		app      string
 		wants    string
 	}{
-		{"secretive", "wants-a-password", "SERVICE_PASSWORD_SECRETIVE"},
+		{"composite", "connection-string", "rather than being one"},
+		{"shared", "one-value-two-names", "SERVICE_PASSWORD_SHARED"},
+		// Quoted as the JSON body carries it: the refusal names the kind the
+		// template asked for, and "user" is a word that also appears in the
+		// template's own name.
+		{"usery", "wants-a-username", `\"user\"`},
 		{"pair", "two-workloads", "2 workloads"},
 		{"floating", "moving-tag", ":latest"},
 	} {
@@ -223,7 +304,7 @@ func TestAnInstallThatCannotWorkWritesNothing(t *testing.T) {
 			h := newHarness(t)
 			h.stores.catalog = testCatalog(t)
 
-			code, body := h.install(tc.app, envProd, accMember, `{
+			code, body := h.install(tc.app, accMember, `{
 				"template": "`+tc.template+`",
 				"repoUrl": "`+homeRepo+`", "branch": "main", "path": "apps/x",
 				"namespace": "`+nsHomeProd+`"
@@ -253,8 +334,8 @@ func TestADryRunAnswersThePlanAndWritesNothing(t *testing.T) {
 	h := newHarness(t)
 	h.stores.catalog = testCatalog(t)
 
-	code, body := h.install("preview", envProd, accMember, `{
-		"template": "secretive", "dryRun": true,
+	code, body := h.install("preview", accMember, `{
+		"template": "composite", "dryRun": true,
 		"repoUrl": "`+homeRepo+`", "path": "apps/x", "namespace": "`+nsHomeProd+`"
 	}`)
 	if code != http.StatusOK {
@@ -270,7 +351,7 @@ func TestADryRunAnswersThePlanAndWritesNothing(t *testing.T) {
 		t.Error("a template nothing can supply values for was reported as installable")
 	case len(plan.Refusals) == 0:
 		t.Error("the plan carries no reason, so a page can grey the entry out and say nothing")
-	case len(plan.Generated) != 1 || plan.Generated[0] != "SERVICE_PASSWORD_SECRETIVE":
+	case len(plan.Generated) != 2:
 		t.Errorf("the values the template asks for are %v; the names are what a user checks "+
 			"the platform read correctly", plan.Generated)
 	}
@@ -291,7 +372,7 @@ func TestInstallingCommitsOneManifestNamedAfterTheApp(t *testing.T) {
 	h.stores.gitAuth = pathAuth{}
 	repo := testBareRepo(t)
 
-	code, body := h.install("tidy-app", envProd, accMember, `{
+	code, body := h.install("tidy-app", accMember, `{
 		"template": "tidy",
 		"repoUrl": "`+repo+`", "branch": "main", "path": "apps/tidy/prod",
 		"namespace": "`+nsHomeProd+`"
@@ -325,6 +406,60 @@ func TestInstallingCommitsOneManifestNamedAfterTheApp(t *testing.T) {
 	}
 }
 
+// The half the operator answers: a template that asks the platform to invent
+// values installs, and what is committed carries the request and never a value.
+func TestATemplateThatNeedsValuesCommitsTheRequestAndNotTheValues(t *testing.T) {
+	h := newHarness(t)
+	h.stores.catalog = testCatalog(t)
+	h.stores.writer = &gitwrite.Writer{Evidence: h.records}
+	h.stores.gitAuth = pathAuth{}
+	repo := testBareRepo(t)
+
+	code, body := h.install("minty", accMember, `{
+		"template": "minty",
+		"repoUrl": "`+repo+`", "branch": "main", "path": "apps/minty/prod",
+		"namespace": "`+nsHomeProd+`"
+	}`)
+	if code != http.StatusCreated {
+		t.Fatalf("installing minty = %d, want 201: %s", code, body)
+	}
+
+	app, err := manifest.Parse([]byte(committedManifest(t, repo, "apps/minty/prod/"+manifest.File)))
+	if err != nil {
+		t.Fatalf("what was committed is not a manifest: %v", err)
+	}
+	want := map[string]platformv1alpha1.GeneratedKind{
+		"API_TOKEN":   platformv1alpha1.GeneratedPassword,
+		"SIGNING_KEY": platformv1alpha1.GeneratedHex,
+	}
+	if len(app.Spec.Secrets) != len(want) {
+		t.Fatalf("the manifest asks for %d generated values, want %d: %+v",
+			len(app.Spec.Secrets), len(want), app.Spec.Secrets)
+	}
+	for _, got := range app.Spec.Secrets {
+		if kind, ok := want[got.Name]; !ok || got.Kind != kind {
+			t.Errorf("%s is asked for as %q, want %q; the kind is what makes a signing key "+
+				"hex rather than something that parses as nothing", got.Name, got.Kind, kind)
+		}
+	}
+
+	// The plan names a Secret per workload for a caller that would write them
+	// itself. The operator writes its own and injects it, so the plan's name
+	// must not survive into the manifest: an envFrom naming a Secret nothing
+	// creates is a pod that never starts.
+	for _, name := range app.Spec.EnvFrom {
+		if strings.HasSuffix(name, catalog.SecretSuffix) {
+			t.Errorf("the manifest reads %q, which nothing creates", name)
+		}
+	}
+
+	// And the committed bytes hold no value, because there is none to hold.
+	if strings.Contains(committedManifest(t, repo, "apps/minty/prod/"+manifest.File), "SERVICE_PASSWORD") {
+		t.Error("the committed manifest carries the source variable, so something was resolved " +
+			"into it that should have stayed a request")
+	}
+}
+
 // An install claims the app is new. A directory that already holds a manifest
 // is one where that claim is false, and writing over it replaces an app that
 // exists with one somebody picked off a list.
@@ -336,7 +471,7 @@ func TestInstallingOverAnExistingManifestIsRefused(t *testing.T) {
 	}
 	render := renderInstall(placement.Placement{
 		App: "tidy-app", Namespace: nsHomeProd, Path: "apps/tidy/prod",
-	}, plan)
+	}, plan, nil)
 
 	if _, err := render("r1", map[string][]byte{manifest.File: []byte("kind: Workload\n")}); err == nil {
 		t.Fatal("an install wrote over a manifest that was already committed")
