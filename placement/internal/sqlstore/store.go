@@ -242,6 +242,63 @@ func (s *Store) Delete(ctx context.Context, tenantID, app, env string) error {
 	return tx.Commit()
 }
 
+// SetTrigger is placement.Store.SetTrigger.
+//
+// An UPDATE and never an upsert. The columns live on the placement row, so
+// there is nothing to insert: an app that does not exist has no row to carry a
+// trigger, and inserting one here would create a placement with no repository,
+// no branch and no namespace — a row Validate would have refused and every
+// reader would then have to tolerate.
+func (s *Store) SetTrigger(ctx context.Context, t placement.Trigger) error {
+	if err := t.Validate(); err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, s.d.Rebind(`
+		UPDATE placement SET source_repo_url = ?, trigger_provider = ?, trigger_secret = ?, updated_at = ?
+		WHERE tenant_id = ? AND app = ? AND env = ?`),
+		placement.CanonicalRepo(t.RepoURL), t.Provider, t.Secret, asText(s.now()),
+		t.TenantID, t.App, t.Env)
+	if err != nil {
+		return err
+	}
+	// RowsAffected rather than a SELECT first: one round trip, and no window
+	// in which the placement is deleted between the check and the write.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: %s/%s/%s", placement.ErrNotFound, t.TenantID, t.App, t.Env)
+	}
+	return nil
+}
+
+// TriggersFor is placement.Store.TriggersFor.
+func (s *Store) TriggersFor(ctx context.Context, provider, repoURL string) ([]placement.Trigger, error) {
+	// The empty secret is excluded in the query and not by the caller. Every
+	// placement written before triggers existed carries three empty strings, so
+	// a lookup for provider "" and repository "" would otherwise return every
+	// app in the install to an unauthenticated caller.
+	rows, err := s.db.QueryContext(ctx, s.d.Rebind(`
+		SELECT tenant_id, app, env, source_repo_url, trigger_provider, trigger_secret FROM placement
+		WHERE trigger_provider = ? AND source_repo_url = ? AND trigger_secret <> ''
+		ORDER BY tenant_id, app, env`), provider, placement.CanonicalRepo(repoURL))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []placement.Trigger
+	for rows.Next() {
+		var t placement.Trigger
+		if err := rows.Scan(&t.TenantID, &t.App, &t.Env, &t.RepoURL, &t.Provider, &t.Secret); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // RepoOwner is placement.Store.RepoOwner.
 func (s *Store) RepoOwner(ctx context.Context, repoURL string) (string, error) {
 	var owner string

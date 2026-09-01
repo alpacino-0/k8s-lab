@@ -96,6 +96,86 @@ type Placement struct {
 	UpdatedAt time.Time
 }
 
+// Trigger is what a webhook needs to turn one push into one build.
+//
+// It is a type of its own and never a field on Placement, and the split is the
+// whole reason this compiles the way it does. Placement is what the panel
+// lists; a Secret on it would make every read of "where does this app live" a
+// read of a secret, which is the objection this package's doc comment already
+// makes about git credentials and which applies here word for word. The row is
+// the same row — a trigger is deleted with the placement it belongs to, because
+// nothing else could ever delete it — but Get and List do not select these
+// columns and cannot return them.
+//
+// RepoURL is NOT Placement.RepoURL, and confusing the two is the mistake this
+// comment exists to prevent. A placement's repository is the tenant's STATE
+// repository, where damga commits manifests. This is the SOURCE repository a
+// build clones, which nothing recorded before — server/builds.go says so in
+// as many words, and made every caller carry it in the request body. A push
+// arrives naming the source, so this is the field that turns a push into a
+// tenant.
+type Trigger struct {
+	TenantID string
+	App      string
+	Env      string
+
+	// Provider is the forge whose signature scheme the secret is for. Part of
+	// the lookup rather than assumed, because the same repository can be
+	// mirrored and two forges do not sign the same way.
+	Provider string
+
+	RepoURL string
+
+	// Secret is what the payload is signed with. Held in plaintext because an
+	// HMAC needs the key and not a hash of it — there is no version of this
+	// that stores a digest and still verifies.
+	Secret string
+}
+
+// CanonicalRepo is the one spelling a repository is stored and looked up under.
+//
+// It exists because a forge does not send one. GitHub's push payload carries
+// clone_url ending in ".git" and html_url without it, both are correct names
+// for the same repository, and whoever registered the webhook pasted whichever
+// their browser showed them. An exact string match would work for about half
+// of them, and the half that failed would look like a webhook that was never
+// delivered — nothing logged, nothing built, no error anywhere.
+//
+// Applied by SetTrigger and TriggersFor and by nothing else. Placement.RepoURL
+// is deliberately left alone: it is a claim key, two tenants are told apart by
+// it, and quietly folding two spellings together there would change who owns
+// what.
+func CanonicalRepo(url string) string {
+	u := strings.TrimSpace(url)
+	u = strings.TrimSuffix(u, "/")
+	u = strings.TrimSuffix(u, ".git")
+	// The scheme and host are case-insensitive and the path, on GitHub, is
+	// too. Lowercasing the whole thing is wrong for a forge that is
+	// case-sensitive in paths, which is why this is a documented choice rather
+	// than an obvious one: matching too many spellings costs a build against a
+	// repository somebody owns anyway, and matching too few costs a webhook
+	// that silently never fires.
+	return strings.ToLower(u)
+}
+
+// Validate is the check every implementation makes.
+func (t Trigger) Validate() error {
+	switch {
+	case t.TenantID == "" || t.App == "" || t.Env == "":
+		return fmt.Errorf("%w: a trigger needs a tenant, an app and an environment", ErrInvalid)
+	case t.Provider == "":
+		return fmt.Errorf("%w: a trigger needs a provider", ErrInvalid)
+	case t.RepoURL == "":
+		return fmt.Errorf("%w: a trigger needs the repository a push will name", ErrInvalid)
+	case t.Secret == "":
+		// Not defaulted and not optional. A trigger with an empty secret is an
+		// endpoint that builds whatever anybody posts to it, and it would look
+		// exactly like a working one until somebody noticed.
+		return fmt.Errorf("%w: a trigger needs a secret", ErrInvalid)
+	}
+	return nil
+}
+
 // Store is where placements live. The same shape as the other two stores in
 // this repository: an interface the paid build can replace, with one SQL
 // implementation configured per engine behind it.
@@ -134,6 +214,27 @@ type Store interface {
 	// path calls it before it opens a worktree, so that a misconfiguration is
 	// a refusal rather than a commit into somebody else's history.
 	RepoOwner(ctx context.Context, repoURL string) (string, error)
+
+	// SetTrigger records how a push to a source repository reaches this
+	// placement. It fails with ErrNotFound if there is no placement to attach
+	// it to, because a trigger for an app that does not exist would accept
+	// signed pushes and have nowhere to send them.
+	SetTrigger(ctx context.Context, t Trigger) error
+
+	// TriggersFor returns every trigger a push to this repository could match,
+	// secrets included.
+	//
+	// Every one, and not the first: one repository legitimately feeds several
+	// environments, and which of them a given push is for is decided by which
+	// secret verifies — not here. It is also the only method that returns a
+	// secret, which is what keeps the other reads free of them.
+	//
+	// It is NOT scoped to a tenant, and that is the one place in this store
+	// where that is correct: the caller is an unauthenticated webhook that has
+	// not yet proved which tenant it is. Proving it is what the signature does,
+	// and nothing may be told apart by the answer to this call — see
+	// server/hooks.go.
+	TriggersFor(ctx context.Context, provider, repoURL string) ([]Trigger, error)
 
 	Close() error
 }

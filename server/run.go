@@ -285,6 +285,11 @@ func (o Options) handler(store evidence.Store, idStore identity.Store) (http.Han
 		mux.Handle(rt.method+" "+tenantScope+rt.suffix, rt.handler(g, st))
 	}
 
+	// Outside the table and outside the guard, because a forge carries no
+	// session cookie and names no tenant. Its identity is the signature on the
+	// body; see hooks.
+	mux.Handle("POST /api/v1/hooks/{provider}", hooks(st))
+
 	// Mounted only when there is one. There is no built-in bundle yet, and
 	// serving a 404 at "/" from an embedded empty FS would be a worse answer
 	// than not claiming the route at all — another build could then not

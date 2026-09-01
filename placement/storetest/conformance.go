@@ -61,9 +61,35 @@ func Run(t *testing.T, newStore Factory) {
 		{"DeletingTheLastPlacementReleasesTheNamespace", testDeletingTheLastPlacementReleasesTheNamespace},
 		{"AnUnusablePlacementIsRefused", testAnUnusablePlacementIsRefused},
 		{"NotFoundIsDistinguishable", testNotFoundIsDistinguishable},
+		{"ATriggerRoundTripsAndSurvivesAReplace", testATriggerRoundTripsAndSurvivesAReplace},
+		{"OneRepositoryFeedsEveryEnvironmentThatAsked", testOneRepositoryFeedsEveryEnvironmentThatAsked},
+		{"ATriggerNobodySetIsNeverMatched", testATriggerNobodySetIsNeverMatched},
+		{"ATriggerWithoutAPlacementIsRefused", testATriggerWithoutAPlacementIsRefused},
+		{"DeletingThePlacementDeletesTheTrigger", testDeletingThePlacementDeletesTheTrigger},
+		{"OneRepositoryIsFoundUnderEverySpellingAForgeSends", testOneRepositoryIsFoundUnderEverySpelling},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) { c.fn(t, newStore) })
+	}
+}
+
+// sourceRepo is the repository a push arrives for, and it is deliberately not
+// repoA or repoB. Those are STATE repositories — where damga commits manifests
+// — and a test that used one for both would pass with the two confused.
+const (
+	sourceRepo = "https://github.com/acme/api"
+
+	// The forge a trigger is registered for, and the app the trigger cases use.
+	// Named so that adding a case does not add another copy of a string this
+	// file already repeats.
+	triggerProvider = "github"
+	triggerApp      = "api"
+)
+
+func trigger(tenant, app, env, secret string) placement.Trigger {
+	return placement.Trigger{
+		TenantID: tenant, App: app, Env: env,
+		Provider: triggerProvider, RepoURL: sourceRepo, Secret: secret,
 	}
 }
 
@@ -450,5 +476,206 @@ func testNotFoundIsDistinguishable(t *testing.T, newStore Factory) {
 	}
 	if owner != "" {
 		t.Errorf("RepoOwner of an unclaimed repository = %q", owner)
+	}
+}
+
+// A trigger is written against a placement that already exists and is found by
+// the repository a push will name.
+//
+// The second half is the one worth having. Put is create-or-replace and is
+// called by every edit of an app, so a Put that dropped the trigger would leave
+// a webhook that GitHub still delivers to and that this store no longer
+// recognises — a push that silently stops building, with the placement looking
+// entirely correct.
+func testATriggerRoundTripsAndSurvivesAReplace(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	mustPut(t, s, place(tenantA, triggerApp, prod, repoA, "apps/api/prod"))
+	if err := s.SetTrigger(ctx, trigger(tenantA, triggerApp, prod, "s3cr3t")); err != nil {
+		t.Fatalf("SetTrigger: %v", err)
+	}
+
+	got, err := s.TriggersFor(ctx, triggerProvider, sourceRepo)
+	if err != nil {
+		t.Fatalf("TriggersFor: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("TriggersFor = %d triggers, want 1", len(got))
+	}
+	if got[0].Secret != "s3cr3t" || got[0].App != triggerApp || got[0].Env != prod {
+		t.Errorf("TriggersFor = %+v", got[0])
+	}
+
+	// The same app, moved to another directory. Everything about the placement
+	// changes except the trigger.
+	mustPut(t, s, place(tenantA, triggerApp, prod, repoA, "apps/api/live"))
+	after, err := s.TriggersFor(ctx, triggerProvider, sourceRepo)
+	if err != nil {
+		t.Fatalf("TriggersFor after replace: %v", err)
+	}
+	if len(after) != 1 {
+		t.Fatalf("the trigger did not survive Put: %d triggers", len(after))
+	}
+	if after[0].Secret != "s3cr3t" {
+		t.Errorf("secret after replace = %q, want the one that was set", after[0].Secret)
+	}
+}
+
+// One repository feeds several environments, and every one of them has to come
+// back. Returning the first would build staging for ever and never production,
+// with nothing anywhere saying why.
+func testOneRepositoryFeedsEveryEnvironmentThatAsked(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	for _, env := range []string{"dev", prod} {
+		mustPut(t, s, place(tenantA, triggerApp, env, repoA, "apps/api/"+env))
+		if err := s.SetTrigger(ctx, trigger(tenantA, triggerApp, env, "shared")); err != nil {
+			t.Fatalf("SetTrigger %s: %v", env, err)
+		}
+	}
+	// Another tenant, the same source repository, a secret of their own. Two
+	// tenants building one public repository is legitimate; being handed each
+	// other's secret is not.
+	mustPut(t, s, place(tenantB, "fork", prod, repoB, "apps/fork/prod"))
+	if err := s.SetTrigger(ctx, trigger(tenantB, "fork", prod, "theirs")); err != nil {
+		t.Fatalf("SetTrigger for the second tenant: %v", err)
+	}
+
+	got, err := s.TriggersFor(ctx, triggerProvider, sourceRepo)
+	if err != nil {
+		t.Fatalf("TriggersFor: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("TriggersFor = %d, want all three", len(got))
+	}
+	// Ordered, or which trigger a push matches depends on map iteration when
+	// two share a secret.
+	names := make([]string, 0, len(got))
+	for _, tr := range got {
+		names = append(names, tr.TenantID+"/"+tr.App+"/"+tr.Env)
+	}
+	if strings.Join(names, ",") != "t_alpha/api/dev,t_alpha/api/prod,t_beta/fork/prod" {
+		t.Errorf("order = %v", names)
+	}
+}
+
+// Every placement written before triggers existed carries empty columns, and
+// the lookup is made by an unauthenticated caller. A query that matched them
+// would hand the whole install to anyone who posted an empty body.
+func testATriggerNobodySetIsNeverMatched(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	mustPut(t, s, place(tenantA, triggerApp, prod, repoA, "apps/api/prod"))
+	mustPut(t, s, place(tenantB, "web", prod, repoB, "apps/web/prod"))
+
+	for _, q := range []struct{ provider, repo string }{
+		{"", ""},
+		{triggerProvider, ""},
+		{"", sourceRepo},
+	} {
+		got, err := s.TriggersFor(ctx, q.provider, q.repo)
+		if err != nil {
+			t.Fatalf("TriggersFor(%q, %q): %v", q.provider, q.repo, err)
+		}
+		if len(got) != 0 {
+			t.Errorf("TriggersFor(%q, %q) = %d triggers, want none: an app that never "+
+				"registered a webhook was returned to an unauthenticated caller",
+				q.provider, q.repo, len(got))
+		}
+	}
+}
+
+// A trigger for an app that does not exist would verify signatures and have
+// nowhere to send the build.
+func testATriggerWithoutAPlacementIsRefused(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	err := s.SetTrigger(ctx, trigger(tenantA, "ghost", prod, "s3cr3t"))
+	if !errors.Is(err, placement.ErrNotFound) {
+		t.Errorf("SetTrigger for an app with no placement = %v, want ErrNotFound", err)
+	}
+
+	// And the shapes Validate refuses, because an empty secret is an endpoint
+	// that builds whatever anybody posts to it.
+	mustPut(t, s, place(tenantA, triggerApp, prod, repoA, "apps/api/prod"))
+	for _, bad := range []struct {
+		name string
+		tr   placement.Trigger
+	}{
+		{"no secret", placement.Trigger{
+			TenantID: tenantA, App: triggerApp, Env: prod, Provider: triggerProvider, RepoURL: sourceRepo}},
+		{"no repository", placement.Trigger{
+			TenantID: tenantA, App: triggerApp, Env: prod, Provider: triggerProvider, Secret: "x"}},
+		{"no provider", placement.Trigger{
+			TenantID: tenantA, App: triggerApp, Env: prod, RepoURL: sourceRepo, Secret: "x"}},
+	} {
+		if err := s.SetTrigger(ctx, bad.tr); !errors.Is(err, placement.ErrInvalid) {
+			t.Errorf("SetTrigger with %s = %v, want ErrInvalid", bad.name, err)
+		}
+	}
+}
+
+// Deleting an app has to take its trigger with it. A trigger that outlived its
+// placement is a webhook that verifies and then builds an app the control plane
+// has forgotten.
+func testDeletingThePlacementDeletesTheTrigger(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	mustPut(t, s, place(tenantA, triggerApp, prod, repoA, "apps/api/prod"))
+	if err := s.SetTrigger(ctx, trigger(tenantA, triggerApp, prod, "s3cr3t")); err != nil {
+		t.Fatalf("SetTrigger: %v", err)
+	}
+	if err := s.Delete(ctx, tenantA, triggerApp, prod); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	got, err := s.TriggersFor(ctx, triggerProvider, sourceRepo)
+	if err != nil {
+		t.Fatalf("TriggersFor: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("TriggersFor after Delete = %+v, want nothing", got)
+	}
+}
+
+// A forge does not send one spelling. GitHub's push payload carries clone_url
+// ending in ".git" and html_url without it, and whoever pasted the URL into the
+// webhook form used whichever their browser showed them. An exact match works
+// for about half of these, and the half that fails looks like a delivery that
+// never happened.
+func testOneRepositoryIsFoundUnderEverySpelling(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	mustPut(t, s, place(tenantA, triggerApp, prod, repoA, "apps/api/prod"))
+	// Registered with the trailing .git, which is what a clone URL looks like.
+	registered := trigger(tenantA, triggerApp, prod, "s3cr3t")
+	registered.RepoURL = sourceRepo + ".git"
+	if err := s.SetTrigger(ctx, registered); err != nil {
+		t.Fatalf("SetTrigger: %v", err)
+	}
+
+	for _, spelling := range []string{
+		sourceRepo,
+		sourceRepo + ".git",
+		sourceRepo + "/",
+		strings.ToUpper(sourceRepo[:8]) + sourceRepo[8:],
+	} {
+		got, err := s.TriggersFor(ctx, triggerProvider, spelling)
+		if err != nil {
+			t.Fatalf("TriggersFor(%q): %v", spelling, err)
+		}
+		if len(got) != 1 {
+			t.Errorf("TriggersFor(%q) = %d, want the one that was registered", spelling, len(got))
+		}
+	}
+	// And still not something else.
+	if got, err := s.TriggersFor(ctx, triggerProvider, "https://github.com/acme/other"); err != nil || len(got) != 0 {
+		t.Errorf("TriggersFor for another repository = %d triggers, %v", len(got), err)
 	}
 }
