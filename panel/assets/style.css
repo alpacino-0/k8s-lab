@@ -117,4 +117,10 @@ th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid var(-
 th { color: var(--muted); font-weight: 600; font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; }
 tbody tr:last-child td { border-bottom: 0; }
 .actions { margin-top: 1rem; display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+
+/* What the health view says it does not answer. One line each: without the
+   block they run together into a single sentence that reads as one limitation
+   rather than two, which was how it looked the first time it was rendered. */
+.footnote-limits { font-size: .82rem; margin: .7rem 0 .4rem; }
+.footnote-limits .limit { display: block; }
 a { color: var(--accent); }

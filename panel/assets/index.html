@@ -41,6 +41,10 @@
   </div>
 </div>
 
+<!-- Before app.js, and not a module: metrics.js publishes itself on window
+     for app.js to find, which is how this page shares code without a build
+     step. A module would be deferred and app.js would look for it too early. -->
+<script src="/metrics.js"></script>
 <script type="module" src="/app.js"></script>
 </body>
 </html>
