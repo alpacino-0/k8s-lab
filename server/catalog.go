@@ -289,7 +289,7 @@ func installFromCatalog(g guard, st stores) http.Handler {
 		// decision. Measured against the upstream corpus: 119 of the 341
 		// entries offered are installable with this empty, and 280 with it
 		// filled in.
-		plan, err := src.Plan(req.Template, opts)
+		plan, primary, err := planEntry(src, req.Template, opts)
 		if err != nil {
 			// The only errors Plan returns are an unknown entry and a template
 			// that does not convert at all. Everything else it knows is wrong
@@ -359,7 +359,15 @@ func installFromCatalog(g guard, st stores) http.Handler {
 			Author:  gitwrite.Author{ID: sub.ID, Name: sub.ID, Email: sub.Email},
 			Ref:     ref,
 			Message: fmt.Sprintf("install %s as %s/%s", plan.Entry.Name, ref.App, ref.Env),
-			Render:  renderInstall(place, plan, secrets),
+			Render:  renderInstall(place, plan, primary, secrets),
+			// Every file in this directory is one this install wrote, so a
+			// later render that stops producing one is asking for it to be
+			// removed — a service dropped from a template. manifest.Owns is
+			// what keeps that from reaching anything else committed here.
+			// The name is not looked at, and manifest.Owns says why: a
+			// filename is a convention and the first rename makes a
+			// convention wrong in the direction that deletes things.
+			Owns: func(_ string, body []byte) bool { return manifest.Owns(body) },
 		})
 		if err != nil {
 			// The placement is written and the commit is not. Said plainly,
@@ -408,12 +416,16 @@ const maxGeneratedSecrets = 16
 // that do not by the first reason each hits — 61 want a kind the API does not
 // have, 17 name one value twice, 15 build a string around a credential, and 4
 // use a variable name the API refuses.
-func plannedSecrets(p catalog.Plan) ([]platformv1alpha1.GeneratedSecret, []string) {
-	var out []platformv1alpha1.GeneratedSecret
+func plannedSecrets(p catalog.Plan) (map[string][]platformv1alpha1.GeneratedSecret, []string) {
+	out := map[string][]platformv1alpha1.GeneratedSecret{}
 	var refusals []string
 	claimed := map[string]string{}
 
 	for _, secret := range p.Secrets {
+		// The plan names one Secret per workload, after the workload. That
+		// derivation is how a request finds its way back to the object that
+		// reads it, and it is the only link there is.
+		owner := strings.TrimSuffix(secret.Name, catalog.SecretSuffix)
 		for _, key := range secret.Keys {
 			// A value that is exactly one source and nothing else. Anything
 			// longer — postgres://${USER}:${PASSWORD}@db/x — needs a
@@ -432,6 +444,12 @@ func plannedSecrets(p catalog.Plan) ([]platformv1alpha1.GeneratedSecret, []strin
 			// value and the field would mint two — which is the n8n failure
 			// the converter already measured: the task runner gets a token the
 			// broker does not accept, and it reads as a bug in the runner.
+			//
+			// Claimed across every workload and not within one, which matters
+			// more now than when this was written: the operator mints per
+			// workload, from that workload's own Secret, so two services
+			// sharing a source is exactly the case that cannot be expressed —
+			// and 111 of the 369 templates that parse share one.
 			if first, taken := claimed[src.Name]; taken {
 				refusals = append(refusals, fmt.Sprintf(
 					"%s and %s are both %s and have to receive the same value; the platform "+
@@ -455,14 +473,20 @@ func plannedSecrets(p catalog.Plan) ([]platformv1alpha1.GeneratedSecret, []strin
 			}
 
 			claimed[src.Name] = key.Name
-			out = append(out, platformv1alpha1.GeneratedSecret{Name: key.Name, Kind: kind})
+			out[owner] = append(out[owner], platformv1alpha1.GeneratedSecret{Name: key.Name, Kind: kind})
 		}
 	}
 
-	if len(out) > maxGeneratedSecrets {
-		refusals = append(refusals, fmt.Sprintf(
-			"this template asks for %d generated values and a workload holds %d",
-			len(out), maxGeneratedSecrets))
+	// Per workload, because the limit is on the field and the field is on a
+	// workload. Counting the whole template would refuse an entry whose six
+	// services want three values each and whose every object is inside the
+	// limit.
+	for owner, want := range out {
+		if len(want) > maxGeneratedSecrets {
+			refusals = append(refusals, fmt.Sprintf(
+				"%s asks for %d generated values and a workload holds %d",
+				owner, len(want), maxGeneratedSecrets))
+		}
 	}
 	return out, refusals
 }
@@ -491,6 +515,58 @@ func generatedKind(kind string) (platformv1alpha1.GeneratedKind, bool) {
 	}
 }
 
+// probeDomain is asked for when the caller wanted none, so that the converter
+// says which service is the front door.
+//
+// It never reaches a manifest: planEntry clears it off the workload it landed
+// on, and a test asserts an install with no domain commits no domain.
+const probeDomain = "front-door.invalid"
+
+// planEntry plans an entry and says which of its workloads is the front door.
+//
+// The converter decides that — the service the template's port belongs to, or
+// the only one, or the first alphabetically — and does not report it. The one
+// thing it does with the answer is put the requested domain on that workload,
+// so asking for a domain is how the answer can be read back out. When the
+// caller wanted no domain, a placeholder is asked for and then removed.
+//
+// Guessing was measured and rejected. Taking the first workload would be wrong
+// for 34 of the 135 multi-workload entries in the upstream corpus — kibana
+// rather than elasticsearch, the proxy rather than the backend — and wrong here
+// means the object a later deploy updates is not the one the user thinks the
+// app is. Measured with:
+//
+//	go test ./server/ -run TestTheFrontDoorIsAskedForRatherThanGuessed
+//
+// The index matters because exactly one object can be the app: it takes the
+// placement's name and the fixed filename every later deploy reads.
+func planEntry(src CatalogSource, name string, o catalog.Options) (catalog.Plan, int, error) {
+	probing := o.Domain == ""
+	if probing {
+		o.Domain = probeDomain
+	}
+	plan, err := src.Plan(name, o)
+	if err != nil {
+		return catalog.Plan{}, 0, err
+	}
+
+	primary := 0
+	for i := range plan.Workloads {
+		if plan.Workloads[i].Spec.Domain == o.Domain {
+			primary = i
+			break
+		}
+	}
+	if probing {
+		for i := range plan.Workloads {
+			if plan.Workloads[i].Spec.Domain == probeDomain {
+				plan.Workloads[i].Spec.Domain = ""
+			}
+		}
+	}
+	return plan, primary, nil
+}
+
 // whyRefused is every reason this platform will not install this plan, in the
 // order a person would want to read them.
 //
@@ -506,26 +582,27 @@ func generatedKind(kind string) (platformv1alpha1.GeneratedKind, bool) {
 // the object count alone, which is the write path's limit rather than the
 // converter's.
 func whyRefused(p catalog.Plan) []string {
-	var out []string
+	_, unmintable := plannedSecrets(p)
+	out := make([]string, 0, len(p.Blockers)+len(unmintable))
 	for _, b := range p.Blockers {
 		out = append(out, b.String())
 	}
 
-	_, unmintable := plannedSecrets(p)
 	out = append(out, unmintable...)
 
-	if objects := len(p.Workloads) + len(p.Databases); objects != 1 || len(p.Workloads) != 1 {
-		// The limit is the write path's, not the converter's: a placement owns
-		// one directory holding one workload.yaml, and every later deploy
-		// renders that one file. Committing the rest beside it would install
-		// something that runs and is then managed by half — the next deploy
-		// would update one service of six, and nothing would say so.
-		out = append(out, fmt.Sprintf(
-			"this template becomes %d objects (%d workloads, %d databases) and an app "+
-				"environment holds one workload, so the others would be committed once and "+
-				"never updated again",
-			objects, len(p.Workloads), len(p.Databases)))
-	}
+	// The object count used to be refused here, and it was the write path's
+	// limit rather than the converter's: a placement held one file, so a
+	// six-service entry would have installed something that ran and was then
+	// managed by half. The write path holds a manifest per object now and
+	// removes the ones a render stops producing, so the refusal went with it.
+	//
+	// Nothing replaces it. The one case that survived the reasoning — an entry
+	// with no workload at all, an app environment with nothing to deploy — is
+	// refused a layer down and better: compose.Convert returns "every service
+	// is a database; nothing to run" and Plan never produces such a plan. A
+	// rule here would have been unreachable, which was found by writing it and
+	// then failing to make a fixture reach it. Measured: 0 of the 341 entries
+	// offered produce a plan with no workload.
 	return out
 }
 
@@ -551,15 +628,22 @@ func toWirePlan(p catalog.Plan, refusals []string) wirePlan {
 	return out
 }
 
-// renderInstall writes the entry's single workload as the app's manifest.
+// renderInstall writes one file per object the entry produces.
 //
 // It refuses to write over anything. Every other render in this package is a
 // read-modify-write of what is committed, because a deploy is "the same app, a
 // new build"; an install is the opposite claim — that this app is new — and a
 // directory that already holds a manifest is one where that claim is false.
+//
+// One of the workloads is the app. It takes the placement's name and the fixed
+// filename, because that pair is what every later deploy reads and rewrites;
+// everything else keeps the name the converter derived from its compose
+// service and gets a file named after it. Renaming the others would break the
+// one reference that exists between these objects — a workload names its
+// Database — and the placement has one name to give.
 func renderInstall(
-	place placement.Placement, plan catalog.Plan,
-	secrets []platformv1alpha1.GeneratedSecret,
+	place placement.Placement, plan catalog.Plan, primary int,
+	secrets map[string][]platformv1alpha1.GeneratedSecret,
 ) renderFunc {
 	return func(rolloutID string, current map[string][]byte) (map[string][]byte, error) {
 		if _, taken := current[manifest.File]; taken {
@@ -568,38 +652,78 @@ func renderInstall(
 					"app that exists", place.Path)
 		}
 
-		app := plan.Workloads[0]
-		// Identity comes from the placement and never from the template. The
-		// template's own name is the compose service — "app", "web", "n8n" —
-		// and a manifest naming something the control plane does not know is
-		// one nothing can later deploy to.
-		app.ObjectMeta = metav1.ObjectMeta{
-			Name:      place.App,
-			Namespace: place.Namespace,
-			// Kept, because they record which compose service this came from,
-			// which is the only surviving link between a running object and
-			// the catalogue entry it was installed from.
-			Annotations: app.Annotations,
+		out := make(map[string][]byte, len(plan.Workloads)+len(plan.Databases))
+		for i := range plan.Workloads {
+			app := plan.Workloads[i]
+			asked := app.Name
+			name, file := asked, manifest.FileFor("Workload", asked)
+			if i == primary {
+				name, file = place.App, manifest.File
+			}
+
+			// Identity comes from the placement and never from the template.
+			// The template's own name is the compose service — "app", "web",
+			// "n8n" — and the object a later deploy addresses has to be the
+			// one the control plane knows about.
+			app.ObjectMeta = metav1.ObjectMeta{
+				Name:      name,
+				Namespace: place.Namespace,
+				// Kept, because they record which compose service this came
+				// from, which is the only surviving link between a running
+				// object and the catalogue entry it was installed from — and
+				// with several objects in one directory it is also the only
+				// way to tell which is which after a rename.
+				Annotations: app.Annotations,
+			}
+
+			// The values the template asked the platform to invent, as a
+			// request rather than as values: the manifest that carries this is
+			// committed, and a credential in a commit is a credential for ever.
+			// Keyed by the name the converter gave, because that is what the
+			// plan named its Secret after — the placement's name is this
+			// function's own doing and the plan has never heard it.
+			app.Spec.Secrets = secrets[asked]
+
+			// And the Secret the plan pointed at is dropped, because nothing
+			// creates it. catalog.Plan names one per workload for a caller
+			// that writes Secrets itself; the operator writes its own, called
+			// <app>-generated, and injects it. Leaving the plan's name here
+			// would be an envFrom naming a Secret that does not exist, which
+			// is a pod that never starts and an event nobody is watching.
+			app.Spec.EnvFrom = withoutPlannedSecrets(app.Spec.EnvFrom, plan)
+
+			// Only the app carries the rollout id. It is how the observer
+			// closes the record this deploy opened, and it does that by
+			// finding one live object that claims it; a second object with the
+			// same id would close the record on whichever it saw first.
+			id := ""
+			if i == primary {
+				id = rolloutID
+			}
+			body, err := manifest.Render(app, id)
+			if err != nil {
+				return nil, err
+			}
+			out[file] = body
 		}
 
-		// The values the template asked the platform to invent, as a request
-		// rather than as values: the manifest that carries this is committed,
-		// and a credential in a commit is a credential for ever.
-		app.Spec.Secrets = secrets
-
-		// And the Secret the plan pointed at is dropped, because nothing
-		// creates it. catalog.Plan names one per workload for a caller that
-		// writes Secrets itself; the operator writes its own, called
-		// <app>-generated, and injects it. Leaving the plan's name here would
-		// be an envFrom naming a Secret that does not exist, which is a pod
-		// that never starts and an event nobody is watching.
-		app.Spec.EnvFrom = withoutPlannedSecrets(app.Spec.EnvFrom, plan)
-
-		body, err := manifest.Render(app, rolloutID)
-		if err != nil {
-			return nil, err
+		for i := range plan.Databases {
+			db := plan.Databases[i]
+			// Not renamed, and this is the reference that makes it matter: a
+			// workload names its database in spec.database, and the converter
+			// wrote that string. A database renamed here is a workload
+			// pointing at nothing, which fails as an application that cannot
+			// reach its own data rather than as a manifest that is wrong.
+			db.ObjectMeta = metav1.ObjectMeta{
+				Name: db.Name, Namespace: place.Namespace, Annotations: db.Annotations,
+			}
+			body, err := manifest.RenderDatabase(db)
+			if err != nil {
+				return nil, err
+			}
+			out[manifest.FileFor("Database", db.Name)] = body
 		}
-		return map[string][]byte{manifest.File: body}, nil
+		return out, nil
 	}
 }
 

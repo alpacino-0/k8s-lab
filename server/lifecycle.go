@@ -395,7 +395,10 @@ func renderScale(place placement.Placement, replicas int32) renderFunc {
 		if err != nil {
 			return nil, err
 		}
-		return map[string][]byte{manifest.File: out}, nil
+		// The other objects in the directory, untouched: a scale is a replica
+		// count for one workload and says nothing about the database beside
+		// it. See carryForward for why omitting them is a deletion.
+		return carryForward(map[string][]byte{manifest.File: out}, current), nil
 	}
 }
 

@@ -21,10 +21,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -38,12 +40,16 @@ import (
 
 	platformv1alpha1 "github.com/damgahq/damga/api/v1alpha1"
 	"github.com/damgahq/damga/catalog"
+	"github.com/damgahq/damga/compose"
 	"github.com/damgahq/damga/internal/gitwrite"
 	"github.com/damgahq/damga/internal/manifest"
 	"github.com/damgahq/damga/placement"
 )
 
-// The four shapes the endpoint has to tell apart, as templates rather than as
+// Where every install in this file puts its manifests.
+const testInstallDir = "apps/shop/prod"
+
+// The shapes the endpoint has to tell apart, as templates rather than as
 // mocks. They go through compose.Parse and compose.Convert exactly as the real
 // corpus does, so a refusal here is one the real corpus would get too.
 var testTemplates = fstest.MapFS{
@@ -114,7 +120,40 @@ services:
     environment:
       - ADMIN_USER=${SERVICE_USER_USERY}
 `)},
-	// Refused: two workloads, and an app environment holds one.
+	// Two services where the front door is not the first alphabetically: the
+	// template's port belongs to zulu. Guessing "the first workload" puts the
+	// wrong object under the name every later deploy addresses.
+	"storefront.yaml": &fstest.MapFile{Data: []byte(`# slogan: A shop and its cache
+# category: testing
+# port: 9000
+
+services:
+  alpha:
+    image: example.test/cache:1.0.0
+    ports:
+      - 3000:3000
+  zulu:
+    image: example.test/shop:1.0.0
+    ports:
+      - 9000:9000
+`)},
+	// A workload and a database, which is what most of the catalogue is.
+	"withdb.yaml": &fstest.MapFile{Data: []byte(`# slogan: An app with somewhere to put things
+# category: testing
+# port: 8080
+
+services:
+  app:
+    image: example.test/withdb:1.0.0
+    ports:
+      - 8080:8080
+  db:
+    image: postgres:17.2-alpine3.21
+    volumes:
+      - db-data:/var/lib/postgresql/data
+`)},
+	// Installs now: two workloads, which the write path used to refuse.
+
 	"pair.yaml": &fstest.MapFile{Data: []byte(`# slogan: Two of everything
 # category: testing
 
@@ -123,6 +162,16 @@ services:
     image: example.test/web:1.0.0
   worker:
     image: example.test/worker:1.0.0
+`)},
+	// Refused: a template that is only a database. Never seen in the upstream
+	// corpus — measured, 0 of 341 — but an app environment whose whole content
+	// is a database has nothing for a deploy to deploy.
+	"justdb.yaml": &fstest.MapFile{Data: []byte(`# slogan: Somewhere to put things, and nothing to put
+# category: testing
+
+services:
+  db:
+    image: postgres:17.2-alpine3.21
 `)},
 	// Refused by the catalogue itself: an image the Workload API rejects.
 	"floating.yaml": &fstest.MapFile{Data: []byte(`# slogan: Rolls under you
@@ -297,7 +346,6 @@ func TestAnInstallThatCannotWorkWritesNothing(t *testing.T) {
 		// template asked for, and "user" is a word that also appears in the
 		// template's own name.
 		{"usery", "wants-a-username", `\"user\"`},
-		{"pair", "two-workloads", "2 workloads"},
 		{"floating", "moving-tag", ":latest"},
 	} {
 		t.Run(tc.template, func(t *testing.T) {
@@ -325,6 +373,30 @@ func TestAnInstallThatCannotWorkWritesNothing(t *testing.T) {
 					"answers 409 about a row nothing installed", err)
 			}
 		})
+	}
+}
+
+// An entry with nothing to run never reaches the refusal list, and this records
+// where it is actually stopped: the converter refuses it, in its own words,
+// before there is a plan to inspect. Written because a rule was nearly added
+// here for a case that cannot arrive — 0 of the 341 entries offered produce a
+// plan with no workload.
+func TestATemplateWithNothingToRunIsRefusedBeforeItBecomesAnApp(t *testing.T) {
+	h := newHarness(t)
+	h.stores.catalog = testCatalog(t)
+
+	code, body := h.install("only-a-database", accMember, `{
+		"template": "justdb",
+		"repoUrl": "`+homeRepo+`", "path": "apps/x", "namespace": "`+nsHomeProd+`"
+	}`)
+	if code == http.StatusCreated {
+		t.Fatal("a template that is only a database was installed as an application")
+	}
+	if !strings.Contains(body, "nothing to run") {
+		t.Errorf("the refusal does not say what is wrong with it: %s", body)
+	}
+	if _, err := h.places.Get(context.Background(), tenantHome, "only-a-database", envProd); !errors.Is(err, placement.ErrNotFound) {
+		t.Fatal("a template that cannot become an app still registered one")
 	}
 }
 
@@ -471,7 +543,7 @@ func TestInstallingOverAnExistingManifestIsRefused(t *testing.T) {
 	}
 	render := renderInstall(placement.Placement{
 		App: "tidy-app", Namespace: nsHomeProd, Path: "apps/tidy/prod",
-	}, plan, nil)
+	}, plan, 0, nil)
 
 	if _, err := render("r1", map[string][]byte{manifest.File: []byte("kind: Workload\n")}); err == nil {
 		t.Fatal("an install wrote over a manifest that was already committed")
@@ -481,8 +553,11 @@ func TestInstallingOverAnExistingManifestIsRefused(t *testing.T) {
 		t.Fatalf("installing into an empty directory failed: %v", err)
 	}
 	if len(files) != 1 {
-		t.Fatalf("an install committed %d files; a later deploy renders one and would leave "+
-			"the rest to drift", len(files))
+		t.Fatalf("a one-object entry committed %d files, want 1", len(files))
+	}
+	if _, ok := files[manifest.File]; !ok {
+		t.Fatalf("the app is not in %s, which is the one file every later deploy reads",
+			manifest.File)
 	}
 }
 
@@ -570,6 +645,91 @@ func testBareRepo(t *testing.T) string {
 	return bare
 }
 
+// committedNames reads every file the install committed, keyed by name.
+//
+// The directory is fixed rather than a parameter: every case here installs into
+// the same place, and a parameter only one value is ever passed to is a
+// parameter that reads as a choice nobody made.
+func committedNames(t *testing.T, repoPath string) map[string][]byte {
+	t.Helper()
+	repo, err := git.PlainOpen(repoPath)
+	if err != nil {
+		t.Fatalf("opening %s: %v", repoPath, err)
+	}
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName("main"), true)
+	if err != nil {
+		t.Fatalf("resolving main: %v", err)
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("reading the commit: %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("reading the tree: %v", err)
+	}
+	out := map[string][]byte{}
+	if err := tree.Files().ForEach(func(f *object.File) error {
+		prefix := testInstallDir + "/"
+		if !strings.HasPrefix(f.Name, prefix) ||
+			strings.Contains(strings.TrimPrefix(f.Name, prefix), "/") {
+			return nil
+		}
+		body, err := f.Contents()
+		if err != nil {
+			return err
+		}
+		out[strings.TrimPrefix(f.Name, prefix)] = []byte(body)
+		return nil
+	}); err != nil {
+		t.Fatalf("walking the tree: %v", err)
+	}
+	return out
+}
+
+// seedInDir commits files into a directory of the remote, standing in for what
+// an earlier install or somebody else left there.
+func seedInDir(t *testing.T, repoPath, dir string, files map[string]string) {
+	t.Helper()
+	work := t.TempDir()
+	// The branch by name: the bare repository's HEAD still points at the
+	// branch PlainInit made, and the writer is pointed at main.
+	repo, err := git.PlainClone(work, false, &git.CloneOptions{
+		URL:           repoPath,
+		ReferenceName: plumbing.NewBranchReferenceName("main"),
+		SingleBranch:  true,
+	})
+	if err != nil {
+		t.Fatalf("cloning the remote: %v", err)
+	}
+	tree, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(work, dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(work, dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tree.Add(filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	who := &object.Signature{Name: "before", Email: "before@example.test", When: time.Now()}
+	if _, err := tree.Commit("what was here first", &git.CommitOptions{
+		Author: who, Committer: who,
+	}); err != nil {
+		t.Fatalf("committing the seed: %v", err)
+	}
+	if err := repo.Push(&git.PushOptions{RefSpecs: []gitconfig.RefSpec{
+		gitconfig.RefSpec("refs/heads/main:refs/heads/main"),
+	}}); err != nil {
+		t.Fatalf("pushing the seed: %v", err)
+	}
+}
+
 // committedManifest reads one path out of the remote's main branch.
 func committedManifest(t *testing.T, repoPath, name string) string {
 	t.Helper()
@@ -594,4 +754,173 @@ func committedManifest(t *testing.T, repoPath, name string) string {
 		t.Fatalf("reading %s: %v", name, err)
 	}
 	return body
+}
+
+// The whole point of the round: an entry that becomes several objects installs,
+// and each object gets its own file.
+//
+// 117 of the 341 entries the upstream corpus offers were refused for this and
+// nothing else — the write path held one file per app environment, so a
+// template with a worker and a database could not be committed at all.
+func TestAMultiObjectEntryCommitsAFilePerObject(t *testing.T) {
+	h := newHarness(t)
+	h.stores.catalog = testCatalog(t)
+	h.stores.writer = &gitwrite.Writer{Evidence: h.records}
+	h.stores.gitAuth = pathAuth{}
+	repo := testBareRepo(t)
+
+	code, body := h.install("shop", accMember, `{
+		"template": "withdb",
+		"repoUrl": "`+repo+`", "branch": "main", "path": "apps/shop/prod",
+		"namespace": "`+nsHomeProd+`"
+	}`)
+	if code != http.StatusCreated {
+		t.Fatalf("installing an entry with a database = %d, want 201: %s", code, body)
+	}
+
+	names := committedNames(t, repo)
+	if len(names) != 2 {
+		// The keys and not the map: a failure message carrying two YAML files
+		// as byte slices is a failure message nobody reads.
+		t.Fatalf("the directory holds %v; a workload and a database are two objects and two "+
+			"files, or one of them is an object nothing creates", slices.Sorted(maps.Keys(names)))
+	}
+	if _, ok := names[manifest.File]; !ok {
+		t.Fatalf("the app is not in %s, which is the one file every later deploy reads: %v",
+			manifest.File, names)
+	}
+
+	// The application is named after the placement, because that is the name
+	// the control plane knows and the one a deploy addresses.
+	app, err := manifest.Parse(names[manifest.File])
+	if err != nil {
+		t.Fatalf("the committed app is not readable: %v", err)
+	}
+	if app.Name != "shop" || app.Namespace != nsHomeProd {
+		t.Errorf("the app is committed as %s/%s, want %s/%s",
+			app.Namespace, app.Name, nsHomeProd, "shop")
+	}
+
+	// And the database keeps the name the converter gave it, because the
+	// workload points at that string.
+	var database string
+	for name := range names {
+		if name != manifest.File {
+			database = name
+		}
+	}
+	if !strings.HasPrefix(database, "database-") {
+		t.Fatalf("the second object was committed as %q; a file named for what it is, is how "+
+			"somebody reading the directory tells six manifests apart", database)
+	}
+	if app.Spec.Database != "" &&
+		database != manifest.FileFor("Database", app.Spec.Database) {
+		t.Errorf("the app names database %q and the committed file is %q, so the application "+
+			"points at nothing", app.Spec.Database, database)
+	}
+}
+
+// The front door is asked for rather than guessed.
+//
+// The converter picks it — the service the template's port belongs to — and
+// does not report which. Taking the first workload instead is wrong for 34 of
+// the 135 multi-workload entries in the upstream corpus, and wrong here means
+// the object a later deploy updates is not the one the user thinks the app is.
+func TestTheFrontDoorIsAskedForRatherThanGuessed(t *testing.T) {
+	h := newHarness(t)
+	h.stores.catalog = testCatalog(t)
+	h.stores.writer = &gitwrite.Writer{Evidence: h.records}
+	h.stores.gitAuth = pathAuth{}
+	repo := testBareRepo(t)
+
+	code, body := h.install("shop", accMember, `{
+		"template": "storefront",
+		"repoUrl": "`+repo+`", "branch": "main", "path": "apps/shop/prod",
+		"namespace": "`+nsHomeProd+`"
+	}`)
+	if code != http.StatusCreated {
+		t.Fatalf("installing storefront = %d: %s", code, body)
+	}
+
+	names := committedNames(t, repo)
+	app, err := manifest.Parse(names[manifest.File])
+	if err != nil {
+		t.Fatalf("the committed app is not readable: %v", err)
+	}
+	// zulu is the front door: the template publishes 9000 and zulu is the
+	// service that carries it. alpha sorts first and is not the app.
+	if app.Spec.Port != 9000 {
+		t.Fatalf("%s holds the workload on port %d; the template publishes 9000, so the object "+
+			"a deploy addresses is not the one the entry puts in front", manifest.File, app.Spec.Port)
+	}
+	if app.Annotations[compose.ServiceAnnotation] != "zulu" {
+		t.Errorf("the app came from compose service %q, want zulu",
+			app.Annotations[compose.ServiceAnnotation])
+	}
+}
+
+// The placeholder domain used to find the front door must never reach a
+// manifest: an Ingress for front-door.invalid is a hostname nobody asked for,
+// and cert-manager would go and try to prove it.
+func TestAnInstallWithNoDomainCommitsNoDomain(t *testing.T) {
+	h := newHarness(t)
+	h.stores.catalog = testCatalog(t)
+	h.stores.writer = &gitwrite.Writer{Evidence: h.records}
+	h.stores.gitAuth = pathAuth{}
+	repo := testBareRepo(t)
+
+	code, body := h.install("shop", accMember, `{
+		"template": "storefront",
+		"repoUrl": "`+repo+`", "branch": "main", "path": "apps/shop/prod",
+		"namespace": "`+nsHomeProd+`"
+	}`)
+	if code != http.StatusCreated {
+		t.Fatalf("installing = %d: %s", code, body)
+	}
+
+	for name, body := range committedNames(t, repo) {
+		if strings.Contains(string(body), probeDomain) {
+			t.Fatalf("%s carries the placeholder domain this platform asks for to find the "+
+				"front door; nobody requested a hostname and cert-manager would try to prove "+
+				"this one", name)
+		}
+	}
+}
+
+// What a previous install left in the directory is this platform's, and goes.
+// What somebody else left is not, and stays.
+func TestAnInstallRemovesWhatAPreviousOneLeftAndNothingElse(t *testing.T) {
+	h := newHarness(t)
+	h.stores.catalog = testCatalog(t)
+	h.stores.writer = &gitwrite.Writer{Evidence: h.records}
+	h.stores.gitAuth = pathAuth{}
+	repo := testBareRepo(t)
+
+	// A database manifest from an app that was removed — deleteApp forgets the
+	// placement and leaves the manifests — and a file this platform did not
+	// write.
+	seedInDir(t, repo, testInstallDir, map[string]string{
+		"database-gone.yaml": "apiVersion: platform.damga.co/v1alpha1\nkind: Database\n" +
+			"metadata:\n  name: gone\n  namespace: home-prod\nspec:\n  engine: postgres\n",
+		"README.md": "this directory is somebody's\n",
+	})
+
+	code, body := h.install("shop", accMember, `{
+		"template": "tidy",
+		"repoUrl": "`+repo+`", "branch": "main", "path": "apps/shop/prod",
+		"namespace": "`+nsHomeProd+`"
+	}`)
+	if code != http.StatusCreated {
+		t.Fatalf("installing over leftovers = %d: %s", code, body)
+	}
+
+	names := committedNames(t, repo)
+	if _, still := names["database-gone.yaml"]; still {
+		t.Error("a manifest this platform wrote for an object the new entry does not have is " +
+			"still committed, so Argo CD is still applying a database nothing claims")
+	}
+	if _, kept := names["README.md"]; !kept {
+		t.Error("a file this platform did not write was deleted by an install; ownership is " +
+			"decided by what is in the file, and nothing in that one says damga wrote it")
+	}
 }

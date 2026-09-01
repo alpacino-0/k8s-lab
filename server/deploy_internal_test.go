@@ -35,7 +35,7 @@ import (
 // is a sibling that either goes stale for ever or — the moment any caller sets
 // gitwrite's Owns — is deleted by a request that only meant to change an image.
 func TestADeployKeepsTheObjectsItIsNotDeploying(t *testing.T) {
-	place := placement.Placement{App: "api", Namespace: "acme-prod"}
+	place := placement.Placement{App: appAPI, Namespace: "acme-prod"}
 
 	sibling := []byte("apiVersion: platform.damga.co/v1alpha1\nkind: Database\n" +
 		"metadata:\n  name: db\n  namespace: acme-prod\nspec:\n  engine: postgres\n")
@@ -51,7 +51,7 @@ func TestADeployKeepsTheObjectsItIsNotDeploying(t *testing.T) {
 		"kustomization.yaml":               foreign,
 	}
 
-	out, err := renderDeploy(place, deployRequest{Image: "ghcr.io/acme/api:2"})("r-1", current)
+	out, err := renderDeploy(place, deployRequest{Image: imageTwo})("r-1", current)
 	if err != nil {
 		t.Fatalf("rendering: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestADeployKeepsTheObjectsItIsNotDeploying(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the rendered manifest cannot be read back: %v", err)
 	}
-	if app.Spec.Image != "ghcr.io/acme/api:2" {
+	if app.Spec.Image != imageTwo {
 		t.Fatalf("the image is %q; this is the one object the request was about", app.Spec.Image)
 	}
 
@@ -89,4 +89,53 @@ func workloadFor(place placement.Placement, image string) platformv1alpha1.Workl
 	w.Name, w.Namespace = place.App, place.Namespace
 	w.Spec.Image = image
 	return w
+}
+
+// Every render in this package, against the same directory.
+//
+// The trap this closes was found by reading and then measured by writing it
+// down: omission is how this platform asks gitwrite to remove a file, so a
+// render that returns only the object it changed is a request to delete every
+// other object in the directory — and it becomes exactly that the moment
+// somebody adds an Owns rule to the request it is used by. The install's
+// request already carries one.
+//
+// A table over the renders rather than a case each, so that a render added
+// tomorrow is covered by being added here rather than by whoever adds it
+// remembering the rule.
+func TestEveryRenderKeepsTheObjectsItDoesNotChange(t *testing.T) {
+	place := placement.Placement{App: appAPI, Namespace: "acme-prod"}
+
+	primary, err := manifest.Render(workloadFor(place, "ghcr.io/acme/api:1"), "r-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sibling := []byte("apiVersion: platform.damga.co/v1alpha1\nkind: Database\n" +
+		"metadata:\n  name: db\n  namespace: acme-prod\nspec:\n  engine: postgres\n")
+	siblingFile := manifest.FileFor("Database", "db")
+
+	for name, render := range map[string]renderFunc{
+		"deploy":   renderDeploy(place, deployRequest{Image: imageTwo}),
+		"rollback": renderDeploy(place, deployRequest{Image: "ghcr.io/acme/api:0"}),
+		"scale":    renderScale(place, 3),
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, err := render("r-1", map[string][]byte{
+				manifest.File: primary,
+				siblingFile:   sibling,
+			})
+			if err != nil {
+				t.Fatalf("rendering: %v", err)
+			}
+			kept, ok := out[siblingFile]
+			if !ok {
+				t.Fatalf("%s did not return the database beside the workload it changed. "+
+					"Omission is a deletion here, so this render removes a database as soon "+
+					"as its request carries an Owns rule", name)
+			}
+			if !bytes.Equal(kept, sibling) {
+				t.Errorf("%s rewrote an object it was not asked about:\n%s", name, kept)
+			}
+		})
+	}
 }

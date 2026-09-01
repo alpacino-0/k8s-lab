@@ -197,3 +197,39 @@ func TestFileForNamesAnObjectWithoutTakingThePrimarysName(t *testing.T) {
 			"file every deploy reads and rewrites", got)
 	}
 }
+
+// A database is committed like everything else here, and recognised like
+// everything else here — that second half is the one that matters. The claim in
+// RenderDatabase's comment is that keeping the renderer beside Owns is what
+// stops the two drifting into a file the platform writes and does not know is
+// its own, and a file it does not know is its own is a file it can never remove.
+func TestARenderedDatabaseIsRecognisedAsThisPlatformsOwn(t *testing.T) {
+	body, err := manifest.RenderDatabase(platformv1alpha1.Database{
+		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: namespace},
+		Spec:       platformv1alpha1.DatabaseSpec{Engine: platformv1alpha1.EnginePostgres},
+		Status:     platformv1alpha1.DatabaseStatus{SecretName: "db-credentials"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !manifest.Owns(body) {
+		t.Fatalf("a database this package rendered is not recognised as this platform's:\n%s", body)
+	}
+	if strings.Contains(string(body), "db-credentials") {
+		t.Errorf("the committed database carries a status, which is a claim about the world "+
+			"made by whoever last edited a file:\n%s", body)
+	}
+	// No rollout id, ever. The observer closes a record by finding one live
+	// object that claims it, and a second claimant closes it on whichever it
+	// saw first.
+	if strings.Contains(string(body), "rollout") {
+		t.Errorf("the database carries a rollout annotation:\n%s", body)
+	}
+
+	if _, err := manifest.RenderDatabase(platformv1alpha1.Database{
+		ObjectMeta: metav1.ObjectMeta{Name: "db"},
+	}); err == nil {
+		t.Error("a database with no namespace was rendered; the namespace is where it lands " +
+			"and nothing downstream would supply one")
+	}
+}

@@ -127,6 +127,39 @@ func Render(w platformv1alpha1.Workload, rolloutID string) ([]byte, error) {
 	return out, nil
 }
 
+// RenderDatabase produces the file one Database is committed to.
+//
+// Separate from Render rather than a generic object renderer, because the two
+// differ in the one thing that matters here: no rollout annotation. The id on a
+// Workload is what lets a record opened at commit time be closed by the
+// Deployment the operator derives from it — the observer finds a record by
+// reading damga.co/rollout off the live object. A Database's StatefulSet
+// carrying the same id would be a second object answering to one record, and
+// the observer would close a deploy on whichever it saw first.
+//
+// It is here rather than in the caller so that "what a committed file looks
+// like" stays one answer. The apiVersion this sets is the same string Owns
+// recognises, and a second renderer somewhere else is how those two drift into
+// a file the platform writes and does not recognise as its own.
+func RenderDatabase(db platformv1alpha1.Database) ([]byte, error) {
+	if db.Name == "" || db.Namespace == "" {
+		return nil, fmt.Errorf("manifest: a database needs a name and a namespace")
+	}
+	db.APIVersion = platformv1alpha1.GroupVersion.String()
+	db.Kind = "Database"
+
+	// Nothing about status, for the reason Render gives: it is the cluster's
+	// answer, and a committed status is a claim about the world made by
+	// whoever last edited a file.
+	db.Status = platformv1alpha1.DatabaseStatus{}
+
+	out, err := yaml.Marshal(db)
+	if err != nil {
+		return nil, fmt.Errorf("manifest: rendering the database: %w", err)
+	}
+	return out, nil
+}
+
 // Parse reads a committed file back.
 //
 // Strict: a file with a field this build does not know is an error rather than
