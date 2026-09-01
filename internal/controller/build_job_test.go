@@ -40,7 +40,7 @@ func testBuild(method platformv1alpha1.BuildMethod) *platformv1alpha1.Build {
 	return &platformv1alpha1.Build{
 		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "damga-build"},
 		Spec: platformv1alpha1.BuildSpec{
-			Repo:     "https://github.com/example/app.git",
+			Repo:     testRepo,
 			Revision: testRevision,
 			Image:    "registry.damga-registry.svc:5000/tenant-a/app",
 			Builder:  method,

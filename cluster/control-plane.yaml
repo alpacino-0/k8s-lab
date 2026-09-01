@@ -180,7 +180,20 @@ spec:
           type: RuntimeDefault
       containers:
         - name: damga
-          image: ghcr.io/damgahq/damga-control-plane:latest
+          # No published image yet, and this line says so rather than pointing
+          # at one that does not exist.
+          #
+          # It named ghcr.io/damgahq/damga-control-plane:latest first, which CI
+          # never noticed because the e2e job builds the image into kind itself
+          # and overrides this field. On a real server it would have been
+          # ImagePullBackOff, and the manifest would have looked correct.
+          # Found by the session writing the installer, which had to run this on
+          # something other than kind.
+          #
+          # Until the publish job builds it, an install supplies its own:
+          #   kubectl -n damga-system set image deployment/damga damga=<ref>
+          # scripts/install.sh takes --control-plane-image for exactly this.
+          image: ghcr.io/damgahq/damga-control-plane:unpublished
           args:
             - -listen-address=0.0.0.0:8080
             - -evidence-dsn=/data/damga.db

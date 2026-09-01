@@ -71,7 +71,7 @@ var _ = Describe("Build Controller", func() {
 	}
 
 	spec := platformv1alpha1.BuildSpec{
-		Repo:     "https://github.com/example/app.git",
+		Repo:     testRepo,
 		Revision: rev,
 		// Named rather than left to detect, and the reason is what this suite
 		// asserts: detect renders two containers — an init that clones and
@@ -361,6 +361,50 @@ var _ = Describe("Build Controller", func() {
 			Expect(err.Error()).To(ContainSubstring("must not carry a tag"))
 		})
 
+		// A token in the URL is accepted by every prefix check and lands in a
+		// field that cannot be edited, on an object nothing deletes, in a
+		// namespace holding every tenant's builds. Refused rather than
+		// scrubbed: a secret that was never accepted needs no rotation.
+		It("refuses credentials in the repository URL", func() {
+			for _, repo := range []string{
+				"https://x-access-token:ghp_secret@github.com/example/app.git",
+				"https://user:pass@gitlab.com/example/app.git",
+				"https://ghp_secret@github.com/example/app.git",
+				// Not a git@ case. SSH authenticates with a key and carries no
+				// password in the URL, so there is no realistic credential to
+				// embed there — a contrived one was tried here first and the
+				// rule correctly read it as an odd path rather than a secret.
+				// The rule still covers that form, at no cost.
+			} {
+				err := k8sClient.Create(ctx, &platformv1alpha1.Build{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: name + "-cred", Namespace: namespace,
+					},
+					Spec: platformv1alpha1.BuildSpec{
+						Repo: repo, Revision: rev, Image: spec.Image,
+					},
+				})
+				Expect(err).To(HaveOccurred(), "accepted %q", repo)
+				Expect(err.Error()).To(ContainSubstring("must not carry credentials"))
+			}
+		})
+
+		It("still accepts the ordinary forms", func() {
+			for i, repo := range []string{
+				testRepo,
+				"git@github.com:example/app.git",
+			} {
+				Expect(k8sClient.Create(ctx, &platformv1alpha1.Build{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: fmt.Sprintf("%s-ok-%d", name, i), Namespace: namespace,
+					},
+					Spec: platformv1alpha1.BuildSpec{
+						Repo: repo, Revision: rev, Image: spec.Image,
+					},
+				})).To(Succeed(), "refused %q", repo)
+			}
+		})
+
 		It("refuses a path that climbs out of the repository", func() {
 			err := k8sClient.Create(ctx, &platformv1alpha1.Build{
 				ObjectMeta: metav1.ObjectMeta{Name: name + "-c", Namespace: namespace},
@@ -387,3 +431,9 @@ var _ = Describe("Build Controller", func() {
 })
 
 func ptrFalse() *bool { f := false; return &f }
+
+// testRepo is the ordinary repository URL these suites build from. One constant
+// because three files name it, and because the credential rule's tests are read
+// against it — a reader comparing "with a token" to "without" should be
+// comparing one string to itself.
+const testRepo = "https://github.com/example/app.git"

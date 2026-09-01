@@ -104,6 +104,7 @@ var _ = Describe("Workload Controller", func() {
 		secrets := []platformv1alpha1.GeneratedSecret{
 			{Name: "APP_KEY", Kind: platformv1alpha1.GeneratedPassword},
 			{Name: "SIGNING_HEX", Kind: platformv1alpha1.GeneratedHex},
+			{Name: "DB_USER", Kind: platformv1alpha1.GeneratedUser},
 		}
 		secretKey := func() types.NamespacedName {
 			return types.NamespacedName{Name: name + "-generated", Namespace: namespace}
@@ -121,6 +122,11 @@ var _ = Describe("Workload Controller", func() {
 			// not accept base64, which is the whole reason Kind exists.
 			Expect(string(sec.Data["SIGNING_HEX"])).To(MatchRegexp(`^[0-9a-f]+$`))
 			Expect(string(sec.Data["APP_KEY"])).NotTo(BeEmpty())
+			// A username has to be usable as one. A value out of the password
+			// generator is not: PostgreSQL will not take it as a role, and a
+			// name with a hyphen has to be quoted in every statement that
+			// mentions it — somewhere one of them will not be.
+			Expect(string(sec.Data["DB_USER"])).To(MatchRegexp(`^[a-z][a-z0-9]{1,30}$`))
 
 			dep := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())

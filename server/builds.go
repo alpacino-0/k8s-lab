@@ -202,6 +202,23 @@ func createBuild(g guard, st stores) http.Handler {
 // build needs a full 40-character commit sha" instead of a CEL rule quoted back
 // at them. If the two ever drift, the CRD still refuses; what is lost is the
 // sentence, not the guarantee.
+// credentialInURL reports whether a repository URL carries userinfo.
+//
+// The authority is everything before the first path separator: for https that
+// is up to "/", for git@host:path it is up to ":". A "@" there is a credential.
+// git@ is expected to have exactly one, which is why the search starts after it.
+func credentialInURL(repo string) bool {
+	switch {
+	case strings.HasPrefix(repo, "https://"):
+		authority, _, _ := strings.Cut(strings.TrimPrefix(repo, "https://"), "/")
+		return strings.Contains(authority, "@")
+	case strings.HasPrefix(repo, "git@"):
+		authority, _, _ := strings.Cut(strings.TrimPrefix(repo, "git@"), ":")
+		return strings.Contains(authority, "@")
+	}
+	return false
+}
+
 func buildFor(registry, tenantID, app string, req createBuildRequest) (*platformv1alpha1.Build, error) {
 	repo := strings.TrimSpace(req.Repo)
 	revision := strings.TrimSpace(req.Revision)
@@ -213,6 +230,14 @@ func buildFor(registry, tenantID, app string, req createBuildRequest) (*platform
 		return nil, fmt.Errorf("a build needs the repository to clone")
 	case !strings.HasPrefix(repo, "https://") && !strings.HasPrefix(repo, "git@"):
 		return nil, fmt.Errorf("the repository must be an https:// or git@ URL")
+	// Refused here as well as by the API server, so the caller is told at the
+	// endpoint rather than by a CEL message. Same reason as the rule there: the
+	// URL is the one place a credential can enter this field, the field is
+	// immutable, and nothing deletes the object it lands on.
+	case credentialInURL(repo):
+		return nil, fmt.Errorf(
+			"the repository URL must not carry credentials — this is recorded permanently " +
+				"and cannot be removed; use a public repository, or a deploy key on the platform")
 	case !revisionPattern.MatchString(revision):
 		// Not a branch, and this is the rule most likely to be hit. A record
 		// that says "built main" cannot answer which main, which is the only

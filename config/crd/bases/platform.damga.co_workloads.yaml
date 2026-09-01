@@ -297,6 +297,7 @@ spec:
                       - password
                       - hex
                       - base64
+                      - user
                       type: string
                     name:
                       description: Name is the environment variable the workload reads

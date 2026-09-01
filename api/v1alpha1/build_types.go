@@ -39,6 +39,21 @@ type BuildSpec struct {
 	// Repo is the git repository to build.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:XValidation:rule="self.startsWith('https://') || self.startsWith('git@')",message="repo must be an https:// or git@ URL"
+	// No credentials in the URL, and this rule is not hygiene.
+	//
+	// The prefix check above accepts
+	// https://x-access-token:ghp_xxx@github.com/org/repo, git takes it as-is,
+	// and a private repository builds today — through a door nobody opened on
+	// purpose. Where the token then lives is the problem: in plain text on
+	// Build.Spec.Repo, in a namespace holding every tenant's builds, in a field
+	// the rule above makes immutable, on an object nothing deletes. A secret
+	// that cannot be rotated or removed is worse than one that was never
+	// accepted.
+	//
+	// Found by the session building the webhook, which checked a claim of mine
+	// that the hole was only latent and showed it was not.
+	// +kubebuilder:validation:XValidation:rule="!self.startsWith('https://') || !self.substring(8).split('/')[0].contains('@')",message="the repository URL must not carry credentials; this field is immutable and a token written here cannot be removed"
+	// +kubebuilder:validation:XValidation:rule="!self.startsWith('git@') || !self.substring(4).split(':')[0].contains('@')",message="the repository URL must not carry credentials; this field is immutable and a token written here cannot be removed"
 	Repo string `json:"repo"`
 
 	// Revision is the commit to build.

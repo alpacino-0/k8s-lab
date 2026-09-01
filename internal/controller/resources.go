@@ -19,6 +19,7 @@ package controller
 
 import (
 	"crypto/rand"
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -1012,6 +1013,17 @@ func desiredGeneratedSecret(
 			return nil, fmt.Errorf("generating %s: %w", want.Name, err)
 		}
 		switch want.Kind {
+		case platformv1alpha1.GeneratedUser:
+			// Short and lowercase, with a letter first. Long enough not to
+			// collide within one namespace and short enough for the identifier
+			// limits a database imposes — PostgreSQL truncates a role at 63
+			// bytes and says nothing.
+			//
+			// Its own alphabet rather than base64: a role name with a hyphen in
+			// it has to be quoted in every statement that mentions it, and
+			// somewhere down the line one of them will not be.
+			data[want.Name] = "u" + strings.ToLower(
+				base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw))[:11]
 		case platformv1alpha1.GeneratedHex:
 			data[want.Name] = hex.EncodeToString(raw)
 		case platformv1alpha1.GeneratedBase64:
