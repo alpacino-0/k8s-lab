@@ -209,8 +209,31 @@ async function pickTenant(tenantId) {
   await pickApp(apps[0]);
 }
 
+// The health view's stop function, or null. Kept at module scope because
+// leaving one app for another has to close the one before it — the same reason
+// the log view returns a stop function rather than assuming the page never
+// changes.
+let stopHealth = null;
+
+// mountHealth is the seam onto metrics.js, which is loaded by a plain script
+// tag and publishes itself on window. Absent when that tag is missing, and a
+// missing health box is a better outcome than a page that fails to render at
+// all.
+function mountHealth(el, prefix) {
+  const module = typeof window !== "undefined" ? window.damgaMetrics : null;
+  if (!module) {
+    el.replaceChildren();
+    return null;
+  }
+  return module.mountMetrics(el, prefix, { fetcher: api });
+}
+
 async function pickApp(app) {
   state.ref = app;
+  if (stopHealth) {
+    stopHealth();
+    stopHealth = null;
+  }
   for (const button of $("apps").children) {
     const match = button.textContent === `${app.app} ${app.env}`;
     button.setAttribute("aria-current", String(match));
@@ -336,7 +359,21 @@ async function showEvidence() {
     el("a", { href: `${prefix}/export`, download: "" }, "Download the full log (JSONL)"),
     el("span", { class: "muted" }, "Every record, oldest first, in the form the chain was computed over.")));
 
+  // The health box, mounted rather than rendered, because it reloads on its own
+  // button and the rest of this page does not.
+  //
+  // Last on the page and first in what people come for, which is the ordering
+  // this file already uses: the deploy record answers "what did I ship" and
+  // this answers "why is it dying", and the second question is asked while the
+  // first is already known.
+  const health = el("div", { class: "box", style: "margin-top:1rem" });
+  parts.push(health);
+
   render(...parts);
+
+  // After render, because replaceChildren would otherwise drop what mount put
+  // in. api and not fetch: it is the one place a 401 becomes the sign-in form.
+  stopHealth = mountHealth(health, prefix);
 }
 
 // ---------------------------------------------------------------- rendering
