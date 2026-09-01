@@ -141,10 +141,19 @@ type Source struct {
 	CommitterEmail string
 }
 
-// Image is what actually ran. RequestedRef is what git said; AdmittedDigest is
-// what the cluster ran after Kyverno's mutateDigest rewrote the reference.
-// Both are kept because they disagree exactly when something interesting
-// happened.
+// Image is what actually ran. RequestedRef is what git said.
+//
+// AdmittedDigest has no writer. It held what the cluster ran after Kyverno's
+// mutateDigest rewrote the reference, and that engine was removed with the rest
+// of the admission layer; every record written since carries it empty, and the
+// CLI's `if != ""` guard means it has quietly stopped printing.
+//
+// It stays anyway, and the reason is the chain rather than sentiment: Image is
+// inside chainedRecord, so the field is covered by every hash already written.
+// Removing it changes the canonical form and every existing record fails
+// verification. A chained field can only be changed before the first record
+// exists, and that moment is past. If digests are admitted again, this is where
+// they go — and it will still verify.
 type Image struct {
 	RequestedRef   string
 	AdmittedDigest string

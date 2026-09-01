@@ -164,7 +164,6 @@ variables the kubelet injects.
 | `make smoke` | End-to-end checks against the running deployment |
 | `make policies` | Apply the admission policies |
 | `make alert-test` | Break the service and prove the alert reaches Alertmanager |
-| `make report-test` | Prove policy results reach a report, failures included |
 | `make operator-test` | The operator's unit and envtest suites |
 | `make operator-install` | Install the Workload CRD into the current cluster |
 | `make operator-deploy` | Build the operator, load it into kind and deploy it |
@@ -531,7 +530,6 @@ scripts/
   approve-kubelet-certs.sh  so metrics-server has a certificate to verify
   seal-secret.sh      a Secret in, a SealedSecret out, kubeseal in a container
   alert-test.sh       causes a real outage and waits for the alert to arrive
-  report-test.sh      forces a violation into scope to prove failures are reported
   smoke-test.sh       30 end-to-end checks including security posture and isolation
   teardown.sh         destroy the cluster
 ```

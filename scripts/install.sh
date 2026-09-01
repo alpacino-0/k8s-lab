@@ -14,7 +14,7 @@
 # DRY_RUN=1 prints, in order, every command it would run and changes nothing.
 # That is not only a courtesy to whoever is about to hand it a machine: it is
 # what binds this script's one hard ordering rule — the CRDs go in before the
-# quota that counts them — to a test. See scripts/install-test.sh.
+# quota that counts them — to a test. See scripts/install_test.go.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

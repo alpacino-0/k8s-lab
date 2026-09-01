@@ -65,8 +65,15 @@ make test        # unit and integration tests, no cluster needed
 make lint        # ESLint + helm lint + terraform fmt/validate
 make smoke       # end-to-end checks against the running deployment
 make alert-test  # break the service and prove the alert reaches Alertmanager
-make report-test # prove policy results reach a report, failures included
 ```
+
+Some of the design notes this repository is written against — the plan and its
+scope boundary, the decisions that are closed, what works today and what is
+owed — are deliberately not committed. If you are working in a linked worktree
+of a checkout that has them, `scripts/link-docs.sh` puts them where you can read
+them; `docs/WORKING-NOTES.md` is committed and explains what they are. If you
+have cloned this repository from GitHub you will not have them at all, and
+nothing here depends on them.
 
 The operator has its own suite:
 

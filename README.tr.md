@@ -158,7 +158,6 @@ değişkenleri.
 | `make smoke` | Çalışan deployment'a karşı uçtan uca kontroller |
 | `make policies` | Kabul politikalarını uygular |
 | `make alert-test` | Servisi gerçekten bozup alarmın Alertmanager'a ulaştığını kanıtlar |
-| `make report-test` | Politika sonuçlarının rapora ulaştığını, ihlaller dahil, kanıtlar |
 | `make operator-test` | Operator'ın birim ve envtest paketleri |
 | `make operator-install` | Workload CRD'sini mevcut cluster'a kurar |
 | `make operator-deploy` | Operator'ı derler, kind'a yükler ve dağıtır |
@@ -515,7 +514,6 @@ scripts/
   approve-kubelet-certs.sh  metrics-server'ın doğrulayacağı sertifika için
   seal-secret.sh      Secret girer, SealedSecret çıkar; kubeseal konteynerde
   alert-test.sh       gerçek bir kesinti yaratıp alarmın gelmesini bekler
-  report-test.sh      ihlali kapsama sokup raporlandığını kanıtlar
   smoke-test.sh       güvenlik duruşu ve izolasyon dahil 30 uçtan uca kontrol
   teardown.sh         cluster'ı siler
 ```

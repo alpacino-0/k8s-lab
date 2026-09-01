@@ -35,8 +35,8 @@ docker build -q -t "damga-app:$IMAGE_TAG" "$ROOT/app" >/dev/null
 log "loading the image into cluster nodes"
 kind load docker-image "damga-app:$IMAGE_TAG" --name "$CLUSTER" >/dev/null
 
-# The platform layer — ingress controller, cert-manager, Argo CD, the Kyverno
-# engine, the admission policies and the namespace they apply to — is
+# The platform layer — ingress controller, cert-manager, Argo CD, and the
+# namespace with its Pod Security Admission labels and tenant quota — is
 # Terraform's. Installing the same components from a shell script as well
 # would be two sources of truth disagreeing at the worst possible moment.
 log "applying the platform with terraform"
