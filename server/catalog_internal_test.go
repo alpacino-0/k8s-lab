@@ -826,7 +826,7 @@ func TestAMultiObjectEntryCommitsAFilePerObject(t *testing.T) {
 // does not report which. Taking the first workload instead is wrong for 34 of
 // the 135 multi-workload entries in the upstream corpus, and wrong here means
 // the object a later deploy updates is not the one the user thinks the app is.
-func TestTheFrontDoorIsAskedForRatherThanGuessed(t *testing.T) {
+func TestTheFrontDoorIsReportedRatherThanGuessed(t *testing.T) {
 	h := newHarness(t)
 	h.stores.catalog = testCatalog(t)
 	h.stores.writer = &gitwrite.Writer{Evidence: h.records}
@@ -859,9 +859,18 @@ func TestTheFrontDoorIsAskedForRatherThanGuessed(t *testing.T) {
 	}
 }
 
-// The placeholder domain used to find the front door must never reach a
-// manifest: an Ingress for front-door.invalid is a hostname nobody asked for,
-// and cert-manager would go and try to prove it.
+// An install that asked for no domain commits none.
+//
+// This case was written against a mechanism that no longer exists: the front
+// door used to be found by requesting a placeholder domain and seeing where the
+// converter put it, so the placeholder had to be cleared before the commit or
+// cert-manager would go and try to prove front-door.invalid. Plan.Primary
+// reports the answer now and no placeholder is ever asked for.
+//
+// It is kept, and widened from "not that placeholder" to "no domain at all",
+// because the property was never really about the placeholder: nobody asked for
+// a hostname, so nothing here may commit one — whatever a future mechanism
+// invents.
 func TestAnInstallWithNoDomainCommitsNoDomain(t *testing.T) {
 	h := newHarness(t)
 	h.stores.catalog = testCatalog(t)
@@ -878,12 +887,28 @@ func TestAnInstallWithNoDomainCommitsNoDomain(t *testing.T) {
 		t.Fatalf("installing = %d: %s", code, body)
 	}
 
+	read := 0
 	for name, body := range committedNames(t, repo) {
-		if strings.Contains(string(body), probeDomain) {
-			t.Fatalf("%s carries the placeholder domain this platform asks for to find the "+
-				"front door; nobody requested a hostname and cert-manager would try to prove "+
-				"this one", name)
+		if !strings.HasPrefix(name, "workload") && name != manifest.File {
+			continue
 		}
+		app, err := manifest.Parse(body)
+		if err != nil {
+			// A Database or anything else this directory holds. Only a Workload
+			// can carry a domain, and only a Workload has to be read here.
+			continue
+		}
+		read++
+		if app.Spec.Domain != "" {
+			t.Errorf("%s commits domain %q; nobody requested a hostname, and cert-manager "+
+				"would go and try to prove this one", name, app.Spec.Domain)
+		}
+	}
+	// The filenames are a convention, and a case that reads nothing passes
+	// whatever the manifests say. This repository has already shipped one
+	// assertion whose baseline collapsed to zero and went on passing.
+	if read == 0 {
+		t.Fatal("no committed workload was read, so this case asserted nothing about domains")
 	}
 }
 

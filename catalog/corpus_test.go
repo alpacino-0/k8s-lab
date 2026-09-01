@@ -39,6 +39,7 @@ package catalog_test
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -211,4 +212,105 @@ func TestNoInstallableEntryStillNamesAVariableInItsImage(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Plan.Primary is the answer the caller used to recover by probing.
+//
+// The endpoint that installs an entry needs to know which workload is the
+// application: it takes the placement's name and the fixed filename every later
+// deploy addresses, and the others get their own files. The converter has known
+// that all along and did not report it, so the caller asked for a placeholder
+// domain, saw which workload the converter attached it to, and cleared it off
+// again — reading an answer out of a side effect, which holds only for as long
+// as requesting a domain keeps meaning exactly what it means today.
+//
+// This is the case that says the field is a tidy-up and not a change of
+// behaviour: for every multi-workload entry in the shipped catalogue, Primary
+// has to name the workload the probe would have found. A difference here is
+// more interesting than a match and the message prints which entries, because
+// then one of the two is wrong and the corpus says which.
+//
+// The counts are logged and not asserted, for the reason at the top of this
+// file: upstream adds templates weekly, and a gate that fails when somebody
+// else ships an application is a gate that gets deleted rather than read.
+func TestThePrimaryIsTheAnswerTheProbeUsedToRecover(t *testing.T) {
+	c := corpus(t)
+
+	// The placeholder the endpoint used to ask for. It has to be a name
+	// nothing would route: .invalid is reserved by RFC 2606 for exactly this.
+	const probe = "front-door.invalid"
+
+	multi, notFirst, installableMulti := 0, 0, 0
+	var differ []string
+	for _, e := range c.Entries() {
+		plan, err := c.Plan(e.Name, catalog.Options{Namespace: testNamespace})
+		if err != nil {
+			continue
+		}
+
+		// Every plan, not only the multi-workload ones. Primary is a raw index
+		// into a public struct and the caller indexes with it, so out of range
+		// is a panic in the install path rather than a wrong answer — and the
+		// single-workload entries are most of the corpus and would otherwise
+		// never be looked at here at all.
+		if len(plan.Workloads) > 0 && (plan.Primary < 0 || plan.Primary >= len(plan.Workloads)) {
+			t.Errorf("%s: Primary=%d with %d workloads; the install path indexes with this",
+				e.Name, plan.Primary, len(plan.Workloads))
+			// Reported and then skipped. Everything below indexes with it, so
+			// carrying on would turn a named failure into a panic that stops
+			// the case before it has looked at the rest of the corpus.
+			continue
+		}
+
+		if len(plan.Workloads) < 2 {
+			continue
+		}
+		multi++
+		if plan.Installable() {
+			installableMulti++
+		}
+
+		probed, err := c.Plan(e.Name, catalog.Options{Namespace: testNamespace, Domain: probe})
+		if err != nil {
+			t.Errorf("%s plans with no domain and fails with one: %v", e.Name, err)
+			continue
+		}
+		// What the endpoint used to do, kept here because it is the only
+		// surviving statement of the answer this field has to reproduce.
+		was := 0
+		for i := range probed.Workloads {
+			if probed.Workloads[i].Spec.Domain == probe {
+				was = i
+				break
+			}
+		}
+
+		if plan.Primary != was {
+			differ = append(differ, fmt.Sprintf("%s: Primary=%d (%s), the probe found %d (%s)",
+				e.Name, plan.Primary, plan.Workloads[plan.Primary].Name,
+				was, probed.Workloads[was].Name))
+		}
+		// Not the first, so "take workload zero" would have been wrong here.
+		if plan.Primary != 0 {
+			notFirst++
+		}
+	}
+
+	// Without this the loop can compare nothing and the case still passes,
+	// which is how a baseline collapse ships. The corpus in this repository has
+	// multi-workload entries; if it stops having them, that is the finding.
+	if multi == 0 {
+		t.Fatal("no entry in the shipped catalogue has two workloads, so this case " +
+			"compared Primary against nothing")
+	}
+	if len(differ) > 0 {
+		t.Errorf("Primary and the probe it replaces disagree about %d of %d entries; one of "+
+			"them is wrong and this list is where to look:\n\t%s",
+			len(differ), multi, strings.Join(differ, "\n\t"))
+	}
+
+	t.Logf("multi-workload entries: %d (%d of them installable). "+
+		"The front door is not the first workload in %d of them, which is how often "+
+		"guessing instead of reporting would name the wrong object.",
+		multi, installableMulti, notFirst)
 }

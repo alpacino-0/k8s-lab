@@ -35,6 +35,26 @@ type Result struct {
 	Workloads []platformv1alpha1.Workload
 	Databases []platformv1alpha1.Database
 
+	// Primary indexes Workloads at the service this template puts in front:
+	// the one carrying the template's published port, or the only one, or the
+	// first alphabetically. See primaryService for how it is decided and why
+	// that is a guess.
+	//
+	// Reported rather than left to be inferred, and that is the whole reason
+	// this field exists. The answer was computed here and thrown away, and the
+	// caller that needed it recovered it by asking for a placeholder domain and
+	// seeing which workload the domain landed on — reading an answer out of a
+	// side effect. Taking the first workload instead would be wrong for a
+	// measured fraction of the corpus: kibana rather than elasticsearch, the
+	// proxy rather than the backend. catalog/corpus_test.go computes how many.
+	//
+	// An index and not a name, because the caller's question is which element
+	// of Workloads is the app — it takes the placement's name and the fixed
+	// filename every later deploy reads, and its own name is replaced in the
+	// process. Always valid: Convert refuses a template with no workloads at
+	// all, and when the front-door service became a Database this is 0.
+	Primary int
+
 	// Generated names the environment variables the template expects the
 	// platform to invent — a password, a user, an API key. They are returned
 	// rather than filled in because a value written here would be a credential
@@ -249,6 +269,7 @@ func Convert(t Template, o Options) (Result, error) {
 		// remaining services still have to name it.
 		front = 0
 	}
+	res.Primary = front
 	linkDatabase(&res, front)
 	return res, nil
 }
