@@ -203,11 +203,11 @@ func TestTheEndToEndManifestIsWhatTheCatalogueProduces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loading %s: %v", shippedTemplates, err)
 	}
-	// planEntry rather than c.Plan, because planEntry is what the handler
-	// calls and it is what answers which workload is the application. Rendering
-	// through it keeps this test on the endpoint's path rather than beside it,
-	// which is the whole claim the comment above makes.
-	plan, primary, err := planEntry(c, e2eTemplate, catalog.Options{Namespace: e2eNamespace})
+	// c.Plan and plan.Primary, which is exactly what the handler calls and
+	// reads. Rendering through the same pair keeps this test on the endpoint's
+	// path rather than beside it, which is the whole claim the comment above
+	// makes.
+	plan, err := c.Plan(e2eTemplate, catalog.Options{Namespace: e2eNamespace})
 	if err != nil {
 		t.Fatalf("%s: %v", e2eTemplate, err)
 	}
@@ -223,7 +223,7 @@ func TestTheEndToEndManifestIsWhatTheCatalogueProduces(t *testing.T) {
 	}
 	// No rollout id: it is a per-deploy annotation, and a golden file that
 	// carried one would differ on every run for a reason that is not a change.
-	files, err := renderInstall(place, plan, primary, secrets)("", nil)
+	files, err := renderInstall(place, plan, plan.Primary, secrets)("", nil)
 	if err != nil {
 		t.Fatalf("rendering the install: %v", err)
 	}

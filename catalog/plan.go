@@ -81,6 +81,18 @@ type Plan struct {
 	Workloads []platformv1alpha1.Workload
 	Databases []platformv1alpha1.Database
 
+	// Primary indexes Workloads at the entry's front door — the object that
+	// becomes the app, taking the placement's name and the fixed filename a
+	// later deploy addresses.
+	//
+	// Carried through from the conversion rather than worked out again here.
+	// Compose has no notion of a primary service, so this is the converter's
+	// guess and the only informed one available: it is the service the
+	// template's own port belongs to. What it replaces is worse than a guess —
+	// the caller used to request a placeholder domain and read back which
+	// workload it was attached to, which made an API gap into a mechanism.
+	Primary int
+
 	// Secrets are the values the platform has to invent, arranged by the
 	// workload that reads them. Keys carry a template and never a value: see
 	// Key.
@@ -183,6 +195,7 @@ func (c *Catalog) Plan(name string, o Options) (Plan, error) {
 		Namespace: o.Namespace,
 		Workloads: res.Workloads,
 		Databases: res.Databases,
+		Primary:   res.Primary,
 		Notes:     res.Notes,
 	}
 	p.attachSecrets(res)

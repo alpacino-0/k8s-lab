@@ -303,7 +303,21 @@ func installFromCatalog(g guard, st stores) http.Handler {
 		// because two of them were measured at different layers and disagreed:
 		// Plan.Installable() counts entries the planner accepts, and this
 		// endpoint refuses more than the planner does.
-		plan, primary, err := planEntry(src, req.Template, opts)
+		//
+		// Plan.Primary says which of the workloads is the front door, and the
+		// index matters because exactly one object can be the app: it takes the
+		// placement's name and the fixed filename every later deploy reads.
+		//
+		// It used to be recovered rather than read. This endpoint asked for a
+		// placeholder domain, looked at which workload the converter attached
+		// it to, and then cleared it off again — an answer read out of a side
+		// effect, which held only while requesting a domain kept meaning what
+		// it means today. Guessing instead is not an option and was measured:
+		// catalog/corpus_test.go counts how many multi-workload entries put
+		// something other than the first workload in front, and for those the
+		// object a later deploy updates would not be the one the user thinks
+		// the app is.
+		plan, err := src.Plan(req.Template, opts)
 		if err != nil {
 			// The only errors Plan returns are an unknown entry and a template
 			// that does not convert at all. Everything else it knows is wrong
@@ -373,7 +387,7 @@ func installFromCatalog(g guard, st stores) http.Handler {
 			Author:  gitwrite.Author{ID: sub.ID, Name: sub.ID, Email: sub.Email},
 			Ref:     ref,
 			Message: fmt.Sprintf("install %s as %s/%s", plan.Entry.Name, ref.App, ref.Env),
-			Render:  renderInstall(place, plan, primary, secrets),
+			Render:  renderInstall(place, plan, plan.Primary, secrets),
 			// Every file in this directory is one this install wrote, so a
 			// later render that stops producing one is asking for it to be
 			// removed — a service dropped from a template. manifest.Owns is
@@ -527,58 +541,6 @@ func generatedKind(kind string) (platformv1alpha1.GeneratedKind, bool) {
 	default:
 		return "", false
 	}
-}
-
-// probeDomain is asked for when the caller wanted none, so that the converter
-// says which service is the front door.
-//
-// It never reaches a manifest: planEntry clears it off the workload it landed
-// on, and a test asserts an install with no domain commits no domain.
-const probeDomain = "front-door.invalid"
-
-// planEntry plans an entry and says which of its workloads is the front door.
-//
-// The converter decides that — the service the template's port belongs to, or
-// the only one, or the first alphabetically — and does not report it. The one
-// thing it does with the answer is put the requested domain on that workload,
-// so asking for a domain is how the answer can be read back out. When the
-// caller wanted no domain, a placeholder is asked for and then removed.
-//
-// Guessing was measured and rejected. Taking the first workload would be wrong
-// for 34 of the 135 multi-workload entries in the upstream corpus — kibana
-// rather than elasticsearch, the proxy rather than the backend — and wrong here
-// means the object a later deploy updates is not the one the user thinks the
-// app is. Measured with:
-//
-//	go test ./server/ -run TestTheFrontDoorIsAskedForRatherThanGuessed
-//
-// The index matters because exactly one object can be the app: it takes the
-// placement's name and the fixed filename every later deploy reads.
-func planEntry(src CatalogSource, name string, o catalog.Options) (catalog.Plan, int, error) {
-	probing := o.Domain == ""
-	if probing {
-		o.Domain = probeDomain
-	}
-	plan, err := src.Plan(name, o)
-	if err != nil {
-		return catalog.Plan{}, 0, err
-	}
-
-	primary := 0
-	for i := range plan.Workloads {
-		if plan.Workloads[i].Spec.Domain == o.Domain {
-			primary = i
-			break
-		}
-	}
-	if probing {
-		for i := range plan.Workloads {
-			if plan.Workloads[i].Spec.Domain == probeDomain {
-				plan.Workloads[i].Spec.Domain = ""
-			}
-		}
-	}
-	return plan, primary, nil
 }
 
 // whyRefused is every reason this platform will not install this plan, in the

@@ -66,11 +66,10 @@ func TestTheShapesOfWhatTheCatalogueOffers(t *testing.T) {
 		offered++
 		// fakeDigest rather than a registry client: what is being counted is a
 		// property of the corpus, not of the network.
-		plan, primary, err := planEntry(c, e.Name, catalog.Options{Namespace: "damga", Pin: fakeDigest})
+		plan, err := c.Plan(e.Name, catalog.Options{Namespace: "damga", Pin: fakeDigest})
 		if err != nil {
 			continue
 		}
-		_ = primary
 		if _, unmintable := plannedSecrets(plan); len(plan.Blockers) > 0 || len(unmintable) > 0 {
 			continue
 		}
