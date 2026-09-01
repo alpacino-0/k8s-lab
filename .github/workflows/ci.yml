@@ -405,10 +405,28 @@ jobs:
           # body, and a probe pod whose output never got attached all produced
           # that one sentence. It named the symptom, which is the failure this
           # repository keeps paying a round for.
-          kubectl -n damga-system run cp-probe --rm -i --restart=Never \
-            --image=curlimages/curl:8.11.1 --quiet \
-            --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"cp-probe","image":"curlimages/curl:8.11.1","command":["sh","-c","echo healthz=$(curl -s -o /dev/null -w %{http_code} --max-time 10 http://damga/healthz); echo panel=$(curl -s -o /dev/null -w %{http_code} --max-time 10 http://damga/); echo body:; curl -s --max-time 10 http://damga/ | head -c 200"],"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"resources":{"requests":{"cpu":"10m","memory":"32Mi"},"limits":{"memory":"64Mi"}}}]}}' \
-            -- sh | tee /tmp/cp.out
+          # Created, waited for, then read with `logs` — not `run --rm -i`.
+          #
+          # The -i form attaches to the pod's stream as it starts, and when the
+          # attach loses that race it returns nothing at all: no status codes,
+          # no body, exit 0. This step failed that way twice today and the first
+          # time it was called a flake and rerun, because the message then was
+          # "the panel was not served" and that sentence is true of an empty
+          # capture as well as of a broken control plane. The diagnostics added
+          # in between are what told the two apart — the failure printed a
+          # deployment that was healthy and a probe that had said nothing.
+          #
+          # A pod that runs to completion and is then read cannot lose that
+          # race: the output exists in the container log whether or not anyone
+          # was attached when it was written.
+          kubectl -n damga-system run cp-probe --restart=Never \
+            --image=curlimages/curl:8.11.1 \
+            --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"cp-probe","image":"curlimages/curl:8.11.1","command":["sh","-c","echo healthz=$(curl -s -o /dev/null -w %{http_code} --max-time 10 http://damga/healthz); echo panel=$(curl -s -o /dev/null -w %{http_code} --max-time 10 http://damga/); echo body:; curl -s --max-time 10 http://damga/ | head -c 200"],"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"resources":{"requests":{"cpu":"10m","memory":"32Mi"},"limits":{"memory":"64Mi"}}}]}}'
+          kubectl -n damga-system wait --for=jsonpath='{.status.phase}'=Succeeded \
+            pod/cp-probe --timeout=120s || true
+          kubectl -n damga-system logs cp-probe > /tmp/cp.out 2>&1 || true
+          kubectl -n damga-system delete pod cp-probe --ignore-not-found --wait=false
+          cat /tmp/cp.out
           grep -q '<!doctype html>' /tmp/cp.out || {
             echo "::group::the panel did not answer with HTML"
             echo "what the probe saw:"; cat /tmp/cp.out
