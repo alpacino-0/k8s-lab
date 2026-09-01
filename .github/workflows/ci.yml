@@ -823,15 +823,14 @@ jobs:
       - name: An app's own metrics must answer, and name what they cannot
         run: |
           set -euo pipefail
-          # The owner this install does not have yet. Through kubectl exec
-          # because there is no HTTP equivalent, which is the point of it.
-          printf 'ci-metrics-password' | kubectl -n damga-system exec -i deploy/damga -- \
-            /damga bootstrap -evidence-dsn /data/damga.db \
-            -tenant ci -email ci@example.test -password-stdin > /tmp/bootstrap.out
-          # The path takes the tenant id and not the slug, which is the one
-          # thing about this API a reader gets wrong first.
-          tenant=$(grep -o 't_[a-z0-9]*' /tmp/bootstrap.out | head -1)
-          [ -n "$tenant" ] || { echo "bootstrap printed no tenant id:"; cat /tmp/bootstrap.out; exit 1; }
+          # The owner this install already has. This step first bootstrapped
+          # its own, and that is why it failed: bootstrap runs once per install
+          # and answers `this install already has an owner` with exit 3 to say
+          # so — the same 3 the upgrade step asserts as proof the database
+          # survived. Under `set -e` a correct refusal killed the step.
+          #
+          # So it logs in as the owner made further up, whose password is in
+          # CI_OWNER_PASSWORD precisely so later steps do not each make one.
 
           kubectl -n damga-system port-forward svc/damga 18080:80 >/dev/null 2>&1 &
           forward=$!
@@ -843,9 +842,15 @@ jobs:
 
           api() { curl -s -b /tmp/jar -c /tmp/jar "$@"; }
           api -X POST -H 'Content-Type: application/json' \
-            -d '{"email":"ci@example.test","password":"ci-metrics-password"}' \
+            -d "{\"email\":\"owner@example.test\",\"password\":\"$CI_OWNER_PASSWORD\"}" \
             http://127.0.0.1:18080/api/v1/login -o /dev/null -w 'login=%{http_code}\n' | grep -q 'login=200' \
-            || { echo "the owner bootstrap.out named cannot log in"; exit 1; }
+            || { echo "the owner this install was bootstrapped with cannot log in"; exit 1; }
+          # The path takes the tenant id and not the slug, which is the one
+          # thing about this API a reader gets wrong first. Read from /me
+          # rather than from bootstrap's output, because this step no longer
+          # runs bootstrap.
+          tenant=$(api http://127.0.0.1:18080/api/v1/me | jq -r '.memberships[0].tenantId')
+          [ -n "$tenant" ] && [ "$tenant" != null ] || { echo "/me named no tenant"; exit 1; }
           # ci-probe is the Workload the step above left Ready. The placement is
           # what turns its name into a namespace; without one this endpoint
           # answers 404 and is right to.
