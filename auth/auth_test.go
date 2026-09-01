@@ -229,7 +229,16 @@ func TestVerifyDummyDoesTheWork(t *testing.T) {
 	// Deliberately loose. What is being ruled out is a dummy that returns
 	// immediately — an order of magnitude, not a timing-attack-grade match,
 	// which no Go test can assert on a shared machine anyway.
-	if dummy < real/4 {
+	//
+	// real/10 because the sentence above says an order of magnitude and the
+	// comparison used to say real/4, which is not one. It failed on a loaded
+	// machine by 0.36ms — dummy 24.407ms against a real 99.058ms, where the
+	// threshold was 24.764ms — and passed on the next run. A test that fails
+	// when the machine is busy teaches people to rerun rather than to read,
+	// and the thing it exists to catch, a dummy that returns immediately,
+	// would miss real/10 by three orders of magnitude rather than by a
+	// rounding error.
+	if dummy < real/10 {
 		t.Errorf("the dummy verification took %v against a real %v; "+
 			"an unknown address would answer measurably faster", dummy, real)
 	}
