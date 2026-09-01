@@ -105,6 +105,17 @@ const (
 	startupPeriodSecs    int32 = 5
 	startupFailureBudget int32 = 60
 
+	// composeGroupLabel marks every object one catalogue entry produced, with
+	// the entry's name as the value.
+	//
+	// Written by the converter — compose/convert.go, where it is unexported, so
+	// this is a copy rather than a reference and a test fails when the two stop
+	// matching. It is what makes "the workloads of one entry" a set this
+	// package can name: an entry with a web front end and a worker is two
+	// Workloads that have nothing else in common, since every other label here
+	// is derived from the object's own name.
+	composeGroupLabel = "damga.co/from-compose"
+
 	// The ingress controller lives here. Namespaces carry
 	// kubernetes.io/metadata.name automatically, so this needs no cooperation
 	// from whoever installed it.
@@ -176,11 +187,30 @@ const (
 )
 
 func labelsFor(app *platformv1alpha1.Workload) map[string]string {
-	return map[string]string{
+	out := map[string]string{
 		"app.kubernetes.io/name":       app.Name,
 		instanceLabel:                  app.Name,
 		"app.kubernetes.io/managed-by": "damga-platform",
 	}
+	// And the entry this came from, when it came from one. It has to be on the
+	// pod rather than only on the Workload, because a NetworkPolicy selects
+	// pods and the rule below is what needs to find the siblings.
+	//
+	// This is a pod template field, so adding it rolls every workload that has
+	// it once: the deployment controller hashes .spec.template. Once is the
+	// whole cost, and only because the value is stable — it is the entry's
+	// name, written by the converter at install time and never computed here.
+	// A label whose value this function derived would be a rollout on every
+	// reconcile, which is the failure that made platform annotations stop being
+	// copied onto pods.
+	//
+	// Not in selectorFor, and that is not a stylistic split: .spec.selector is
+	// immutable, so a label added there would make every Deployment that
+	// already exists refuse its next update.
+	if group := app.Labels[composeGroupLabel]; group != "" {
+		out[composeGroupLabel] = group
+	}
+	return out
 }
 
 func selectorFor(app *platformv1alpha1.Workload) map[string]string {
@@ -669,14 +699,14 @@ func desiredNetworkPolicy(app *platformv1alpha1.Workload) *networkingv1.NetworkP
 				networkingv1.PolicyTypeIngress,
 				networkingv1.PolicyTypeEgress,
 			},
-			Ingress: []networkingv1.NetworkPolicyIngressRule{{
+			Ingress: eastWest(app, networkingv1.NetworkPolicyIngressRule{
 				From: []networkingv1.NetworkPolicyPeer{{
 					NamespaceSelector: &metav1.LabelSelector{
 						MatchLabels: map[string]string{"kubernetes.io/metadata.name": ingressNamespace},
 					},
 				}},
 				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &appPort}},
-			}},
+			}),
 			Egress: []networkingv1.NetworkPolicyEgressRule{
 				{
 					// Forgetting this rule is the most common way a default-deny
@@ -731,6 +761,62 @@ func desiredNetworkPolicy(app *platformv1alpha1.Workload) *networkingv1.NetworkP
 			},
 		},
 	}
+}
+
+// eastWest lets the workloads of one catalogue entry reach each other, and
+// nothing else reach them.
+//
+// The gap it closes was measured on a real cluster: a probe carrying a
+// workload's own selector labels resolved DNS, reached https://example.com with
+// a 200 and ghcr.io with a 401 — a refusal, so the connection was made — and got
+// 000 from a sibling Service. Egress was never the problem. What was closed was
+// the destination's ingress, which admitted the ingress controller and nobody
+// else, so a catalogue entry with a front end and a worker installed cleanly and
+// could not talk to itself. Sixty of the 202 entries that install are more than
+// one workload.
+//
+// # Why this does not open the fence
+//
+// The peer is a bare podSelector with no namespaceSelector beside it, and in
+// NetworkPolicy that means "pods in the same namespace as this policy" — it is
+// not a wildcard, and no selector in another namespace can satisfy it. A tenant
+// lives in its own namespace, so a tenant cannot label its way into another
+// tenant's application no matter what it writes on its pods. Inside one
+// namespace the value still has to match, so two entries installed side by side
+// stay separated from each other.
+//
+// A namespaceSelector here would be the opposite: two tenants that both install
+// n8n would carry the same value, and the rule would join them. That is the
+// version of this change that removes the fence rather than opening a door in
+// it, and it is why the peer is written this way rather than as the more
+// obvious "same label anywhere".
+//
+// # Why no port list
+//
+// A Workload declares the one port its Service publishes, and a sibling reaches
+// whatever the process listens on — a worker's health port, a queue, a second
+// listener the template never named. There is no list to write, and inventing
+// one would refuse exactly the traffic this exists to permit. What bounds the
+// rule is the peer rather than the port: one entry, one namespace.
+//
+// A workload with no entry label — anything not installed from the catalogue —
+// gets the policy it always had.
+func eastWest(
+	app *platformv1alpha1.Workload, base networkingv1.NetworkPolicyIngressRule,
+) []networkingv1.NetworkPolicyIngressRule {
+	rules := make([]networkingv1.NetworkPolicyIngressRule, 0, 2)
+	rules = append(rules, base)
+	group := app.Labels[composeGroupLabel]
+	if group == "" {
+		return rules
+	}
+	return append(rules, networkingv1.NetworkPolicyIngressRule{
+		From: []networkingv1.NetworkPolicyPeer{{
+			PodSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{composeGroupLabel: group},
+			},
+		}},
+	})
 }
 
 func desiredPodDisruptionBudget(app *platformv1alpha1.Workload) *policyv1.PodDisruptionBudget {

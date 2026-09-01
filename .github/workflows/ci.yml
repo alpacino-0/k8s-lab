@@ -1450,6 +1450,79 @@ jobs:
           kubectl -n damga delete pod ci-egress-probe --wait=false
           kubectl -n damga delete workload ci-egress
 
+      # The other half of the same fence, and the half that was closed.
+      #
+      # The step above proves a catalogue application can reach the internet.
+      # This one proves it can reach the workload beside it — which it could not,
+      # measured on a real cluster: a probe carrying a workload's own labels got
+      # 200 from example.com and 000 from a sibling Service. Egress was never the
+      # problem; the destination admitted the ingress controller and nobody else,
+      # so an entry with a front end and a worker installed cleanly and could not
+      # talk to itself.
+      #
+      # Both probes run in the tenant's namespace, and the only difference
+      # between them is one label. That is the whole assertion: the rule admits
+      # the entry's own pods and still refuses the neighbour, so it is a door in
+      # the fence rather than the fence being gone.
+      - name: An entry's workloads can reach each other, and nobody else can
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: platform.damga.co/v1alpha1
+          kind: Workload
+          metadata:
+            name: ew-target
+            namespace: damga
+            labels:
+              damga.co/from-compose: ci-east-west
+          spec:
+            image: damga-app:${IMAGE_TAG}
+            port: 3000
+          EOF
+          kubectl -n damga wait --for=condition=Ready workload/ew-target --timeout=180s || {
+            kubectl -n damga get workload ew-target -o jsonpath='{.status.conditions}' | tr ',' '\n'
+            kubectl -n damga describe pod -l app.kubernetes.io/instance=ew-target | tail -30
+            exit 1
+          }
+
+          # The label reaching the pod is what the policy selects on. Asserted
+          # before the probes, because a missing label makes the sibling probe
+          # fail for a reason that has nothing to do with the rule.
+          kubectl -n damga get pod -l app.kubernetes.io/instance=ew-target \
+            -o jsonpath='{.items[0].metadata.labels.damga\.co/from-compose}' | grep -q ci-east-west || {
+            echo "::error::the entry label did not reach the pod, so the policy selects nothing"
+            kubectl -n damga get pod -l app.kubernetes.io/instance=ew-target -o yaml | head -40
+            exit 1
+          }
+
+          # $1 name, $2 extra pod labels as JSON
+          eastwest_probe() {
+            kubectl -n damga run "$1" --rm -i --restart=Never --quiet \
+              --image=curlimages/curl:8.11.1 \
+              --overrides='{"metadata":{"labels":'"$2"'},"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"'"$1"'","image":"curlimages/curl:8.11.1","command":["sh","-c","echo status=$(curl -s -o /dev/null -w %{http_code} --max-time 10 http://ew-target.damga.svc/healthz)"],"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"resources":{"requests":{"cpu":"10m","memory":"32Mi"},"limits":{"memory":"64Mi"}}}]}}' \
+              -- sh
+          }
+
+          eastwest_probe ew-sibling '{"damga.co/from-compose":"ci-east-west"}' | tee /tmp/ew-sibling.out
+          grep -q 'status=200' /tmp/ew-sibling.out || {
+            echo "::group::a workload of the same entry could not reach it"
+            echo "what the probe saw:"; cat /tmp/ew-sibling.out
+            echo "-- status=000 means the connection was refused before any HTTP answer,"
+            echo "-- which is what a NetworkPolicy with no rule for this peer produces."
+            kubectl -n damga get networkpolicy ew-target -o yaml
+            echo "::endgroup::"
+            exit 1
+          }
+
+          eastwest_probe ew-stranger '{"app":"not-this-entry"}' | tee /tmp/ew-stranger.out
+          grep -q 'status=000' /tmp/ew-stranger.out || {
+            echo "::error::a pod that belongs to no entry reached the application; the rule is supposed to admit one entry's own pods and this says it admits the namespace"
+            cat /tmp/ew-stranger.out
+            kubectl -n damga get networkpolicy ew-target -o yaml
+            exit 1
+          }
+
+          kubectl -n damga delete workload ew-target --ignore-not-found
+
       - name: A Build must produce an image the cluster can pull
         run: |
           cat <<EOF | kubectl apply -f -
