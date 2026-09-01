@@ -143,12 +143,19 @@ first failed deploy), a receiver that never answered, and a receiver that
 answered and refused the body — quoting its own words, because a bare `400`
 reads as "damga sent something wrong" without saying what.
 
-> **This is not the alerting path.** `cluster/monitoring-values.yaml` still
-> routes Alertmanager to a `"null"` receiver, and `scripts/alert-test.sh` still
-> proves the chain only as far as Alertmanager's own API. That path carries
-> infrastructure alerts and arrives with the optional monitoring stack, which
-> `scripts/install.sh` does not install. This one is in every installation and
-> answers a different question: what happened to the deploy you just asked for.
+> **This is not the alerting path.** That one carries infrastructure alerts —
+> a service down, a target missing — and arrives with the optional monitoring
+> stack, which `scripts/install.sh` does not install. This one is in every
+> installation and answers a different question: what happened to the deploy you
+> just asked for.
+>
+> They now agree about how a destination is configured.
+> `cluster/monitoring-values.yaml` still routes Alertmanager to a `"null"`
+> receiver by default, and it also defines a `damga-webhook` receiver that reads
+> its URL from a file the same way `-notify-url-file` does. Turning it on is one
+> line on the route plus a Secret; `cluster/alertmanager_test.go` runs a real
+> Alertmanager against that configuration and asserts the delivered body names
+> the alert and the application.
 
 ## PostgreSQL
 

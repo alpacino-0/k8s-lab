@@ -13,6 +13,13 @@
 #      configuration rather than metrics, so it is exercised by handing
 #      Alertmanager two alerts directly — no waiting on a real outage that
 #      happens to light both.
+#
+# Where this stops, said here so nobody reads it as more than it is: both checks
+# read Alertmanager's own /api/v2/alerts. Neither asserts that Alertmanager
+# notified anything, and with the default receiver at "null" there is nothing to
+# assert. Delivery is proved by cluster/alertmanager_test.go, which runs a real
+# Alertmanager against cluster/monitoring-values.yaml with the route pointed at
+# the webhook receiver — in seconds, and without a cluster.
 set -uo pipefail
 
 NAMESPACE="${NAMESPACE:-damga}"
