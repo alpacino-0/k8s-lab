@@ -1,0 +1,30 @@
+-- Two placements never land in the same place.
+--
+-- 0001 and 0003 stop one tenant taking another's repository or namespace. Both
+-- are about tenants. This one is about environments, and it closes a hole that
+-- was measured rather than reasoned about: `POST /apps` accepted api/prod and
+-- api/qa with the same repository, branch and path, and accepted api/prod and
+-- api/dev in the same namespace. Both returned 201.
+--
+-- Neither is a second environment. Env reaches exactly one place in this
+-- system — the primary key of this table. It is not in the file the manifest is
+-- written to (repo_url + branch + path + a constant filename) and it is not in
+-- the object the manifest names (app + namespace, from server/deploy.go). So
+-- two environments that agree on either tuple are one environment with two
+-- names, and the way that shows up is a deploy to one silently replacing the
+-- other's desired state.
+--
+-- Unique indexes rather than a check in Go, for the reason 0001 wrote down and
+-- measured: under READ COMMITTED a read-then-write guard is no guard at all.
+-- Go still does the SELECT, because a constraint gives the loser a driver error
+-- and the person who typed the wrong path needs a sentence.
+--
+-- Both are global rather than per tenant, and that is safe because the two
+-- claim tables already make the values themselves per tenant: a repository
+-- belongs to one tenant and so does a namespace.
+--
+-- An install that already holds a duplicate will fail this migration, and that
+-- is the correct failure. The alternative is a control plane that starts up
+-- with two environments pointed at one file and no way to notice.
+CREATE UNIQUE INDEX placement_one_directory ON placement (repo_url, branch, path);
+CREATE UNIQUE INDEX placement_one_object ON placement (namespace, app);

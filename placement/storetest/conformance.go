@@ -67,6 +67,8 @@ func Run(t *testing.T, newStore Factory) {
 		{"ATriggerWithoutAPlacementIsRefused", testATriggerWithoutAPlacementIsRefused},
 		{"DeletingThePlacementDeletesTheTrigger", testDeletingThePlacementDeletesTheTrigger},
 		{"OneRepositoryIsFoundUnderEverySpellingAForgeSends", testOneRepositoryIsFoundUnderEverySpelling},
+		{"TwoEnvironmentsNeverLandInOnePlace", testTwoEnvironmentsNeverLandInOnePlace},
+		{"AnEnvironmentMayBeMovedOntoItsOwnPlace", testAnEnvironmentMayBeMovedOntoItsOwnPlace},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) { c.fn(t, newStore) })
@@ -677,5 +679,100 @@ func testOneRepositoryIsFoundUnderEverySpelling(t *testing.T, newStore Factory) 
 	// And still not something else.
 	if got, err := s.TriggersFor(ctx, triggerProvider, "https://github.com/acme/other"); err != nil || len(got) != 0 {
 		t.Errorf("TriggersFor for another repository = %d triggers, %v", len(got), err)
+	}
+}
+
+// Env reaches the key of a placement and nothing else: not the file a manifest
+// is written to (repository, branch, path and a constant filename) and not the
+// object it names (app and namespace). So two environments agreeing on either
+// tuple are one environment with two names, and the way that shows up is a
+// deploy to one replacing the other's desired state without a word.
+//
+// Measured before the fix, through POST /apps: api/prod and api/qa on one
+// repository, branch and path was a 201, and so was api/prod and api/dev in one
+// namespace. Both pairs then resolved to a single file and a single Workload.
+func testTwoEnvironmentsNeverLandInOnePlace(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	held := place(tenantA, "api", prod, repoA, "apps/api")
+	if _, err := s.Put(ctx, held); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// One repository legitimately feeds several environments, so what is
+	// refused is the directory and never the repository.
+	sameDirectory := place(tenantA, "api", "qa", repoA, "apps/api")
+	sameDirectory.Namespace = "api-qa"
+	_, err := s.Put(ctx, sameDirectory)
+	if !errors.Is(err, placement.ErrConflict) {
+		t.Errorf("a second environment writing apps/api of the same repository returned %v, "+
+			"want ErrConflict; both deploys write the same workload.yaml and the later one "+
+			"silently replaces the earlier one's desired state", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), prod) {
+		t.Errorf("the refusal is %q and does not name the environment already there, which "+
+			"is the only part the caller cannot see", err)
+	}
+
+	// The other landing site. A different repository, so the directory rule is
+	// not what answers.
+	sameObject := place(tenantA, "api", "dev", repoB, "apps/api-dev")
+	sameObject.Namespace = held.Namespace
+	if _, err := s.Put(ctx, sameObject); !errors.Is(err, placement.ErrConflict) {
+		t.Errorf("a second environment of app %q in namespace %q returned %v, want "+
+			"ErrConflict; both render one Workload of that name and they are one running app",
+			held.App, held.Namespace, err)
+	}
+
+	// And what must still be allowed, or the rule has eaten the layout instead
+	// of the collision: another app in the same namespace, and another
+	// environment in the same repository under its own path.
+	otherApp := place(tenantA, "web", prod, repoB, "apps/web")
+	otherApp.Namespace = held.Namespace
+	if _, err := s.Put(ctx, otherApp); err != nil {
+		t.Errorf("a different app in namespace %q was refused (%v); one tenant may put as "+
+			"many apps in one namespace as it likes", held.Namespace, err)
+	}
+	if _, err := s.Put(ctx, place(tenantA, "api", "staging", repoA, "apps/api-staging")); err != nil {
+		t.Errorf("a second environment under its own path in the same repository was refused "+
+			"(%v); one repository feeding several environments is the ordinary case", err)
+	}
+}
+
+// The other half, and the way a rule like this usually breaks: written against
+// the collision, never run against the ordinary second write. Put is
+// create-or-replace, so a row that collided with itself would make every update
+// after the first one fail — an app could be created and then never moved.
+func testAnEnvironmentMayBeMovedOntoItsOwnPlace(t *testing.T, newStore Factory) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	p := place(tenantA, "api", prod, repoA, "apps/api")
+	if _, err := s.Put(ctx, p); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := s.Put(ctx, p); err != nil {
+		t.Fatalf("writing the same placement again returned %v; an app that cannot be "+
+			"rewritten cannot be moved, and Put is create-or-replace", err)
+	}
+
+	moved := p
+	moved.Path = "services/api"
+	if _, err := s.Put(ctx, moved); err != nil {
+		t.Fatalf("moving an environment to another directory returned %v", err)
+	}
+	got, err := s.Get(ctx, tenantA, "api", prod)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Path != "services/api" {
+		t.Errorf("path = %q after a move, want services/api", got.Path)
+	}
+
+	// And the directory it left is free again, which is what makes the rule a
+	// statement about where things are rather than about where they have been.
+	if _, err := s.Put(ctx, place(tenantA, "api", "qa", repoA, "apps/api")); err != nil {
+		t.Errorf("the directory an environment moved out of is still held (%v)", err)
 	}
 }

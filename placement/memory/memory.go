@@ -88,6 +88,24 @@ func (s *Store) Put(_ context.Context, p placement.Placement) (placement.Placeme
 			"%w: namespace %q belongs to another tenant", placement.ErrConflict, p.Namespace)
 	}
 
+	// And the collision two environments of one app produce, which is neither
+	// of the claims above: those ask whose value this is, this one asks whether
+	// anything already lands where this would. See placement.Store.Put — Env is
+	// in the key of this map and in nothing the write path uses, so two rows
+	// that agree on a landing site are one environment wearing two names.
+	//
+	// Self is skipped, because Put is create-or-replace and a row conflicting
+	// with itself would make every update after the first one fail.
+	self := key(p.TenantID, p.App, p.Env)
+	for k, other := range s.byKey {
+		if k == self {
+			continue
+		}
+		if err := placement.Collision(p, other); err != nil {
+			return placement.Placement{}, err
+		}
+	}
+
 	now := s.now().UTC().Truncate(time.Microsecond)
 	p.UpdatedAt = now
 	// Preserved across a replace: moving an app to another directory is not

@@ -650,3 +650,59 @@ func TestAppsIsScopedToOneTenantInBothStores(t *testing.T) {
 		t.Errorf("another tenant's app is in the list: %s", body)
 	}
 }
+
+// The 201s that were measured before the placement store refused them.
+//
+// Both were accepted: api/prod and api/qa pointed at one repository, branch and
+// path, and api/prod and api/dev in one namespace. Env reaches the key of a
+// placement and nothing the write path uses — not the file a manifest is
+// written to, not the object it names — so each pair was one environment with
+// two names, and a deploy to either replaced the other's desired state.
+//
+// Here rather than only in the store's conformance suite because the refusal
+// has to arrive as something the person who typed it can act on. The store
+// answers ErrConflict, this route turns it into 409 carrying the store's own
+// words, and those words name the environment already holding the place.
+func TestASecondEnvironmentMayNotLandOnTheFirst(t *testing.T) {
+	h := newHarness(t)
+	body := func(env, ns, repo, path string) string {
+		return `{"app":"api","env":"` + env + `","namespace":"` + ns + `","repoURL":"` + repo +
+			`","branch":"main","path":"` + path + `"}`
+	}
+
+	if code, out := h.createApp(tenantHome, accOwner,
+		body("prod", "acme-prod", "https://git.test/acme/api.git", "apps/api")); code != http.StatusCreated {
+		t.Fatalf("creating the first environment: %d %s", code, out)
+	}
+
+	for _, c := range []struct{ name, body, names string }{
+		{
+			"the same directory of the same repository",
+			body("qa", "acme-qa", "https://git.test/acme/api.git", "apps/api"),
+			"overwrite",
+		},
+		{
+			"the same app in the same namespace",
+			body("dev", "acme-prod", "https://git.test/acme/api-dev.git", "apps/api-dev"),
+			"one running app",
+		},
+	} {
+		code, out := h.createApp(tenantHome, accOwner, c.body)
+		if code != http.StatusConflict {
+			t.Errorf("%s: %d %s, want 409; this is the pair that was measured at 201 and "+
+				"resolved to one file and one Workload", c.name, code, out)
+			continue
+		}
+		if !strings.Contains(out, "prod") || !strings.Contains(out, c.names) {
+			t.Errorf("%s: the refusal is %s; it has to name the environment already there "+
+				"and what going ahead would cost", c.name, out)
+		}
+	}
+
+	// And what a second environment is actually for, which the rule must not
+	// have eaten: its own directory and its own namespace.
+	if code, out := h.createApp(tenantHome, accOwner,
+		body("staging", "acme-staging", "https://git.test/acme/api.git", "apps/api-staging")); code != http.StatusCreated {
+		t.Fatalf("a second environment with a place of its own was refused: %d %s", code, out)
+	}
+}

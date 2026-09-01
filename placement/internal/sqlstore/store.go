@@ -129,6 +129,35 @@ func (s *Store) Put(ctx context.Context, p placement.Placement) (placement.Place
 			"%w: namespace %q belongs to another tenant", placement.ErrConflict, p.Namespace)
 	}
 
+	// And the collision, asked as a query even though 0005 makes it a
+	// constraint. The unique index is what makes it true under a concurrent
+	// writer; this is what makes the ordinary case say something. Without it
+	// the loser of a race and the person who simply typed the wrong path get
+	// the same driver error, and the API turns that into a 500 about the
+	// server being broken.
+	//
+	// Every column of both indexes, in one pass, so a row that collides on
+	// either is found by the query that reports on both. Self is excluded: Put
+	// is create-or-replace and a row conflicting with itself would fail every
+	// update after the first.
+	var have placement.Placement
+	err = tx.QueryRowContext(ctx, s.d.Rebind(`
+		SELECT app, env, repo_url, branch, path, namespace FROM placement
+		 WHERE ((repo_url = ? AND branch = ? AND path = ?) OR (namespace = ? AND app = ?))
+		   AND NOT (tenant_id = ? AND app = ? AND env = ?)
+		 LIMIT 1`),
+		p.RepoURL, p.Branch, p.Path, p.Namespace, p.App,
+		p.TenantID, p.App, p.Env,
+	).Scan(&have.App, &have.Env, &have.RepoURL, &have.Branch, &have.Path, &have.Namespace)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// Nothing lands where this would.
+	case err != nil:
+		return placement.Placement{}, err
+	default:
+		return placement.Placement{}, placement.Collision(p, have)
+	}
+
 	// CreatedAt is preserved across a replace: moving an app to another
 	// directory is not the app coming into existence.
 	var created string
