@@ -835,10 +835,24 @@ jobs:
           kubectl -n damga-system port-forward svc/damga 18080:80 >/dev/null 2>&1 &
           forward=$!
           trap 'kill "$forward" 2>/dev/null || true' EXIT
+          # The sleep is the fix, and its absence is why this step failed once
+          # in 0.1 seconds: a refused connection returns immediately, so thirty
+          # attempts with nothing between them are thirty attempts in the same
+          # millisecond, and --max-time never applies because there is nothing
+          # to time out against. It passed on every earlier run by winning a
+          # race it was not waiting for.
+          started=$(date +%s)
           for i in $(seq 1 30); do
             curl -sf --max-time 2 http://127.0.0.1:18080/healthz >/dev/null && break
-            [ "$i" = 30 ] && { echo "the port-forward never answered /healthz"; exit 1; }
+            [ "$i" = 30 ] && {
+              echo "the port-forward never answered /healthz in $(($(date +%s)-started))s"
+              kubectl -n damga-system get pod,endpoints -l app.kubernetes.io/name=damga || true
+              jobs -l || true
+              exit 1
+            }
+            sleep 1
           done
+          echo "the port-forward answered after $(($(date +%s)-started))s"
 
           api() { curl -s -b /tmp/jar -c /tmp/jar "$@"; }
           api -X POST -H 'Content-Type: application/json' \
