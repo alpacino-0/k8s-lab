@@ -63,11 +63,8 @@ Optional:
   --skip-node-config  do not write the containerd redirect or restart k3s
   --control-plane-image <ref>
                       run the control plane from this image instead of the one
-                      cluster/control-plane.yaml names. Needed today: this
-                      repository's CI publishes ghcr.io/damgahq/damga and
-                      ghcr.io/damgahq/damga-operator and does not publish a
-                      control-plane image, so the manifest's default cannot be
-                      pulled
+                      cluster/control-plane.yaml names. For an install that
+                      builds its own; the manifest's reference is published
   --skip-control-plane
                       install only the platform and the reference tenant
   --skip-bootstrap    do not create the first owner
@@ -393,17 +390,6 @@ else
   run kubectl apply -f "$ROOT/cluster/control-plane.yaml"
   if [[ -n "$CONTROL_PLANE_IMAGE" ]]; then
     run kubectl -n "$SYSTEM_NAMESPACE" set image deployment/damga "damga=${CONTROL_PLANE_IMAGE}"
-  else
-    # Said before the rollout waits five minutes on a pull that cannot succeed.
-    #
-    # cluster/control-plane.yaml names ghcr.io/damgahq/damga-control-plane, and
-    # this repository's publish job builds two images: the reference tenant and
-    # the operator. CI covers the control plane by building it into a kind
-    # cluster, which is why nothing has noticed. Until it is published, this
-    # step needs --control-plane-image.
-    note "cluster/control-plane.yaml names an image this repository does not publish;"
-    note "if the rollout below times out on ImagePullBackOff, that is why —"
-    note "re-run with --control-plane-image <ref> pointing at one you built"
   fi
   run kubectl -n "$SYSTEM_NAMESPACE" rollout status deployment/damga --timeout=300s
   # Said now rather than discovered later, and it names one cause rather than
@@ -440,6 +426,9 @@ Done.
 
   The CLI, against the same API the panel uses:
     damga-cli login --server http://localhost:9000 --email ${EMAIL}
+
+  Later, to move this install to a new version:
+    git pull && ./scripts/upgrade.sh
 
 What this did NOT install, said out loud rather than discovered:
 

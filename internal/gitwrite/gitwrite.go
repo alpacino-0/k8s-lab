@@ -140,6 +140,32 @@ type Request struct {
 	//
 	// Paths are relative to Target.Dir.
 	Render func(rolloutID string, current map[string][]byte) (map[string][]byte, error)
+
+	// Owns says whether a file already in the directory is one this platform
+	// wrote, and may therefore be removed when Render stops producing it.
+	//
+	// It exists because "delete what the render omitted" and "leave what the
+	// render omitted" are both wrong on their own. Leaving everything is what
+	// this package did until now, and it means a manifest can be added and
+	// changed through here but never withdrawn: a service dropped from a
+	// template keeps its file, Argo CD keeps applying it, and the thing the
+	// control plane believes it retracted goes on running. Deleting everything
+	// is worse in the other direction — the comment on Render says what the
+	// day something else commits into this directory looks like, and blind
+	// deletion is that day arriving without a diff to explain it.
+	//
+	// So the caller answers, per file, and it answers about content rather
+	// than about a name: a filename is a convention and a convention is what a
+	// rename breaks, while what this platform wrote is recognisable from what
+	// is in it. See manifest.Owns for the answer the server gives.
+	//
+	// nil removes nothing, which is exactly the behaviour every caller had
+	// before this field existed. A caller that has not thought about deletion
+	// therefore does not get it, and that is the safe direction: the cost of
+	// not deleting is a stale file somebody can see in git, and the cost of
+	// deleting wrongly is somebody else's work gone from a repository they
+	// cannot push to.
+	Owns func(name string, body []byte) bool
 }
 
 // Result is what happened.
@@ -298,6 +324,23 @@ func (w *Writer) commit(ctx context.Context, req Request, rolloutID string, at t
 		}
 		if _, err := tree.Add(full); err != nil {
 			return "", fmt.Errorf("staging %s: %w", full, err)
+		}
+	}
+
+	// And what the render stopped producing, of the files it is entitled to
+	// remove. After the writes rather than before, so that a render which
+	// renames a file — same object, new name — never has a moment where
+	// neither exists.
+	for name, body := range current {
+		if _, kept := files[name]; kept {
+			continue
+		}
+		if req.Owns == nil || !req.Owns(name, body) {
+			continue
+		}
+		full := path.Join(req.Target.Dir, name)
+		if _, err := tree.Remove(full); err != nil {
+			return "", fmt.Errorf("removing %s: %w", full, err)
 		}
 	}
 

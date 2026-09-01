@@ -34,6 +34,7 @@ package manifest
 
 import (
 	"fmt"
+	"strings"
 
 	"sigs.k8s.io/yaml"
 
@@ -48,6 +49,44 @@ import (
 // the filename means a rename has to move a file as well as a directory, with
 // a window where both exist and Argo CD applies both.
 const File = "workload.yaml"
+
+// FileFor is where an object other than the primary workload is written.
+//
+// The primary keeps File, which is a fixed name for the reason above; anything
+// beside it is named for what it is, because a directory holding six manifests
+// has to be readable by somebody running ls. Lower-cased kind and object name,
+// which are both already constrained to what a filename can hold: a Kubernetes
+// object name is a DNS label, and the kinds are this package's own.
+//
+// It never returns File. "workload.yaml" and "workload-<name>.yaml" cannot
+// collide, because an object name is never empty.
+func FileFor(kind, name string) string {
+	return strings.ToLower(kind) + "-" + name + ".yaml"
+}
+
+// Owns says whether a committed file is one this platform wrote.
+//
+// The test is the API group and not the filename. A name is a convention, and
+// the first rename or hand-edit makes a convention wrong in the direction that
+// costs the most: a file that is ours and does not look it is a file something
+// stops maintaining, and a file that looks ours and is not is a file something
+// deletes. What is actually decisive is in the content — this platform writes
+// its own resources and nothing else.
+//
+// Everything unreadable is somebody else's: a README, a kustomization, a
+// Secret, a file that is not YAML at all. That asymmetry is deliberate, because
+// the two mistakes are not the same size. Failing to recognise our own file
+// leaves a stale manifest in git where a person can see it; recognising
+// somebody else's as ours removes work from a repository they cannot push to.
+func Owns(body []byte) bool {
+	var head struct {
+		APIVersion string `json:"apiVersion"`
+	}
+	if err := yaml.Unmarshal(body, &head); err != nil {
+		return false
+	}
+	return head.APIVersion == platformv1alpha1.GroupVersion.String()
+}
 
 // Render produces the file to commit.
 //

@@ -111,13 +111,13 @@ jobs:
           terraform -chdir=terraform validate
 
       - name: Lint the API Dockerfile
-        uses: hadolint/hadolint-action@v3.4.0
+        uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: app/Dockerfile
           failure-threshold: warning
 
       - name: Lint the operator Dockerfile
-        uses: hadolint/hadolint-action@v3.4.0
+        uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: Dockerfile.operator
           failure-threshold: warning
@@ -170,6 +170,29 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: damga-operator:${{ env.IMAGE_TAG }}
+          format: table
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      # The control plane joined this job the same day it started being
+      # published. Before that it was built in the cluster job and thrown away
+      # with the cluster, so nothing left the machine unscanned. A published
+      # image that no gate has looked at is a different thing, and the two
+      # changes belong in the same commit rather than one push apart.
+      - name: Build the control plane image
+        run: docker build -f Dockerfile -t "damga-control-plane:${IMAGE_TAG}" .
+
+      - name: Control plane container must not run as root
+        run: |
+          uid=$(docker inspect "damga-control-plane:${IMAGE_TAG}" --format '{{.Config.User}}')
+          echo "control plane user: $uid"
+          case "$uid" in 0|root|""|0:*|root:*) echo "control plane image runs as root"; exit 1 ;; esac
+
+      - name: Scan the control plane image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: damga-control-plane:${{ env.IMAGE_TAG }}
           format: table
           exit-code: '1'
           severity: CRITICAL,HIGH
@@ -542,6 +565,121 @@ jobs:
           TOTAL=$(wc -l < /tmp/rollout.log)
           FAILED=$(grep -c DOWN /tmp/rollout.log || true)
           echo "requests through ingress: $TOTAL, failed: $FAILED"
+          [ "$FAILED" -eq 0 ]
+
+      # The control plane's own upgrade, and the honest version of the claim.
+      #
+      # The step above proves a tenant application rolls without dropping a
+      # request. This one does not claim the same about the control plane, and
+      # the reason is in cluster/control-plane.yaml: one replica, strategy
+      # Recreate, because the default DSN is SQLite on a ReadWriteOnce claim and
+      # two pods cannot both hold it. Recreate means the old pod is gone before
+      # the new one starts, so there is a gap by construction. It is measured
+      # and printed rather than asserted at zero — an assertion that has to pass
+      # against a known gap is either always red or written loosely enough to
+      # pass for the wrong reason, and this repository has paid for the second
+      # kind.
+      #
+      # What IS asserted is what an upgrade must not do to the person using the
+      # platform: disturb what is already deployed. That is not free of content
+      # just because the control plane is not in a tenant's request path —
+      # scripts/upgrade.sh re-applies config/crd/bases, and a change to a type
+      # reaches every Workload in the cluster through the operator. That is the
+      # path this step fails on.
+      - name: Upgrading the control plane must not disturb what is deployed
+        run: |
+          # A second tag on the image already loaded into the node. The bytes
+          # are identical on purpose: what is under test is the rollout, the
+          # volume it re-attaches and the applications beside it, not a code
+          # change. It costs no rebuild and still produces a real new
+          # ReplicaSet, because the pod template changed.
+          docker tag "damga-control-plane:${IMAGE_TAG}" damga-control-plane:upgrade-test
+          kind load docker-image damga-control-plane:upgrade-test --name ci
+
+          # An owner, so the upgrade has something to lose. The output is
+          # discarded because bootstrap prints a generated password once, and
+          # this job's log is not where that belongs.
+          kubectl -n damga-system exec deploy/damga -- \
+            /damga bootstrap -evidence-dsn /data/damga.db \
+            -email owner@example.test -tenant acme > /dev/null
+
+          # Two pollers. The tenant is measured through the ingress, the same
+          # path a user takes; the control plane is measured through its ready
+          # endpoints, which is what kube-proxy routes to and therefore what a
+          # caller experiences. Endpoints rather than a port-forward, because a
+          # port-forward binds to one pod and a Recreate kills the tunnel — the
+          # measurement would end exactly when it got interesting.
+          ( for _ in $(seq 1 200); do
+              if curl -sf -m 3 -H 'Host: app.local' http://localhost:8080/healthz >/dev/null
+              then echo OK; else echo DOWN; fi
+              sleep 0.2
+            done > /tmp/tenant.log ) &
+          TENANT=$!
+          ( for _ in $(seq 1 200); do
+              if [ -n "$(kubectl -n damga-system get endpoints damga \
+                           -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null)" ]
+              then echo "$(date +%s) UP"; else echo "$(date +%s) GAP"; fi
+            done > /tmp/cp.log ) &
+          CP=$!
+
+          # Redirected rather than piped through tee. This workflow sets no
+          # shell defaults, so a `run:` block is `bash -e` without pipefail —
+          # and `upgrade.sh | tee` would report tee's status, turning a failed
+          # upgrade into a passing step.
+          rc=0
+          ./scripts/upgrade.sh --image damga-control-plane:upgrade-test \
+            > /tmp/upgrade.out 2>&1 || rc=$?
+          cat /tmp/upgrade.out
+          wait $TENANT
+          wait $CP
+          [ "$rc" -eq 0 ] || { echo "upgrade.sh exited $rc"; exit "$rc"; }
+
+          TOTAL=$(wc -l < /tmp/tenant.log)
+          FAILED=$(grep -c DOWN /tmp/tenant.log || true)
+          echo "tenant requests through ingress during the upgrade: $TOTAL, failed: $FAILED"
+
+          SAMPLES=$(wc -l < /tmp/cp.log)
+          GAPS=$(grep -c ' GAP$' /tmp/cp.log || true)
+          if [ "$GAPS" -gt 0 ]; then
+            first=$(grep ' GAP$' /tmp/cp.log | head -1 | cut -d' ' -f1)
+            last=$(grep ' GAP$' /tmp/cp.log | tail -1 | cut -d' ' -f1)
+            # A lower bound: the timestamps have one-second resolution and the
+            # gap is bounded by samples taken outside it.
+            echo "control plane had no ready endpoint for >= $((last - first))s ($GAPS of $SAMPLES samples)"
+          else
+            echo "control plane never lost its endpoint across $SAMPLES samples"
+          fi
+
+          # An upgrade that changed nothing would pass every assertion below by
+          # never having rolled. upgrade.sh says so in those words, and this is
+          # the line that stops the step from proving the absence of an event.
+          if grep -q 'nothing moved' /tmp/upgrade.out; then
+            echo "the upgrade did not move the control plane, so nothing above was tested"
+            exit 1
+          fi
+
+          # The claim is the install: accounts, sessions, placements and every
+          # deploy record are one SQLite file on it. upgrade.sh refuses when it
+          # is replaced; this asserts the deployment came back on it.
+          kubectl -n damga-system get pvc damga-data \
+            -o jsonpath='{.status.phase}' | grep -q Bound
+
+          # And the file on it still has the owner in it. Bootstrap exits 3 for
+          # "this install already has an owner", which is the whole assertion:
+          # an upgrade that came back on an empty database would exit 0 here and
+          # look like a success, and every symptom of that arrives later as
+          # "my accounts are gone".
+          rc=0
+          kubectl -n damga-system exec deploy/damga -- \
+            /damga bootstrap -evidence-dsn /data/damga.db \
+            -email owner@example.test -tenant acme > /dev/null 2>&1 || rc=$?
+          [ "$rc" -eq 3 ] || {
+            echo "after the upgrade the control plane no longer knows its owner (bootstrap exited $rc, want 3)"
+            exit 1
+          }
+
+          [ -n "$(kubectl -n damga-system get endpoints damga \
+                    -o jsonpath='{.subsets[*].addresses[*].ip}')" ]
           [ "$FAILED" -eq 0 ]
 
       # The rehearsal reran as a post-upgrade hook, and by now the smoke test has
@@ -1086,14 +1224,42 @@ jobs:
           provenance: true
           sbom: true
 
+      # The control plane, from the Dockerfile at the repository root.
+      #
+      # It is the one image this pipeline built and never published, and the
+      # gap survived because of how it is exercised: the e2e job builds it into
+      # kind and overrides the Deployment's image field, so nothing here ever
+      # pulled the reference cluster/control-plane.yaml names. On a real server
+      # that reference was ImagePullBackOff while the manifest looked correct.
+      # An installation that cannot pull its own control plane cannot be
+      # upgraded, which made this the last item in the mandatory block.
+      - name: Build the control plane image
+        id: control_plane
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.IMAGE_NAME }}-control-plane,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=control-plane-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=control-plane-${{ matrix.arch }}
+          provenance: true
+          sbom: true
+
       # A matrix job cannot return an output: every leg writes to the same key
       # and the last one to finish wins. The digests travel as files instead.
+      #
+      # The key is control_plane and not control-plane on purpose: it becomes a
+      # step output name below, and `steps.assemble.outputs.control-plane_digest`
+      # is parsed by the expression language as a subtraction.
       - name: Record the digests for assembly
         env:
           API_DIGEST: ${{ steps.api.outputs.digest }}
           OPERATOR_DIGEST: ${{ steps.operator.outputs.digest }}
+          CONTROL_PLANE_DIGEST: ${{ steps.control_plane.outputs.digest }}
         run: |
-          for pair in "api:${API_DIGEST}" "operator:${OPERATOR_DIGEST}"; do
+          for pair in "api:${API_DIGEST}" "operator:${OPERATOR_DIGEST}" \
+                      "control_plane:${CONTROL_PLANE_DIGEST}"; do
             name="${pair%%:*}"
             digest="${pair#*:}"
             [ -n "$digest" ] || { echo "$name: the build reported no digest"; exit 1; }
@@ -1151,7 +1317,8 @@ jobs:
         id: assemble
         working-directory: ${{ runner.temp }}/digests
         run: |
-          for pair in "api:${IMAGE_NAME}" "operator:${IMAGE_NAME}-operator"; do
+          for pair in "api:${IMAGE_NAME}" "operator:${IMAGE_NAME}-operator" \
+                      "control_plane:${IMAGE_NAME}-control-plane"; do
             name="${pair%%:*}"
             repo="${pair#*:}"
 
@@ -1191,11 +1358,14 @@ jobs:
         run: |
           cosign sign --recursive "${IMAGE_NAME}@${{ steps.assemble.outputs.api_digest }}"
           cosign sign --recursive "${IMAGE_NAME}-operator@${{ steps.assemble.outputs.operator_digest }}"
+          cosign sign --recursive \
+            "${IMAGE_NAME}-control-plane@${{ steps.assemble.outputs.control_plane_digest }}"
 
       - name: Verify the signatures the way the cluster will
         run: |
           for ref in "${IMAGE_NAME}@${{ steps.assemble.outputs.api_digest }}" \
-                     "${IMAGE_NAME}-operator@${{ steps.assemble.outputs.operator_digest }}"; do
+                     "${IMAGE_NAME}-operator@${{ steps.assemble.outputs.operator_digest }}" \
+                     "${IMAGE_NAME}-control-plane@${{ steps.assemble.outputs.control_plane_digest }}"; do
             repo="${ref%@*}"
             # The index, plus every platform a cluster could resolve to. Verifying
             # only the index would re-check the exact digest the step above signed,

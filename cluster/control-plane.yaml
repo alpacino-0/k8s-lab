@@ -160,6 +160,15 @@ spec:
   # ReadWriteOnce claim — two pods cannot both mount it and a rolling update
   # would wait on a volume the old pod still holds. An install that points
   # -evidence-dsn at PostgreSQL can raise this; nothing here assumes it has.
+  #
+  # What that costs, measured rather than reasoned about: an upgrade leaves the
+  # Service with no ready endpoint for about a second. Two runs on a single-node
+  # kind cluster (Kubernetes v1.36.1, 2026-09-01), polling endpoints every ~30 ms
+  # across the whole rollout: 25 samples of 400 and 35 of 125, each one unbroken
+  # run — 0.9 s and 1.1 s. A busier machine, a slower volume or a database large
+  # enough for a migration to take time all make it longer and none was tried.
+  # The panel and the API are unavailable for that second; nothing already
+  # deployed is, because this is not in a tenant's request path.
   strategy:
     type: Recreate
   selector:
@@ -180,20 +189,44 @@ spec:
           type: RuntimeDefault
       containers:
         - name: damga
-          # No published image yet, and this line says so rather than pointing
-          # at one that does not exist.
+          # A tag today, and a digest is where this line is going.
           #
-          # It named ghcr.io/damgahq/damga-control-plane:latest first, which CI
-          # never noticed because the e2e job builds the image into kind itself
-          # and overrides this field. On a real server it would have been
-          # ImagePullBackOff, and the manifest would have looked correct.
-          # Found by the session writing the installer, which had to run this on
-          # something other than kind.
+          # The history is worth keeping because it is how the gap survived: it
+          # said :latest first, and CI never noticed, because the e2e job builds
+          # the image into kind and overrides this field. On a real server it
+          # was ImagePullBackOff while the manifest looked correct. Then it said
+          # :unpublished, which was true — the publish job built the reference
+          # tenant and the operator and no third image. It builds this one now.
           #
-          # Until the publish job builds it, an install supplies its own:
-          #   kubectl -n damga-system set image deployment/damga damga=<ref>
-          # scripts/install.sh takes --control-plane-image for exactly this.
-          image: ghcr.io/damgahq/damga-control-plane:unpublished
+          # Why a digest is the destination is written out at length in
+          # gitops/operator.yaml and gitops/application.yaml, and the argument
+          # transfers whole: CI republishes :1.0.0, :latest and the commit sha
+          # on every push to main, so :1.0.0 means "whatever is there today" as
+          # surely as :latest does, and git naming exactly what runs is the
+          # claim this repository is built to make.
+          #
+          # Two things are true here that are not true there, one in each
+          # direction.
+          #
+          # Worse: those two are reconciled continuously, so a tag that has
+          # moved is at least visible as drift. This file is applied by kubectl,
+          # and `kubectl apply` of an unchanged pod template is a no-op — a new
+          # version published under the same tag produces no rollout and the
+          # apply reports success. Worse still, a tag other than :latest
+          # defaults to imagePullPolicy: IfNotPresent, so a node that pulled
+          # :1.0.0 last week keeps running last week's bytes while this line
+          # says the same thing it always said. scripts/upgrade.sh prints the
+          # running imageID for exactly this reason, and says "nothing moved"
+          # rather than reporting a successful upgrade.
+          #
+          # Better: the digest cannot be written until the image exists, and
+          # this is the commit that starts publishing it. The other two files
+          # carry the same one-commit lag and call it "a release bumps this
+          # line". The first publish makes this a digest; until then :1.0.0 is
+          # the only reference that is both real and honest, and an install that
+          # builds its own passes scripts/install.sh --control-plane-image or
+          # scripts/upgrade.sh --image.
+          image: ghcr.io/damgahq/damga-control-plane:1.0.0
           args:
             - -listen-address=0.0.0.0:8080
             - -evidence-dsn=/data/damga.db

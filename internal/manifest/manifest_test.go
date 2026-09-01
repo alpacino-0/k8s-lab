@@ -146,3 +146,54 @@ func TestWhatIsNotAWorkloadIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// Ownership is decided by what is in the file, because the alternative is a
+// filename convention and the first rename makes a convention wrong in the
+// expensive direction: a file that is ours and does not look it stops being
+// maintained, and a file that looks ours and is not gets deleted.
+func TestOwnsRecognisesThisPlatformsFilesAndNothingElse(t *testing.T) {
+	rendered, err := manifest.Render(platformv1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: appName, Namespace: namespace},
+		Spec:       platformv1alpha1.WorkloadSpec{Image: "ghcr.io/acme/api@sha256:" + strings.Repeat("a", 64)},
+	}, "r-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !manifest.Owns(rendered) {
+		t.Fatal("a file this package rendered is not recognised as this platform's, so a " +
+			"render that stops producing it could never remove it")
+	}
+
+	for name, body := range map[string]string{
+		"a kustomization":     "resources:\n  - workload.yaml\n",
+		"somebody's Secret":   "apiVersion: v1\nkind: Secret\nmetadata:\n  name: s\n",
+		"another operator's":  "apiVersion: kyverno.io/v1\nkind: ClusterPolicy\n",
+		"a README":            "# state\n\nthis directory is managed by damga\n",
+		"not YAML at all":     "\x00\x01binary\n",
+		"YAML that is a list": "- one\n- two\n",
+		"empty":               "",
+	} {
+		if manifest.Owns([]byte(body)) {
+			t.Errorf("%s was claimed as this platform's; claiming somebody else's file "+
+				"removes work from a repository they cannot push to", name)
+		}
+	}
+}
+
+// The primary keeps its fixed name and everything beside it is named for what
+// it is, so a directory holding six manifests is readable by somebody running
+// ls — and so nothing can take the name every deploy reads and rewrites.
+func TestFileForNamesAnObjectWithoutTakingThePrimarysName(t *testing.T) {
+	for _, tc := range []struct{ kind, name, want string }{
+		{"Workload", "worker", "workload-worker.yaml"},
+		{"Database", "db", "database-db.yaml"},
+	} {
+		if got := manifest.FileFor(tc.kind, tc.name); got != tc.want {
+			t.Errorf("FileFor(%q, %q) = %q, want %q", tc.kind, tc.name, got, tc.want)
+		}
+	}
+	if got := manifest.FileFor("Workload", "worker"); got == manifest.File {
+		t.Fatalf("a second object took the primary manifest's name (%q), which is the one "+
+			"file every deploy reads and rewrites", got)
+	}
+}
