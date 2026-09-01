@@ -110,6 +110,16 @@ type Config struct {
 	// and not a field the control plane holds.
 	Registry string
 
+	// CatalogDir is the directory the one-click templates are read from.
+	//
+	// A directory rather than a bundle built into the binary, and the reason is
+	// the update path: the upstream corpus changes weekly and damga does not,
+	// so an embedded catalogue makes adding one application a release of the
+	// control plane. A directory is what a ConfigMap or a mounted volume
+	// already is. Empty means this install offers no catalogue at all, and the
+	// endpoints say so rather than answering an empty list.
+	CatalogDir string
+
 	// GitTokenFile is the path to a file holding the token damga pushes with.
 	//
 	// A file and not a flag value or an environment variable. A flag is in the
@@ -148,6 +158,8 @@ func (c *Config) BindFlags(f *flag.FlagSet) {
 		"how long a login lasts")
 	f.StringVar(&c.Registry, "registry", defaultRegistry,
 		"registry a build pushes to when the request does not name an image")
+	f.StringVar(&c.CatalogDir, "catalog-dir", "",
+		"directory holding the one-click catalogue templates; empty offers no catalogue")
 	f.StringVar(&c.GitTokenFile, "git-token-file", "",
 		"file holding the token damga pushes tenant repositories with")
 	f.BoolVar(&c.SecureCookies, "secure-cookies", false,
@@ -219,6 +231,13 @@ type Options struct {
 	// platform rather than as an install that cannot do this yet. See
 	// createBuild.
 	Builds BuildCreator
+
+	// Catalog is the list of applications that install with one click. nil
+	// falls back to Config.CatalogDir, and with neither the catalogue
+	// endpoints answer 503 naming the flag — which is what an install with no
+	// templates mounted should say, rather than offering an empty list that
+	// reads as a filter matching nothing.
+	Catalog CatalogSource
 
 	// GitAuth answers how to authenticate to a repository. nil means the
 	// free build's answer, built from Config.GitTokenFile — and with no token

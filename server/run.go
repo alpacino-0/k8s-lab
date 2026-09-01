@@ -205,8 +205,11 @@ type stores struct {
 	// the deliberate exclusion above, a registry host cannot answer who is
 	// asking.
 	registry string
-	writer   *gitwrite.Writer
-	gitAuth  GitAuth
+	// catalog is nil on an install with no templates mounted, which the two
+	// endpoints that read it answer 503 for rather than pretending to.
+	catalog CatalogSource
+	writer  *gitwrite.Writer
+	gitAuth GitAuth
 }
 
 // tenantRoutes is every endpoint under tenantScope.
@@ -232,6 +235,14 @@ var tenantRoutes = []struct {
 	// the reason that is not a breach of Principle 1: a build stands in front of
 	// the write path, producing a digest that a later commit carries.
 	{http.MethodPost, "/apps/{app}/builds", createBuild},
+	// Install-wide and identical for every tenant, and in the tenant scope
+	// anyway: the scope is what puts a route inside the test that walks this
+	// table, and the alternative is a new unauthenticated surface.
+	{http.MethodGet, "/catalog", catalogList},
+	// Registers the app and commits its manifest in one request, which is what
+	// makes it one button. It refuses far more than it accepts today and says
+	// which of three limits stopped it; see whyRefused.
+	{http.MethodPost, "/apps/{app}/envs/{env}/from-catalog", installFromCatalog},
 	{http.MethodGet, "/apps/{app}/envs/{env}/evidence", currentEvidence},
 	{http.MethodGet, "/apps/{app}/envs/{env}/history", history},
 	{http.MethodGet, "/apps/{app}/envs/{env}/verify", verify},
@@ -275,10 +286,15 @@ func (o Options) handler(store evidence.Store, idStore identity.Store) (http.Han
 	// refuses an anonymous caller and a caller from another tenant — which
 	// means the fifth endpoint is covered by being added to the table, not by
 	// whoever adds it remembering to write the test.
+	cat, err := o.catalogSource()
+	if err != nil {
+		return nil, err
+	}
+
 	g := guard{authorizer: o.Authorizer, identity: idStore, sessions: sess}
 	st := stores{
 		evidence: store, placement: o.Placement,
-		backups: o.Backups, builds: o.Builds, registry: o.Config.Registry,
+		backups: o.Backups, builds: o.Builds, registry: o.Config.Registry, catalog: cat,
 		writer: &gitwrite.Writer{Evidence: store}, gitAuth: o.GitAuth,
 	}
 	for _, rt := range tenantRoutes {
