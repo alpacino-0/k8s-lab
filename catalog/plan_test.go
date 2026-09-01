@@ -55,7 +55,11 @@ func loadOne(t *testing.T, name, body string) *catalog.Catalog {
 // per key and the task runner authenticates against the broker with a secret
 // the broker has never seen.
 //
-// 111 of the 369 templates that parse share a source between two services.
+// 64 of the 369 templates that parse share a source between two services, and
+// 111 do once a service that became a Database is counted as one of them —
+// those are the ones whose value must not be minted at all. Both are computed
+// by compose.TestTheCorpusCountsBehindTheDocComments; this said 111 while
+// meaning the first of the two.
 func TestOneValueIsMintedPerSourceNotPerKey(t *testing.T) {
 	p := planOf(t, corpus(t), "n8n", catalog.Options{})
 
