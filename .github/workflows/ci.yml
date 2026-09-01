@@ -927,12 +927,23 @@ jobs:
           api "$metrics" > /tmp/metrics-after.json
           python3 /tmp/check-after.py /tmp/metrics-after.json
 
-          # Removed again, so the steps after this one see the cluster they were
-          # written against. Nothing here is asserting on the HPA, and an
-          # autoscaler that suddenly has metrics is a change to somebody else's
-          # step rather than to this one.
+          # metrics-server is removed again, so the steps after this one see the
+          # cluster they were written against. Nothing here asserts on the HPA,
+          # and an autoscaler that suddenly has metrics is a change to somebody
+          # else's step rather than to this one.
+          #
+          # ci-probe is NOT removed, and this line used to remove it. The
+          # sentence above was right and the action under it was backwards: the
+          # steps after this one were written against a cluster where ci-probe
+          # exists. Two of them read it — the hardening check reads its pod, and
+          # the deletion check deletes it and asserts on what is left. That last
+          # one is where it surfaced, with `workloads.platform.damga.co
+          # "ci-probe" not found`, one step after the one that reads its pod
+          # passed only because the pod was still terminating.
+          #
+          # This step borrows ci-probe; it does not own it. What it creates is a
+          # placement, and there is no Argo CD here to turn that into anything.
           helm uninstall metrics-server -n kube-system >/dev/null
-          kubectl -n damga delete workload ci-probe >/dev/null 2>&1 || true
 
       # Reading the rendered pod back rather than the operator's own source. The
       # unit tests already prove the renderer intends this; this proves the API
