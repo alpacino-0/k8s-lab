@@ -275,11 +275,24 @@ jobs:
         # bug was suspected of being version drift, and ruling that out meant
         # digging the node image out of three separate run logs to prove all
         # three had been identical.
+        #
+        # The kind CLI is pinned for the same reason, and it was not until it
+        # broke: the action's own default is v0.31.0, which reads containerd
+        # config versions 2 and 3. A v1.36 node image ships version 4, so
+        # `kind load docker-image` failed with "unknown containerd config
+        # version: 4" before a single assertion ran. That was the tool, not the
+        # platform — worth saying, because the run looked like Kubernetes 1.36
+        # rejecting this operator and it was the loader refusing to read a file.
+        #
+        # v1.36.4 rather than v1.36.1 because it is the image kind v0.33.0 ships
+        # and tests against; pinning a CLI to a node image it never saw is the
+        # same drift this comment exists to prevent, pointed the other way.
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           cluster_name: ci
           config: kind-config.yaml
-          node_image: kindest/node:v1.36.1
+          version: v0.33.0
+          node_image: kindest/node:v1.36.4
 
       # Applied first, so the release has to satisfy them rather than being
       # grandfathered in — and so the API server has picked the bindings up
