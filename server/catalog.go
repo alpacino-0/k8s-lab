@@ -282,11 +282,22 @@ func installFromCatalog(g guard, st stores) http.Handler {
 			}
 			opts.VolumeSize = size
 		}
-		// Options.Pin is filled from the config, and it is the largest single
-		// reason an entry is refused below. What fills it is a registry client
-		// in registry/; that it arrives through a seam rather than being
-		// constructed here is what let the resolver be written and measured
-		// separately from the endpoint that needs it.
+		// Options.Pin is filled unless Config.NoImagePinning turned it off, and
+		// it is the largest single reason an entry is refused below. What fills
+		// it is the registry client in registry/; that it arrives through a
+		// seam is what let the resolver be written and measured apart from the
+		// endpoint that needs it.
+		//
+		// Only the images the API would refuse reach it, so an install against
+		// an unreachable registry loses the entries a resolver would have
+		// rescued and keeps every one that did not need rescuing.
+		//
+		// No count is quoted here on purpose. Two were, from two rounds, and
+		// they disagreed because they were measured at different layers:
+		// Plan.Installable() counts what the planner accepts, and this handler
+		// refuses more than the planner does. The measurements and which layer
+		// each belongs to are in catalog/plan.go and in the commits that took
+		// them.
 		//
 		// The numbers this paragraph used to carry moved to catalog/plan.go,
 		// because two of them were measured at different layers and disagreed:

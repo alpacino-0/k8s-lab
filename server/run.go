@@ -422,7 +422,7 @@ func (o Options) withDefaults() Options {
 	if o.Config.ShutdownTimeout == 0 {
 		o.Config.ShutdownTimeout = 15 * time.Second
 	}
-	if o.Pin == nil && o.Config.PinImages {
+	if o.Pin == nil && !o.Config.NoImagePinning {
 		// One resolver for the process, because its cache is what stops a
 		// catalogue page of templates that all name postgres from being
 		// hundreds of round trips for one answer.

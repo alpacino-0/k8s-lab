@@ -252,13 +252,27 @@ func ownedByDatabase(want, owned []compose.Source) []string {
 	return out
 }
 
-// pinImages runs every image past Pin, and blocks the ones the Workload API
-// would refuse.
+// pinImages resolves the images the Workload API would refuse, and blocks the
+// ones that are still refused afterwards.
 //
 // The rule is restated here rather than left to admission. An entry whose image
 // the API rejects is an entry that is offered, clicked, committed, and then
 // fails somewhere the user is not looking — and the catalogue knew before the
 // click.
+//
+// Only the refused ones, and that is the whole shape of it. This ran Pin over
+// every image first, which made installing anything depend on a registry
+// answering: an entry naming an explicit tag installs today with Pin empty, and
+// with a resolver in place it stopped installing whenever the registry was
+// unreachable or rate limiting. Measured against the upstream corpus of 371
+// files, 341 offered, 119 install with Pin empty — those 119 are exactly the
+// ones a resolver must not be able to take away.
+//
+// The cost is that an explicit tag is left as a tag. `postgres:16.1` is
+// something the API accepts and something that can still be re-pushed, so this
+// is a rescue for references the platform would otherwise refuse rather than a
+// provenance pass over all of them. Pinning everything is a stronger claim and
+// a different decision; it is not this one.
 func (p *Plan) pinImages(pin func(string) (string, error)) {
 	images := make([]*string, 0, len(p.Workloads)+len(p.Databases))
 	objects := make([]string, 0, cap(images))
@@ -271,24 +285,38 @@ func (p *Plan) pinImages(pin func(string) (string, error)) {
 		objects = append(objects, p.Databases[i].Name)
 	}
 
+	refuse := func(i int, detail string) {
+		p.Blockers = append(p.Blockers, Blocker{
+			Object: objects[i], Field: "image", Detail: detail,
+		})
+	}
 	for i, image := range images {
-		if pin != nil {
-			resolved, err := pin(*image)
-			if err != nil {
-				p.Blockers = append(p.Blockers, Blocker{
-					Object: objects[i], Field: "image",
-					Detail: fmt.Sprintf("%s could not be resolved: %v", *image, err),
-				})
-				continue
-			}
-			*image = resolved
+		reason, ok := refusedImage(*image)
+		if ok {
+			// Already something the API takes. Left alone on purpose; see above.
+			continue
 		}
-		if reason, ok := refusedImage(*image); !ok {
-			p.Blockers = append(p.Blockers, Blocker{
-				Object: objects[i], Field: "image",
-				Detail: fmt.Sprintf("%s %s, and the API refuses it: a rollback to a tag that moved "+
-					"restores something other than what was rolled back from", *image, reason),
-			})
+		refusal := fmt.Sprintf("%s %s, and the API refuses it: a rollback to a tag that moved "+
+			"restores something other than what was rolled back from", *image, reason)
+		if pin == nil {
+			refuse(i, refusal)
+			continue
+		}
+
+		resolved, err := pin(*image)
+		if err != nil {
+			// The registry's own words, because they are the difference
+			// between an image nobody published, a rate limit that goes away
+			// by waiting, and a repository that needs a credential.
+			refuse(i, fmt.Sprintf("%s could not be resolved: %v", *image, err))
+			continue
+		}
+		*image = resolved
+		if _, ok := refusedImage(*image); !ok {
+			// A resolver that answered without fixing anything — one that
+			// hands the reference back unchanged, say. Blocked rather than
+			// trusted: the check is on the value that would be committed.
+			refuse(i, refusal)
 		}
 	}
 }

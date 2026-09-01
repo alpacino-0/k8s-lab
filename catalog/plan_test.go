@@ -282,26 +282,77 @@ func TestPinTurnsARefusedImageIntoAnInstallableOne(t *testing.T) {
 
 // A registry that cannot answer blocks the one image it could not resolve and
 // names it, rather than failing the whole entry with nothing to act on.
+//
+// Both images are ones the API refuses, because only those are resolved at all.
+// They were explicit tags when this case was written, and it kept passing after
+// the rule changed for a reason that had stopped being true: the resolver was
+// never consulted and the entry was installable, so a blocker count of one
+// became a blocker count of zero.
 func TestAnImageThatCannotBeResolvedNamesItself(t *testing.T) {
 	c := loadOne(t, "e", `
 services:
   app:
-    image: example/app:1.0
+    image: example/app:latest
   side:
-    image: example/side:1.0
+    image: example/side:latest
 `)
 	p := planOf(t, c, "e", catalog.Options{Pin: func(image string) (string, error) {
 		if strings.Contains(image, "side") {
 			return "", fmt.Errorf("no such repository")
 		}
-		return image, nil
+		return image + "@sha256:" + strings.Repeat("b", 64), nil
 	}})
 
 	if len(p.Blockers) != 1 {
 		t.Fatalf("blockers = %v, want the one image that failed", p.Blockers)
 	}
-	if !strings.Contains(p.Blockers[0].String(), "example/side:1.0") {
+	if !strings.Contains(p.Blockers[0].String(), "example/side:latest") {
 		t.Errorf("blocker = %q, want it to name the image", p.Blockers[0])
+	}
+}
+
+// An image the API already takes is never sent to the resolver.
+//
+// This is what lets pinning be on by default. Resolving everything made a
+// registry that is unreachable, or rate limiting, into a reason that an entry
+// naming an explicit tag — one of the 119 that install with no resolver at all
+// — stopped installing. A resolver may rescue an entry and it may not take one
+// away.
+func TestAnAcceptableImageIsNeverSentToTheResolver(t *testing.T) {
+	c := loadOne(t, "e", `
+services:
+  app:
+    image: example/app:1.2.3
+  side:
+    image: example/side@sha256:`+strings.Repeat("c", 64)+`
+`)
+	var asked []string
+	p := planOf(t, c, "e", catalog.Options{Pin: func(image string) (string, error) {
+		asked = append(asked, image)
+		return "", fmt.Errorf("the registry is unreachable")
+	}})
+
+	if len(asked) != 0 {
+		t.Errorf("the resolver was asked about %v, which the API already accepts", asked)
+	}
+	if !p.Installable() {
+		t.Fatalf("an entry that installs without a resolver stopped installing with one: %v",
+			p.Blockers)
+	}
+}
+
+// A resolver that answers without fixing anything is not believed. The check is
+// on the value that would be committed, not on the fact that a call returned.
+func TestAResolverThatChangesNothingStillBlocks(t *testing.T) {
+	c := loadOne(t, "e", "services:\n  app:\n    image: example/app:latest\n")
+	p := planOf(t, c, "e", catalog.Options{Pin: func(image string) (string, error) {
+		return image, nil
+	}})
+	if p.Installable() {
+		t.Fatal("a resolver that handed the tag back left the entry installable")
+	}
+	if !strings.Contains(p.Blockers[0].String(), ":latest") {
+		t.Errorf("blocker = %q, want it to name the tag", p.Blockers[0])
 	}
 }
 
