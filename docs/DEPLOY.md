@@ -18,7 +18,7 @@ public address yet.
 | Domain | A record pointing at the server's IP. A subdomain is fine |
 | Tools | `kubectl`, `helm`, `openssl`, `sed`. On the server, if you use `scripts/install.sh`; on your own machine if you follow the sections by hand |
 | This repository | checked out **on the server**. Every manifest and the chart are applied from it, and `scripts/install.sh` lives in it |
-| Images | Published: `ghcr.io/damgahq/damga` (the reference tenant) and `ghcr.io/damgahq/damga-operator`, public, amd64 + arm64. **Not published:** `ghcr.io/damgahq/damga-control-plane`, which section 9 names — build that one yourself for now. If you fork this and publish your own, note that a new organisation's GHCR packages start private and the visibility has to be flipped once by hand |
+| Images | Published: `ghcr.io/damgahq/damga` (the reference tenant), `ghcr.io/damgahq/damga-operator` and `ghcr.io/damgahq/damga-control-plane`, public, amd64 + arm64, each signed with keyless cosign. If you fork this and publish your own, note that a new organisation's GHCR packages start private and the visibility has to be flipped once by hand |
 
 ---
 
@@ -54,7 +54,7 @@ with a message saying which way round they go.
 | `--issuer letsencrypt-prod` | the default is `letsencrypt-staging`, deliberately: rehearse against the server that does not rate-limit failures |
 | `--skip-k3s` | k3s is already there, or the kubeconfig points elsewhere |
 | `--skip-node-config` | do not write the containerd redirect or restart k3s |
-| `--control-plane-image <ref>` | see section 9; the manifest's default is not published yet |
+| `--control-plane-image <ref>` | run a control plane you built yourself instead of the published one |
 | `--skip-control-plane` | the platform and the reference tenant only |
 
 > **What was measured.** The dry run, the order it emits, that it never prints a
@@ -337,20 +337,28 @@ reference tenant the previous section deployed. The manifest carries a
 ServiceAccount whose identity is deliberately lopsided: cluster-wide reads, one
 namespace it may create a `Build` in, and no delete anywhere.
 
-> **This will not pull yet, and that is a fact about this repository rather than
-> about your server.** `cluster/control-plane.yaml` names
-> `ghcr.io/damgahq/damga-control-plane:latest`. The publish job builds two
-> images — `ghcr.io/damgahq/damga`, the reference tenant, and
-> `ghcr.io/damgahq/damga-operator` — and no third. CI exercises the control
-> plane by building it into a kind cluster, which is why nothing has caught it.
-> Until that image is published, build it from the `Dockerfile` at the
-> repository root, push it somewhere this cluster can reach, and name it:
+> **Read the image line before you rely on it.** For most of this repository's
+> life `cluster/control-plane.yaml` named an image nothing published — first
+> `:latest`, then `:unpublished` — and it survived because CI builds the control
+> plane into a kind cluster and overrides the field, so no step here ever pulled
+> the reference. The publish job builds it now, and the manifest names
+> `ghcr.io/damgahq/damga-control-plane:1.0.0`.
 >
-> ```bash
-> ./scripts/install.sh ... --control-plane-image ghcr.io/you/damga-control-plane:1
-> ```
+> That tag is republished on every push to `main`, so it means "whatever is
+> there today". Two consequences, both of which matter more here than they do
+> for the Argo CD sources in `gitops/`, which at least show drift:
 >
-> By hand, that is one command after the apply above:
+> - `imagePullPolicy` defaults to `IfNotPresent` for a tag other than `:latest`,
+>   so a node that pulled `:1.0.0` last week keeps running last week's bytes
+>   while this line says what it always said. `scripts/upgrade.sh` prints the
+>   running `imageID`, which is the only field that can tell you.
+> - `kubectl apply` of an unchanged pod template is a no-op. A new version under
+>   the same tag produces no rollout, and the apply reports success.
+>
+> Pin a digest — `...@sha256:...` — in any install you intend to keep, and see
+> the comment on that line for why the manifest does not carry one yet.
+>
+> To run one you built yourself, pass `--control-plane-image`, or by hand:
 >
 > ```bash
 > kubectl -n damga-system set image deployment/damga \
@@ -445,6 +453,87 @@ Two things worth knowing before the first run:
 
 ---
 
+## 12. Upgrading
+
+```bash
+git pull
+./scripts/upgrade.sh
+```
+
+That is the whole upgrade path, and it is deliberately much smaller than the
+install. It re-applies the two things on this page that carry this repository's
+own code — the types from section 5 and the control plane from section 9 — in
+that order, waits for the rollout, and prints what moved. k3s, the ingress
+controller, cert-manager and the image store are not touched: re-applying them
+to move one Deployment forward is how an upgrade acquires failure modes it did
+not need.
+
+`DRY_RUN=1 ./scripts/upgrade.sh` prints the two commands and changes nothing.
+
+The reference tenant is not upgraded here either, and that is the product
+working rather than a gap: an application moves to a new image through the
+deploy path — a commit, then Argo CD.
+
+Three things the script does that a bare `kubectl apply` does not:
+
+- **It says when nothing moved.** An apply of an unchanged pod template is a
+  no-op and a rollout status against an unchanged Deployment succeeds
+  immediately. Both report success. If the image and the running digest are the
+  same afterwards as before, this says so and names the likely reason — a tag
+  that has not changed.
+- **It refuses if the data volume was replaced.** Accounts, sessions,
+  placements and every deploy record are one SQLite file on `damga-data`. An
+  upgrade that comes back on a new claim has installed a second, empty platform
+  wearing the first one's name, and every symptom of that shows up later as
+  "my apps are gone".
+- **It substitutes `--image` into the manifest instead of patching after the
+  apply.** With `strategy: Recreate` the old pod is gone before a replacement
+  that cannot be pulled fails, so a correction applied afterwards arrives after
+  an outage the upgrade did not require.
+
+### What is, and is not, zero-downtime
+
+The control plane runs **one replica with `strategy: Recreate`**, because the
+default `-evidence-dsn` is SQLite on a `ReadWriteOnce` claim and two pods cannot
+both hold it. So its own upgrade has a gap, by construction. An install that
+points `-evidence-dsn` at PostgreSQL can raise the replica count and change the
+strategy; nothing on this page assumes it has.
+
+What does not have a gap is **everything already deployed**. The control plane
+is not in the request path of a tenant application, and CI asserts it: while the
+control plane is upgraded, the reference tenant is polled through the ingress
+and every request must succeed. That assertion has content — the upgrade also
+re-applies the CRDs, and a change to a type reaches every `Workload` through the
+operator.
+
+> **What was measured.** Two upgrades on a single-node kind cluster
+> (Kubernetes v1.36.1), 2026-09-01, polling the control plane's ready endpoints
+> as fast as `kubectl` answers — about 30 ms a sample:
+>
+> | | samples with no ready endpoint | ≈ |
+> |---|---|---|
+> | upgrade 1 | 25 of 400 over 14.7 s | 0.9 s |
+> | upgrade 2 | 35 of 125 over 3.8 s | 1.1 s |
+>
+> Both gaps were one unbroken run, so this is a real outage of about a second
+> and not sampling noise. **Not measured:** the same upgrade on a busier machine,
+> on a slower volume, or with a database large enough for a migration to take
+> time — all three make it longer, and none of them was tried.
+>
+> Measured in the same runs: an owner created before the upgrade was still there
+> after it. `damga bootstrap` exits `3` for *"this install already has an
+> owner"*, and it did — which is what says the volume came back rather than
+> being replaced by an empty one.
+>
+> CI's *"Upgrading the control plane must not disturb what is deployed"* step
+> re-measures all of it on every run, and asserts two of the three: zero failed
+> tenant requests, and the owner still known. The control plane's own gap is
+> **printed rather than asserted**, because an assertion that has to pass
+> against a known gap is either always red or written loosely enough to pass for
+> the wrong reason.
+
+---
+
 ## What this page does not install
 
 Named here rather than discovered on the machine.
@@ -492,7 +581,7 @@ second node appears. No redeploy.
 | Domain | ~€10-15/year |
 | Image store | A 10Gi claim, swept nightly, ten builds of each application kept. Raise it before adding applications rather than after |
 | Backups | Written to a volume **on the same cluster** — fine for a demo, not a backup strategy. Copy them off the machine if the data ever matters |
-| Updates | Dependabot opens the pull requests; CI proves them; you merge |
+| Updates | Dependabot opens the pull requests; CI proves them; you merge. Moving this install onto a merged version is `git pull && ./scripts/upgrade.sh` — section 12, and about a second with the panel unavailable |
 | Certificate | cert-manager renews automatically. It emails you if renewal fails |
 
 ## Teardown
