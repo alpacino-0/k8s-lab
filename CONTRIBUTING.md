@@ -114,6 +114,16 @@ duration, a count, or a rate, it came from a run. Say where it came from.
 fails with its own message when the fix is reverted — a test satisfied for the
 wrong reason keeps passing after the guard it was written for is gone.
 
+**A Go test that runs a shell script must also read it.** `go test` caches a
+result and invalidates it when a file the test *opened* changes. A script the
+test only executes was never opened, so editing it and rerunning the gate
+replays the previous verdict. Measured here: a guard was deleted from
+`link-docs.sh`, `go test ./scripts/` answered `ok (cached)`, and `-count=1` on
+the same tree failed. The test existed and caught the mutation; the cache did
+not run it. Cache inputs are collected per package but protection is per file —
+in that same package `install.sh` was safe, because `install_test.go` reads it.
+Add an `os.ReadFile` of the script, and the gate sees edits to it.
+
 **Commit messages** are lowercase, describe the change, and say why in the body
 when the why is not obvious. `git log` is the record of reasoning.
 
