@@ -1005,6 +1005,77 @@ jobs:
 
           kubectl -n damga delete workload ci-gotify
 
+      # The half of the fence nothing had ever tested, and docs/PLAN.md is the
+      # reason to test it: it says the NetworkPolicy has to be relaxed in phase A
+      # because catalogue applications need to reach the internet. Measured on a
+      # real cluster, they already can — the operator's egress rule is
+      # 0.0.0.0/0 minus link-local, so the relaxation that document asks for is
+      # for a direction that is not blocked.
+      #
+      # What is blocked is east-west: the ingress rule admits the ingress-nginx
+      # namespace and nothing else, so one workload of a multi-service entry
+      # cannot reach another. That is a defect rather than a property, so it is
+      # written down in docs and not frozen into a gate here.
+      #
+      # This brings its own Workload rather than using ci-gotify, which the step
+      # above deletes. Only its NetworkPolicy is needed: the probe carries the
+      # selector labels, so the same policy selects it.
+      - name: A catalogue application can reach the internet
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: platform.damga.co/v1alpha1
+          kind: Workload
+          metadata:
+            name: ci-egress
+            namespace: damga
+          spec:
+            image: redis:7-alpine
+            port: 6379
+          EOF
+          for i in $(seq 1 30); do
+            kubectl -n damga get networkpolicy ci-egress >/dev/null 2>&1 && break
+            sleep 2
+          done
+          kubectl -n damga get networkpolicy ci-egress >/dev/null 2>&1 || {
+            echo "the operator rendered no NetworkPolicy for ci-egress, so this step would"
+            echo "have measured an unfenced pod and called the fence open"
+            exit 1
+          }
+
+          # In the workload's own namespace and carrying its selector labels,
+          # which is what puts the probe inside the policy rather than beside it.
+          kubectl -n damga run ci-egress-probe --restart=Never --quiet \
+            --labels="app.kubernetes.io/name=ci-egress,app.kubernetes.io/instance=ci-egress" \
+            --image=curlimages/curl:8.11.1 \
+            --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"ci-egress-probe","image":"curlimages/curl:8.11.1","command":["sh","-c","echo dns=$(nslookup example.com >/dev/null 2>&1 && echo ok || echo FAIL); echo out=$(curl -s -o /dev/null -w %{http_code} --max-time 25 https://example.com)"],"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"resources":{"requests":{"cpu":"10m","memory":"32Mi"},"limits":{"memory":"64Mi"}}}]}}'
+
+          for i in $(seq 1 60); do
+            phase=$(kubectl -n damga get pod ci-egress-probe -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            case "$phase" in Succeeded|Failed) break ;; esac
+            sleep 2
+          done
+          kubectl -n damga logs ci-egress-probe > /tmp/egress.out 2>&1 || true
+          cat /tmp/egress.out
+
+          grep -qx 'dns=ok' /tmp/egress.out || {
+            echo "a workload cannot resolve a name. The egress rule allows UDP and TCP 53 to"
+            echo "kube-dns in kube-system and nowhere else; a resolver that moved, or a label"
+            echo "that changed on that pod, takes name resolution out with it."
+            exit 1
+          }
+          # Any status code means the connection was made. A specific one would
+          # be asserting something about example.com rather than about the fence.
+          grep -q 'out=000' /tmp/egress.out && {
+            echo "a workload could not reach the internet: curl returned 000, which is a"
+            echo "connection that never happened rather than a server that said no."
+            echo "The egress rule is 0.0.0.0/0 minus link-local; something narrowed it."
+            exit 1
+          }
+          grep -q 'out=' /tmp/egress.out || { echo "the probe produced no output at all"; exit 1; }
+
+          kubectl -n damga delete pod ci-egress-probe --wait=false
+          kubectl -n damga delete workload ci-egress
+
       - name: A Build must produce an image the cluster can pull
         run: |
           cat <<EOF | kubectl apply -f -
