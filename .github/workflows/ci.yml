@@ -715,8 +715,14 @@ jobs:
           pass=$(kubectl -n damga get secret ci-redis -o jsonpath='{.data.REDIS_PASSWORD}' | base64 -d)
           [ -n "$pass" ] || { echo "no password in the secret"; exit 1; }
 
+          # env -u, and the first version of this step is why. It ran redis-cli
+          # plainly, inside the container — where REDISCLI_AUTH is set, because
+          # that is how the probes authenticate. redis-cli read it, logged in,
+          # and answered PONG, and the step called that a missing password. The
+          # assertion was wrong, not the server. Unsetting the variable is what
+          # makes the connection actually unauthenticated.
           kubectl -n damga exec statefulset/ci-redis -- \
-            redis-cli ping 2>&1 | grep -qi 'NOAUTH\|auth' \
+            env -u REDISCLI_AUTH redis-cli ping 2>&1 | grep -qi 'NOAUTH\|auth' \
             || { echo "redis answered an unauthenticated PING — requirepass did not take"; exit 1; }
 
           kubectl -n damga exec statefulset/ci-redis -- \
