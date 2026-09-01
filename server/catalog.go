@@ -664,6 +664,19 @@ func renderInstall(
 				// with several objects in one directory it is also the only
 				// way to tell which is which after a rename.
 				Annotations: app.Annotations,
+				// Kept for a sharper reason than provenance: damga.co/from-compose
+				// is what the operator's east-west ingress rule selects on, so
+				// an entry whose objects lose it gets a NetworkPolicy that
+				// admits ingress-nginx and nothing else — and its own second
+				// workload cannot reach it.
+				//
+				// Measured on a cluster on 2026-09-01, before this line existed:
+				// checkmate installed with one ingress rule, and adding the
+				// label by hand produced the second one immediately. A probe
+				// carrying the group label then connected to mongo on 27017 and
+				// one without it timed out. The rule worked; nothing was giving
+				// it anything to select.
+				Labels: app.Labels,
 			}
 
 			// The values the template asked the platform to invent, as a
@@ -704,8 +717,12 @@ func renderInstall(
 			// wrote that string. A database renamed here is a workload
 			// pointing at nothing, which fails as an application that cannot
 			// reach its own data rather than as a manifest that is wrong.
+			// Labels for the reason the workload above keeps them: the
+			// operator's east-west rule selects on damga.co/from-compose, and a
+			// Database that loses it is one its own application cannot reach.
 			db.ObjectMeta = metav1.ObjectMeta{
-				Name: db.Name, Namespace: place.Namespace, Annotations: db.Annotations,
+				Name: db.Name, Namespace: place.Namespace,
+				Annotations: db.Annotations, Labels: db.Labels,
 			}
 			body, err := manifest.RenderDatabase(db)
 			if err != nil {
