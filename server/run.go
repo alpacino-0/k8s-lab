@@ -39,6 +39,7 @@ import (
 	identitypg "github.com/damgahq/damga/identity/postgres"
 	identitysqlite "github.com/damgahq/damga/identity/sqlite"
 	"github.com/damgahq/damga/internal/gitwrite"
+	"github.com/damgahq/damga/notify"
 	"github.com/damgahq/damga/placement"
 	placementmem "github.com/damgahq/damga/placement/memory"
 	placementpg "github.com/damgahq/damga/placement/postgres"
@@ -110,6 +111,17 @@ func Run(ctx context.Context, o Options) error {
 			}
 		}()
 	}
+
+	// Assigned only on success. Handing the failure back through the same
+	// variable put nil into `store` while the deferred Close above still
+	// referred to it, so a bad -notify-url-file panicked on the way out
+	// instead of reporting itself — found by the test that asserts Run refuses
+	// to start.
+	wrapped, notifyErr := o.withNotifications(store, log)
+	if notifyErr != nil {
+		return notifyErr
+	}
+	store = wrapped
 
 	// Before the handler, because the handler captures it — and not from the
 	// manager's client, which reads a cache that is not populated until the
@@ -353,6 +365,41 @@ func (o Options) handler(store evidence.Store, idStore identity.Store) (http.Han
 		}
 	}
 	return h, nil
+}
+
+// withNotifications wraps the evidence store so that every path that moves a
+// record tells somebody, and refuses to start when it cannot.
+//
+// A decorator and not a call at each site, which is the whole reason it is
+// shaped this way: three packages move a record — internal/gitwrite when a push
+// fails, internal/deploywatch when the cluster answers, and its sweep when
+// nothing does — and each of them is handed this value. Notifying at those
+// three call sites instead would be three places to remember, and the way a
+// forgotten fourth announces itself is a deploy that failed in silence.
+//
+// Its own function rather than eleven lines in Run, so that a test can hold the
+// store this returns and drive a transition through it. Run calling it is then
+// the only step no unit test covers, and CI's notification step covers that.
+func (o Options) withNotifications(store evidence.Store, log *slog.Logger) (evidence.Store, error) {
+	notifier := o.Notifier
+	if notifier == nil && o.Config.NotifyURLFile != "" {
+		hook, err := notify.NewWebhook(
+			o.Config.NotifyURLFile, notify.Format(o.Config.NotifyFormat), o.Config.NotifyTimeout)
+		if err != nil {
+			// At startup, not at the first failed deploy. A control plane that
+			// discovers its webhook is unusable at the moment something has
+			// gone wrong is one that says nothing exactly when it was needed.
+			//
+			// The store is returned alongside the error rather than nil: this
+			// value is already deferred for Close by the caller, and handing
+			// back nil turned a clear refusal into a nil dereference on the way
+			// out.
+			return store, err
+		}
+		log.Info("deploy notifications are on", "host", hook.Host(), "format", hook.Format())
+		notifier = hook
+	}
+	return notify.Wrap(store, notifier, log), nil
 }
 
 // openIdentity opens the identity store from the same DSN as the evidence one.

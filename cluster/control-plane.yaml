@@ -189,7 +189,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: damga
-          # A tag today, and a digest is where this line is going.
+          # A digest, which is what this line was always going to be.
           #
           # The history is worth keeping because it is how the gap survived: it
           # said :latest first, and CI never noticed, because the e2e job builds
@@ -219,14 +219,26 @@ spec:
           # running imageID for exactly this reason, and says "nothing moved"
           # rather than reporting a successful upgrade.
           #
-          # Better: the digest cannot be written until the image exists, and
-          # this is the commit that starts publishing it. The other two files
-          # carry the same one-commit lag and call it "a release bumps this
-          # line". The first publish makes this a digest; until then :1.0.0 is
-          # the only reference that is both real and honest, and an install that
-          # builds its own passes scripts/install.sh --control-plane-image or
-          # scripts/upgrade.sh --image.
-          image: ghcr.io/damgahq/damga-control-plane:1.0.0
+          # Better: the digest could not be written until the image existed.
+          # It does now, and this is that follow-up — the same one-commit lag
+          # gitops/operator.yaml and gitops/application.yaml carry and call "a
+          # release bumps this line", paid once here.
+          #
+          # The index digest and not a per-architecture one, which is the same
+          # choice gitops/operator.yaml made: :1.0.0 resolves to an
+          # application/vnd.oci.image.index.v1+json carrying linux/amd64 and
+          # linux/arm64, and pinning one child would give half the fleet an
+          # image it cannot run. Read off the registry rather than copied from a
+          # build log:
+          #
+          #   docker buildx imagetools inspect ghcr.io/damgahq/damga-control-plane:1.0.0 \
+          #     --format '{{.Manifest.MediaType}} {{.Manifest.Digest}}'
+          #
+          # And the lag has not gone away: CI republishes :1.0.0 on every push
+          # to main, so this digest names the build before the one that carries
+          # it. That is the property, not a defect — git names exactly what
+          # runs, and what runs is a version that was actually published.
+          image: ghcr.io/damgahq/damga-control-plane@sha256:2db0bc9f64657346e5edd422bc2d5f9cc15cca83dcaa8e97e0b6141a169bb28e
           args:
             - -listen-address=0.0.0.0:8080
             - -evidence-dsn=/data/damga.db
