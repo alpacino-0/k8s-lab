@@ -133,6 +133,23 @@ not run it. Cache inputs are collected per package but protection is per file â€
 in that same package `install.sh` was safe, because `install_test.go` reads it.
 Add an `os.ReadFile` of the script, and the gate sees edits to it.
 
+**Adding a seam narrows every call site that leaves it empty.** An optional
+dependency in an options struct changes what the old callers mean, silently and
+without failing. `Options.Ports` was added and refusing an entry whose port
+could not be resolved; every existing `Options{Namespace: ...}` in the corpus
+tests then meant "with no port resolver", and four invariants quietly began
+walking three entries instead of a hundred and fifteen. All four stayed green.
+
+Reverting cannot find this. The failure mode is not "asserts something false",
+it is "asserts less", and no revert of the code under test makes a smaller
+assertion fail. What found it was a logged count that stopped agreeing with its
+own sentence â€” one line said 43 yesterday and 3 today, about entries nothing had
+changed. That is the argument for corpus tests logging their counts rather than
+only asserting: the number is the only witness this failure has.
+
+So when you add a seam, grep its call sites and decide for each one what the
+empty value now means there. Green tests are not evidence that you have.
+
 **Commit messages** are lowercase, describe the change, and say why in the body
 when the why is not obvious. `git log` is the record of reasoning.
 
