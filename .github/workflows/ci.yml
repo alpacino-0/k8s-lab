@@ -357,11 +357,30 @@ jobs:
 
       - name: The control plane serves its own panel
         run: |
+          # Two requests reported separately, and the body printed whatever
+          # happens. The first version of this ran `curl -sf /healthz && curl
+          # -sf /` and said "the panel was not served" for every outcome: a
+          # service with no endpoints, a 500 from the panel handler, an empty
+          # body, and a probe pod whose output never got attached all produced
+          # that one sentence. It named the symptom, which is the failure this
+          # repository keeps paying a round for.
           kubectl -n damga-system run cp-probe --rm -i --restart=Never \
             --image=curlimages/curl:8.11.1 --quiet \
-            --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"cp-probe","image":"curlimages/curl:8.11.1","command":["sh","-c","curl -sf http://damga/healthz && curl -sf http://damga/ | head -c 15"],"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"resources":{"requests":{"cpu":"10m","memory":"32Mi"},"limits":{"memory":"64Mi"}}}]}}' \
+            --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"cp-probe","image":"curlimages/curl:8.11.1","command":["sh","-c","echo healthz=$(curl -s -o /dev/null -w %{http_code} --max-time 10 http://damga/healthz); echo panel=$(curl -s -o /dev/null -w %{http_code} --max-time 10 http://damga/); echo body:; curl -s --max-time 10 http://damga/ | head -c 200"],"securityContext":{"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,"capabilities":{"drop":["ALL"]}},"resources":{"requests":{"cpu":"10m","memory":"32Mi"},"limits":{"memory":"64Mi"}}}]}}' \
             -- sh | tee /tmp/cp.out
-          grep -q '<!doctype html>' /tmp/cp.out || { echo "the panel was not served"; exit 1; }
+          grep -q '<!doctype html>' /tmp/cp.out || {
+            echo "::group::the panel did not answer with HTML"
+            echo "what the probe saw:"; cat /tmp/cp.out
+            echo "-- healthz= and panel= above are HTTP status codes; no line at"
+            echo "-- all means the probe pod produced no output, which is a"
+            echo "-- different failure from a bad status."
+            kubectl -n damga-system get deploy,rs,pod,svc,endpoints -o wide || true
+            kubectl -n damga-system logs -l app.kubernetes.io/name=damga \
+              --tail=80 --all-containers --prefix || true
+            kubectl -n damga-system get events --sort-by=.lastTimestamp | tail -20 || true
+            echo "::endgroup::"
+            exit 1
+          }
 
 
       - name: Install ingress-nginx
