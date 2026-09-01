@@ -247,6 +247,56 @@ spec:
                 - message: memoryLimit must be greater than or equal to memoryRequest
                   rule: quantity(self.memoryLimit).compareTo(quantity(self.memoryRequest))
                     >= 0
+              secrets:
+                description: |-
+                  Secrets are values the platform has to invent, and the workload needs.
+
+                  A request, not a value. The name of the environment variable and what kind
+                  of thing to make; never the thing itself, which is the whole point — a
+                  value written here would be a credential in the object, in the git commit
+                  that produced it, and in every diff of both.
+
+                  The operator mints them and reads back what it already minted, exactly the
+                  way the Database's own password works (desiredDatabaseSecret). That
+                  precedent is why this is here rather than in the control plane: a control
+                  plane that writes the Secret directly puts a value in the cluster that git
+                  has never seen, so an install rebuilt from git alone comes back without
+                  it — and silently, because nothing is missing from the manifest.
+
+                  Catalogue templates are what forced it: measured against the 341 that
+                  convert, 159 ask for a generated value, and refusing all of them leaves
+                  less than half the catalogue installable.
+                items:
+                  description: GeneratedSecret is one value the platform invents once
+                    and then keeps.
+                  properties:
+                    kind:
+                      default: password
+                      description: |-
+                        Kind is what to make.
+
+                        Not a length or a character set, because those are decisions the platform
+                        should own and change: a template that asked for "16 characters" would
+                        pin this API to whatever was thought adequate the day it was written.
+                      enum:
+                      - password
+                      - hex
+                      - base64
+                      type: string
+                    name:
+                      description: Name is the environment variable the workload reads
+                        it from.
+                      maxLength: 64
+                      pattern: ^[A-Z][A-Z0-9_]*$
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               volumes:
                 description: |-
                   Volumes are directories that survive the pod.

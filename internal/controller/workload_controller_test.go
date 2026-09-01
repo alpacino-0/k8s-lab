@@ -89,10 +89,98 @@ var _ = Describe("Workload Controller", func() {
 		}
 		// The claim is not owned, so it is not in the list above and would
 		// survive into the next spec.
+		gen := &corev1.Secret{}
+		gen.SetName(name + "-generated")
+		gen.SetNamespace(namespace)
+		_ = k8sClient.Delete(ctx, gen)
+
 		pvc := &corev1.PersistentVolumeClaim{}
 		pvc.SetName(name + "-data")
 		pvc.SetNamespace(namespace)
 		_ = k8sClient.Delete(ctx, pvc)
+	})
+
+	Describe("generated secrets", func() {
+		secrets := []platformv1alpha1.GeneratedSecret{
+			{Name: "APP_KEY", Kind: platformv1alpha1.GeneratedPassword},
+			{Name: "SIGNING_HEX", Kind: platformv1alpha1.GeneratedHex},
+		}
+		secretKey := func() types.NamespacedName {
+			return types.NamespacedName{Name: name + "-generated", Namespace: namespace}
+		}
+
+		It("mints what was asked for and mounts it before the tenant's own", func() {
+			create(platformv1alpha1.WorkloadSpec{Image: testImage, Secrets: secrets})
+			reconcileNow()
+
+			sec := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, secretKey(), sec)).To(Succeed())
+			Expect(sec.Data).To(HaveKey("APP_KEY"))
+			Expect(sec.Data).To(HaveKey("SIGNING_HEX"))
+			// Hex means hex. A signing key that expects 64 hex characters does
+			// not accept base64, which is the whole reason Kind exists.
+			Expect(string(sec.Data["SIGNING_HEX"])).To(MatchRegexp(`^[0-9a-f]+$`))
+			Expect(string(sec.Data["APP_KEY"])).NotTo(BeEmpty())
+
+			dep := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
+			Expect(dep.Spec.Template.Spec.Containers[0].EnvFrom[0].SecretRef.Name).
+				To(Equal(name + "-generated"))
+		})
+
+		// The failure this guards against is total and silent: a reconcile that
+		// mints fresh values every time hands the application credentials its
+		// own stored data no longer matches, and nothing reports an error.
+		It("keeps what it already minted across reconciles", func() {
+			create(platformv1alpha1.WorkloadSpec{Image: testImage, Secrets: secrets})
+			reconcileNow()
+
+			sec := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, secretKey(), sec)).To(Succeed())
+			first := string(sec.Data["APP_KEY"])
+
+			reconcileNow()
+			reconcileNow()
+
+			Expect(k8sClient.Get(ctx, secretKey(), sec)).To(Succeed())
+			Expect(string(sec.Data["APP_KEY"])).To(Equal(first), "the password was rotated under a running app")
+		})
+
+		// Adding a name mints one value. Rotating the others would be a silent
+		// outage for every one of them.
+		It("mints only the new name when one is added", func() {
+			create(platformv1alpha1.WorkloadSpec{Image: testImage, Secrets: secrets[:1]})
+			reconcileNow()
+			sec := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, secretKey(), sec)).To(Succeed())
+			first := string(sec.Data["APP_KEY"])
+
+			app := &platformv1alpha1.Workload{}
+			Expect(k8sClient.Get(ctx, key, app)).To(Succeed())
+			app.Spec.Secrets = secrets
+			Expect(k8sClient.Update(ctx, app)).To(Succeed())
+			reconcileNow()
+
+			Expect(k8sClient.Get(ctx, secretKey(), sec)).To(Succeed())
+			Expect(sec.Data).To(HaveKey("SIGNING_HEX"))
+			Expect(string(sec.Data["APP_KEY"])).To(Equal(first))
+		})
+
+		// The same call the volumes make, for the same reason: deleting an app
+		// to recreate it must not destroy the only copy of a password.
+		It("leaves the secret behind when the workload is deleted", func() {
+			create(platformv1alpha1.WorkloadSpec{Image: testImage, Secrets: secrets})
+			reconcileNow()
+			sec := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, secretKey(), sec)).To(Succeed())
+			Expect(sec.OwnerReferences).To(BeEmpty(),
+				"an owner reference here deletes the tenant's credentials on the next redeploy")
+
+			app := &platformv1alpha1.Workload{}
+			Expect(k8sClient.Get(ctx, key, app)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, app)).To(Succeed())
+			Expect(k8sClient.Get(ctx, secretKey(), sec)).To(Succeed())
+		})
 	})
 
 	Describe("volumes", func() {
