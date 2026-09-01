@@ -88,8 +88,10 @@ vet: ## Run go vet against code.
 	go vet $(GO_PKGS)
 
 .PHONY: test
-test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list $(GO_PKGS) | grep -v /e2e) -coverprofile cover.out
+test: manifests generate fmt vet setup-envtest alertmanager ## Run tests.
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" \
+	ALERTMANAGER="$(ALERTMANAGER)" \
+	go test $$(go list $(GO_PKGS) | grep -v /e2e) -coverprofile cover.out
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
@@ -221,6 +223,7 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+ALERTMANAGER ?= $(LOCALBIN)/alertmanager
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.8.1
@@ -237,6 +240,7 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
 GOLANGCI_LINT_VERSION ?= v2.12.2
+ALERTMANAGER_VERSION ?= 0.34.0
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)
@@ -269,6 +273,33 @@ $(GOLANGCI_LINT): $(LOCALBIN)
 		$(GOLANGCI_LINT) custom --destination $(LOCALBIN) --name golangci-lint-custom && \
 		mv -f $(LOCALBIN)/golangci-lint-custom $(GOLANGCI_LINT); \
 	} || true
+
+# Alertmanager comes from its release tarball and not from go-install-tool.
+#
+# Not a preference: `go install github.com/prometheus/alertmanager/cmd/alertmanager`
+# does not build. The module embeds its web UI from ui/app/dist, those files are
+# produced by the release pipeline and are not in the module, and the build stops
+# at "pattern app/dist: no matching files found". Measured on v0.34.0.
+#
+# What it is for is cluster/alertmanager_test.go, which runs a real Alertmanager
+# against the configuration in cluster/monitoring-values.yaml. That test skips
+# when this is missing, which keeps `go test ./...` useful on a machine that has
+# downloaded nothing — and this dependency on `test` is what stops the skip from
+# becoming permanent.
+.PHONY: alertmanager
+alertmanager: $(ALERTMANAGER) ## Download alertmanager locally if necessary.
+$(ALERTMANAGER): $(LOCALBIN)
+	@os=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+	arch=$$(uname -m); \
+	case "$$arch" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; esac; \
+	name="alertmanager-$(ALERTMANAGER_VERSION).$$os-$$arch"; \
+	url="https://github.com/prometheus/alertmanager/releases/download/v$(ALERTMANAGER_VERSION)/$$name.tar.gz"; \
+	echo "downloading $$url"; \
+	tmp=$$(mktemp -d) && \
+	curl -sSfL "$$url" -o "$$tmp/am.tar.gz" && \
+	tar xzf "$$tmp/am.tar.gz" -C "$$tmp" --strip-components=1 && \
+	mv "$$tmp/alertmanager" "$(ALERTMANAGER)" && \
+	rm -rf "$$tmp"
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary

@@ -7,11 +7,17 @@
 # cluster and not something this repository can guess. Configuring a real one
 # would need credentials nobody cloning this has.
 #
-# What it does add is the decision nobody had made: how many times one event is
-# allowed to wake someone. Six rules, and a single outage lights four of them.
+# What it does add is two things. The first is the decision nobody had made: how
+# many times one event is allowed to wake someone. Six rules, and a single outage lights four of them.
 # When the service vanishes, TargetsMissing goes critical while InstanceDown,
 # HighErrorRate and HighLatency all go warning — same failure, same job label,
 # four pages. The inhibition rule turns that into one.
+#
+# The second is a receiver that is written down rather than left to whoever
+# needs it. It is still not routed to — see damga-webhook below — so nothing
+# about the default changes, and the sentence above stays true. What changes is
+# that the configuration an operator has to write is now one this repository
+# runs a real Alertmanager against.
 alertmanager:
   enabled: true
 
@@ -44,6 +50,44 @@ alertmanager:
 
     receivers:
       - name: "null"
+
+      # Where an alert lands when somebody turns it on. Defined and not routed
+      # to, which is the whole shape of this: the receiver above is still the
+      # default, because where an alert should go is a property of whoever runs
+      # the cluster. What this adds is that they no longer have to write the
+      # configuration themselves — and, more to the point, that the
+      # configuration they would have written is one this repository tests.
+      #
+      # Two things to do to turn it on:
+      #
+      #   kubectl -n monitoring create secret generic damga-alert-webhook \
+      #     --from-literal=url=https://hooks.slack.com/services/...
+      #
+      # then set `receiver: damga-webhook` on the route above, and add the
+      # secret to `alertmanager.alertmanagerSpec.secrets`. The path below is
+      # where that puts it — the prometheus-operator mounts each name in that
+      # list at /etc/alertmanager/secrets/<name>, checked against its API
+      # reference rather than assumed, because a path that is merely plausible
+      # fails at the first alert and nowhere earlier. The Watchdog route stays
+      # on "null": it fires for ever by design.
+      #
+      # url_file and never url. The URL is the whole credential — anyone holding
+      # it can post into that channel as you — and a values file is committed.
+      # The same decision the control plane's -notify-url-file makes, for the
+      # same reason.
+      #
+      # Safe to ship unrouted: measured with Alertmanager 0.34.0, a url_file
+      # naming a path that does not exist neither fails `amtool check-config`
+      # nor stops the process starting. It is read when a notification is sent,
+      # so an install that never routes here never reads it.
+      #
+      # Proved by cluster/alertmanager_test.go, which runs a real Alertmanager
+      # against this very block — not a copy of it — and asserts the delivered
+      # body names the alert and the application.
+      - name: damga-webhook
+        webhook_configs:
+          - url_file: /etc/alertmanager/secrets/damga-alert-webhook/url
+            send_resolved: true
 
 grafana:
   adminPassword: admin

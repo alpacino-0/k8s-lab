@@ -686,11 +686,18 @@ top of this file. What is still missing:
   every `kubernetes.io/kubelet-serving` request it finds, which is right for a
   cluster it created seconds earlier and wrong anywhere else. A real cluster
   needs a policy for who may claim which address.
-- **Alerts have nowhere to land.** Alertmanager runs, groups and inhibits —
-  `make alert-test` breaks the service for real and proves the alert arrives,
-  and that a critical silences the warnings describing the same failure. The
-  receiver is `null`. Where an alert should go is a property of whoever runs the
-  cluster, and every real option needs a credential nobody cloning this has.
+- **Alerts land nowhere until somebody says where.** Alertmanager runs, groups
+  and inhibits — `make alert-test` breaks the service for real and proves the
+  alert arrives, and that a critical silences the warnings describing the same
+  failure. The default receiver is still `null`, because where an alert should
+  go is a property of whoever runs the cluster. What is no longer left to the
+  reader is the configuration: `cluster/monitoring-values.yaml` defines a
+  webhook receiver that takes its URL from a mounted Secret rather than from the
+  file, and turning it on is one line on the route. A real Alertmanager is run
+  against that block on every test run and the delivered body is checked for the
+  alert and the application, so what an operator switches on is a path that has
+  been travelled. **Not proved:** the same alert travelling it from a real rule
+  in a real cluster.
 - **One quota, hand-written, and no per-container ceiling.** The namespace has a
   ceiling, sized by hand. Nothing derives it per tenant, because there is only
   one tenant yet. The per-container ceiling went with the admission policies, so
