@@ -1187,6 +1187,76 @@ jobs:
           echo "second build: $phase after $(( $(date +%s) - started ))s (builder image already on the node)"
           kubectl -n damga-build delete build ci-buildpack-2 || true
 
+      # Two collectors, and the reason they are checked here rather than
+      # trusted: both of them delete, and a deleter that deletes nothing looks
+      # exactly like a store with nothing to delete.
+      #
+      # scripts/registry-gc-test.sh pushes its own images and its own build
+      # cache, runs the collector, and asks the store — not the job's report —
+      # what is left. It also backdates a cache link so that the rule for a
+      # repository nobody builds any more is exercised in a run rather than in a
+      # fortnight.
+      - name: The collectors actually delete
+        run: ./scripts/registry-gc-test.sh
+
+      # And the one string this repository could not measure for itself.
+      #
+      # server/builds.go tells a full namespace apart from a missing permission
+      # by the words the API server uses, because both arrive as Forbidden and
+      # for a long time both were reported as "the control plane is not
+      # permitted to create builds" — a sentence that is true of a RoleBinding
+      # nobody has touched. The token it keys on is "exceeded quota", and that
+      # is Kubernetes' wording rather than this project's, so it is checked
+      # against a live API server here. envtest cannot: it runs no quota
+      # controller, and five creates against a quota of two all succeeded.
+      - name: The build quota refuses out loud
+        run: |
+          restore() {
+            kubectl -n damga-build patch resourcequota build-quota --type=merge \
+              -p '{"spec":{"hard":{"count/builds.platform.damga.co":"200"}}}' >/dev/null
+          }
+          trap restore EXIT
+
+          # Zero rather than the count in use: the quota may be exceeded by a
+          # hard limit below usage, and a number computed from usage would race
+          # the collector this same job is proving works.
+          kubectl -n damga-build patch resourcequota build-quota --type=merge \
+            -p '{"spec":{"hard":{"count/builds.platform.damga.co":"0"}}}'
+
+          # The quota controller has to observe the new limit before admission
+          # enforces it; until it does, the create succeeds and proves nothing.
+          refusal=""
+          for _ in $(seq 1 30); do
+            refusal=$(kubectl apply -f - <<'EOF' 2>&1 >/dev/null || true
+          apiVersion: platform.damga.co/v1alpha1
+          kind: Build
+          metadata:
+            name: ci-quota-probe
+            namespace: damga-build
+          spec:
+            repo: https://github.com/damgahq/damga.git
+            revision: 0123456789abcdef0123456789abcdef01234567
+            image: registry.damga-registry.svc:5000/ci/quota-probe
+            builder: dockerfile
+          EOF
+            )
+            [ -n "$refusal" ] && break
+            kubectl -n damga-build delete build ci-quota-probe --ignore-not-found >/dev/null
+            sleep 2
+          done
+
+          echo "the API server said: $refusal"
+          case "$refusal" in
+            *"exceeded quota"*)
+              echo "the control plane's classifier keys on a string the API server really uses" ;;
+            "")
+              echo "::error::the quota admitted a create with a hard limit of zero; nothing here tested what a full namespace does" >&2
+              exit 1 ;;
+            *)
+              echo "::error::a full quota is refused with wording server/builds.go does not recognise, so a full namespace is still reported as a missing permission" >&2
+              exit 1 ;;
+          esac
+
       - name: Deleting the Workload must leave nothing behind
         run: |
           kubectl -n damga delete workload ci-probe --wait=true

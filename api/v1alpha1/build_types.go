@@ -96,6 +96,21 @@ type BuildSpec struct {
 	Resources Resources `json:"resources,omitempty"`
 }
 
+// The labels every Build carries, named here because two packages read them and
+// a label key spelled apart in two places is a lookup that silently finds
+// nothing.
+//
+// The control plane sets them when it creates the Build — a tenant id cannot be
+// part of the name, since names are DNS labels and tenant ids are not — and the
+// operator groups by them when it decides which records to keep. They are the
+// only way to answer "whose build is this" from the cluster, because every
+// tenant's builds share one namespace.
+const (
+	BuildTenantLabel   = "damga.co/tenant"
+	BuildAppLabel      = "damga.co/app"
+	BuildRevisionLabel = "damga.co/revision"
+)
+
 // BuildMethod is how source becomes an image.
 type BuildMethod string
 

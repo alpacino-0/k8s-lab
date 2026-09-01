@@ -38,6 +38,14 @@ import (
 type BuildReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// KeptPerApp and KeptInNamespace bound how many finished Build records
+	// survive; zero means the constants collectBuilds documents. Injected for
+	// the tests, the way gitwrite.Writer.Now is: the namespace ceiling is 150,
+	// and a test that had to create 151 objects to reach it would be a test
+	// nobody runs twice.
+	KeptPerApp      int
+	KeptInNamespace int
 }
 
 // buildResult is what the build writes to its termination log.
@@ -52,7 +60,7 @@ type buildResult struct {
 	Message string                       `json:"message"`
 }
 
-// +kubebuilder:rbac:groups=platform.damga.co,resources=builds,verbs=get;list;watch
+// +kubebuilder:rbac:groups=platform.damga.co,resources=builds,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=platform.damga.co,resources=builds/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -143,7 +151,20 @@ func (r *BuildReconciler) observe(
 		}
 		setBuildCondition(build, metav1.ConditionFalse, "Failed", build.Status.Message)
 	}
-	return r.Status().Patch(ctx, build, patch)
+	if err := r.Status().Patch(ctx, build, patch); err != nil {
+		return err
+	}
+
+	// One build finishing is the moment there is one more record to keep, so it
+	// is the moment to decide which one stops being kept. Triggered here rather
+	// than on a timer because a timer is a second thing to configure, to run on
+	// the leader only, and to explain when it has not fired yet — and because a
+	// namespace that is filling is a namespace where builds are finishing.
+	//
+	// The error is returned so a failed sweep is retried, and it comes after
+	// the patch so that a sweep that fails cannot cost the record of the build
+	// that triggered it.
+	return r.collectBuilds(ctx, build.Namespace)
 }
 
 // resultFromPods reads the termination message off whichever pod the job left.

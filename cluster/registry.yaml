@@ -258,6 +258,32 @@ spec:
                 # claim above bounds a repository rather than a week.
                 - name: RETAIN
                   value: "10"
+                # The build cache is a tag in the same repository as the images
+                # built from it, and it is neither an image nor countable as
+                # one. internal/controller/build_job.go pushes it under this
+                # name on every build, so its link is always among the newest
+                # and RETAIN would keep it for ever while spending one of the
+                # ten slots meant for images — nine kept, not ten.
+                #
+                # The name is a joint with Go: build_job.go's cacheTag. A test
+                # reads this file and fails if the two stop matching, because
+                # the failure otherwise is silent in both directions — an
+                # uncounted image, or a cache nothing ages out.
+                - name: CACHE_TAG
+                  value: buildcache
+                # How long a cache outlives the last build that refreshed it.
+                #
+                # A number that decides one thing only: how long dead weight
+                # lingers. Any repository still being built rewrites this tag on
+                # every build, so no active cache is ever near the window; the
+                # only caches it reaches belong to repositories nothing has
+                # built in a fortnight. Deleting one costs a slower next build
+                # and nothing else — a cache is derived, nothing rolls back to
+                # it, and the layers come back the first time it is rebuilt.
+                # Chosen rather than measured, and it is the reason it can be:
+                # no measurement of an active repository would move it.
+                - name: CACHE_DAYS
+                  value: "14"
                 # The image ships a debug logger, and at that level the sweep's
                 # own report is buried in a line per link it touches. The job's
                 # log is the record of what it freed; it has to be readable.
@@ -272,14 +298,32 @@ spec:
 
                   # mtime, repository, tag — one line per tag, newest first
                   # within a repository, and everything past RETAIN removed.
+                  # The cache tag is dropped from this list rather than counted:
+                  # it is not an image, and it is dealt with by age below.
                   if [ -d "$REPOS" ]; then
                     find "$REPOS" -type f -path '*/_manifests/tags/*/current/link' -exec stat -c '%Y %n' {} + |
                       sed 's|/_manifests/tags/| |; s|/current/link$||' |
+                      grep -v " ${CACHE_TAG}$" |
                       sort -k2,2 -k1,1nr |
                       awk -v keep="$RETAIN" '{ if ($2 != r) { r = $2; n = 0 } if (++n > keep) print $2 "/_manifests/tags/" $3 }' |
                       while read -r tag; do
                         echo "pruning ${tag#"$REPOS/"}"
                         rm -rf "$tag"
+                      done
+                  fi
+
+                  # And the caches nothing has refreshed. Counted in days by
+                  # find rather than sorted, because there is no "newest N" to
+                  # keep here: every repository has at most one of these, and
+                  # the question is not which cache to keep but whether anybody
+                  # is still building the thing it caches.
+                  if [ -d "$REPOS" ]; then
+                    find "$REPOS" -type f -path "*/_manifests/tags/${CACHE_TAG}/current/link" \
+                      -mtime "+${CACHE_DAYS}" |
+                      while read -r link; do
+                        tagdir="${link%/current/link}"
+                        echo "pruning stale cache ${tagdir#"$REPOS/"}"
+                        rm -rf "$tagdir"
                       done
                   fi
 
