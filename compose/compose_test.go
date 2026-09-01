@@ -525,3 +525,65 @@ func noteStrings(r compose.Result) []string {
 	}
 	return out
 }
+
+// An image naming a compose variable is resolved to its default, and one with
+// no default says so.
+//
+// This is not cosmetic and the corpus measured both halves of it. Left
+// unresolved, `ghcr.io/x/y:${VER:-latest}` reaches a registry with the ${...}
+// still in it, which answers "does not exist" — true of a repository nobody
+// published and indistinguishable from an image upstream withdrew. 22 of the 37
+// images the registry client could not resolve across the upstream corpus were
+// this.
+//
+// And the reference was passing the API's own check while it did. The last path
+// segment contains a colon and the string does not end in ":latest", so
+// `x:${VER:-latest}` was accepted as a pinned image: 4 entries counted as
+// installable would have committed a manifest naming an image no kubelet can
+// pull. Resolving it first is what turns those into the refusal they always
+// were.
+func TestAVariableInTheImageIsResolvedToItsDefault(t *testing.T) {
+	tpl, err := compose.Parse("vars", []byte(`
+services:
+  app:
+    image: ghcr.io/example/app:${APP_VERSION:-1.4.2}
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	res, err := compose.Convert(tpl, compose.Options{Namespace: "t"})
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	if got := res.Workloads[0].Spec.Image; got != "ghcr.io/example/app:1.4.2" {
+		t.Errorf("image = %q, want the default substituted", got)
+	}
+}
+
+// A variable with no default resolves to nothing, which is what compose does
+// too, and the note names the variable.
+//
+// What is left is refused downstream by the rule that wants a tag, and that is
+// the right end for it: substituting "latest" here would invent the moving tag
+// the platform exists to refuse.
+func TestAVariableWithNoDefaultIsNamedRatherThanGuessed(t *testing.T) {
+	tpl, err := compose.Parse("vars", []byte(`
+services:
+  app:
+    image: ghcr.io/example/app:${APP_VERSION}
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	res, err := compose.Convert(tpl, compose.Options{Namespace: "t"})
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	if got := res.Workloads[0].Spec.Image; got != "ghcr.io/example/app:" {
+		t.Errorf("image = %q, want the variable resolved to nothing", got)
+	}
+	notes := strings.Join(noteStrings(res), "\n")
+	if !strings.Contains(notes, "APP_VERSION") {
+		t.Errorf("the note does not name the variable compose had no value for: %s", notes)
+	}
+}

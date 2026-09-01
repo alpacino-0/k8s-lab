@@ -147,19 +147,16 @@ func TestAnUnresolvableImageIsRefusedByNameAndNotSilently(t *testing.T) {
 
 // The switch, and both directions of it.
 //
-// On is the default because with the seam empty the catalogue offers entries it
-// then refuses. Off has to stay reachable: an air-gapped install cannot ask a
-// registry anything, and for it the honest behaviour is the old one.
-func TestPinImagesDecidesWhetherThereIsAResolverAtAll(t *testing.T) {
-	// Off unless asked for, and the zero value says the same thing the flag
-	// does. This was written the other way first — flag true, struct false —
-	// and server.Run(ctx, Options{}) then behaved differently from the binary
-	// built around it.
-	if o := (Options{}).withDefaults(); o.Pin != nil {
-		t.Error("the zero Options installed a resolver, which the flag default does not")
+// On by default, which it can only be because catalog.pinImages resolves the
+// refused images and no others: a resolver may rescue an entry and may not take
+// one away. Off has to stay reachable for an install that will not make
+// outbound calls at install time at all.
+func TestImagesArePinnedUnlessTheInstallSaysNot(t *testing.T) {
+	if o := (Options{}).withDefaults(); o.Pin == nil {
+		t.Error("the zero Options installed no resolver, so a fresh install pins nothing")
 	}
-	if o := (Options{Config: Config{PinImages: true}}).withDefaults(); o.Pin == nil {
-		t.Error("pinning was asked for and no resolver was installed")
+	if o := (Options{Config: Config{NoImagePinning: true}}).withDefaults(); o.Pin != nil {
+		t.Error("pinning was turned off and a resolver was installed anyway")
 	}
 	// A caller that supplied its own — a mirror, a lockfile — keeps it.
 	mine := func(image string) (string, error) { return image, nil }
@@ -167,15 +164,15 @@ func TestPinImagesDecidesWhetherThereIsAResolverAtAll(t *testing.T) {
 		t.Error("a supplied resolver was dropped")
 	}
 
-	// And the flag says the same thing as the default above, which is the
-	// half that drifts: two defaults for one value is a value that disagrees
-	// with itself later.
-	if got := bind(t).PinImages; got != (Options{}).withDefaults().Config.PinImages {
-		t.Errorf("-pin-images defaults to %v and the zero Config to %v",
-			got, (Options{}).withDefaults().Config.PinImages)
+	// The flag and the zero value have to say the same thing. They did not when
+	// this was a positive PinImages defaulting true in the flag and false in
+	// the struct, which is why the field is named the way it is.
+	if got := bind(t).NoImagePinning; got != (Options{}).withDefaults().Config.NoImagePinning {
+		t.Errorf("-no-image-pinning defaults to %v and the zero Config to %v",
+			got, (Options{}).withDefaults().Config.NoImagePinning)
 	}
-	if got := bind(t, "-pin-images").PinImages; !got {
-		t.Error("-pin-images did not turn it on")
+	if !bind(t, "-no-image-pinning").NoImagePinning {
+		t.Error("-no-image-pinning did not turn it off")
 	}
 }
 

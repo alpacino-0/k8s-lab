@@ -196,6 +196,20 @@ func Convert(t Template, o Options) (Result, error) {
 	front := -1
 	for _, name := range names {
 		svc := t.Services[name]
+		// The image is resolved once, here, so the three places that read it —
+		// the database match, the Database's image and the Workload's — cannot
+		// disagree about what this service runs.
+		if resolved, hollow := imageDefaults(svc.Image); resolved != svc.Image {
+			if len(hollow) > 0 {
+				res.Notes = append(res.Notes, Note{
+					Service: name, Field: "image",
+					Detail: fmt.Sprintf("%s names %s, which compose has no value for; "+
+						"what is left is not a usable reference",
+						svc.Image, strings.Join(hollow, ", ")),
+				})
+			}
+			svc.Image = resolved
+		}
 		if db, notes, ok := asDatabase(t, name, svc, o); ok {
 			res.Databases = append(res.Databases, db)
 			res.DatabaseSources = append(res.DatabaseSources, declaredSources(svc)...)
@@ -634,6 +648,31 @@ func magicKind(k string) string {
 	default:
 		return "unknown"
 	}
+}
+
+// imageDefaults resolves the interpolations in an image reference, and reports
+// the variables it had no value for.
+//
+// Compose reads ${VAR:-default} against an environment file; there is none
+// here, so the default is the only value there is, which is what literal does
+// everywhere else in this package. The image was the one field it was not
+// applied to, and the cost was measured: of the 37 images the registry client
+// could not resolve across the upstream corpus, 22 were this — references that
+// reached the registry with the ${...} still in them. The registry then answers
+// "does not exist", which is true of a repository nobody published and reads
+// exactly like an image upstream withdrew. Same failure, wrong sentence.
+//
+// A variable with no default at all resolves to nothing, which is again what
+// compose does. What is left — `ghcr.io/x/y:` — is refused downstream by the
+// rule that wants a tag, and that is the right end for it: substituting
+// "latest" here would invent the moving tag this platform exists to refuse.
+func imageDefaults(image string) (resolved string, hollow []string) {
+	for _, m := range interpolation.FindAllStringSubmatch(image, -1) {
+		if m[2] == "" && !slices.Contains(hollow, m[1]) {
+			hollow = append(hollow, m[1])
+		}
+	}
+	return literal(image), hollow
 }
 
 // literal resolves ${VAR:-default} to its default, which is the only value

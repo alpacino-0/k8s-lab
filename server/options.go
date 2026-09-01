@@ -110,25 +110,30 @@ type Config struct {
 	// and not a field the control plane holds.
 	Registry string
 
-	// PinImages resolves a catalogue entry's images to digests at install time.
+	// NoImagePinning turns off resolving a catalogue entry's images to digests
+	// at install time.
+	//
+	// On by default, which is what the negative name is for: false is the zero
+	// value and false is the flag's default, and both of them mean the images
+	// are pinned. This was a positive PinImages first, and it could not be
+	// defaulted on without the flag saying one thing and Options{} saying the
+	// other — server.Run(ctx, Options{}) then behaves differently from the
+	// binary built around it.
 	//
 	// What it buys, measured against the upstream corpus of 371 files of which
-	// 341 are offered: 119 entries install with this off, and 280 with a
+	// 341 are offered: 119 entries install with pinning off, 280 with a
 	// resolver that answers for every image. The 161 in between are entries
 	// upstream names by moving tag, which WorkloadSpec.Image refuses.
 	//
-	// Off by default, and not because the gain is in doubt. Turning it on makes
-	// installing depend on a registry answering, and pinning runs over every
-	// image rather than only the refused ones — so an entry whose tag was
-	// already explicit, and which installs today, stops installing while the
-	// registry is unreachable or rate limiting. Whether that trade is worth
-	// making by default is a decision about the product; the number above is
-	// what it is worth, and it is the same number either way.
+	// It can be defaulted on because catalog.pinImages resolves only the images
+	// the API would refuse. While it resolved all of them, an unreachable
+	// registry could take away an entry that installs with no resolver at all,
+	// and that made this a switch nobody could sensibly leave on. It cannot any
+	// more: a resolver may rescue an entry and it may not take one away.
 	//
-	// False in the flag and false as the zero value, which is what every other
-	// bool here does. Two defaults for one switch is a switch that disagrees
-	// with itself, and this one was written the other way first.
-	PinImages bool
+	// What is left is a reason to turn it off rather than a risk: an install
+	// that will not make outbound calls at install time at all.
+	NoImagePinning bool
 
 	// CatalogDir is the directory the one-click templates are read from.
 	//
@@ -178,8 +183,8 @@ func (c *Config) BindFlags(f *flag.FlagSet) {
 		"how long a login lasts")
 	f.StringVar(&c.Registry, "registry", defaultRegistry,
 		"registry a build pushes to when the request does not name an image")
-	f.BoolVar(&c.PinImages, "pin-images", false,
-		"resolve a catalogue entry's images to digests at install time")
+	f.BoolVar(&c.NoImagePinning, "no-image-pinning", false,
+		"do not resolve a catalogue entry's images to digests at install time")
 	f.StringVar(&c.CatalogDir, "catalog-dir", "",
 		"directory holding the one-click catalogue templates; empty offers no catalogue")
 	f.StringVar(&c.GitTokenFile, "git-token-file", "",

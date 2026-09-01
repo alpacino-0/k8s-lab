@@ -282,11 +282,14 @@ func installFromCatalog(g guard, st stores) http.Handler {
 			}
 			opts.VolumeSize = size
 		}
-		// Options.Pin is filled from Config.PinImages, which is off until an
-		// install turns it on. It is the largest single reason an entry is
-		// refused below: measured against the upstream corpus of 371 files,
-		// 341 offered, 119 install with it empty and 280 with a resolver that
-		// answers for every image.
+		// Options.Pin is filled unless Config.NoImagePinning turned it off. It
+		// is the largest single reason an entry is refused below: measured
+		// against the upstream corpus of 371 files, 341 offered, 119 install
+		// with it empty and 280 with a resolver that answers for every image.
+		//
+		// Only the images the API would refuse reach it, so an install with an
+		// unreachable registry loses the entries a resolver would have rescued
+		// and keeps every one that did not need rescuing.
 		//
 		// What fills it is still a decision rather than a fact — a registry
 		// client is one answer, a mirror or a lockfile beside the templates are
