@@ -248,6 +248,11 @@ spec:
             # fails instead. Not tenant-reachable, so it is an operator's own
             # mistake — but it is one this line has to not make.
             - -registry=registry.damga-registry.svc:5000
+            # Where the image put the catalogue. Empty would be a control plane
+            # that serves everything except the one-click install and says so
+            # with 503 rather than an empty list — see requireCatalog. That
+            # behaviour is deliberate and stays; this flag is what turns it on.
+            - -catalog-dir=/catalog
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

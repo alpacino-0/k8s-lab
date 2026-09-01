@@ -35,6 +35,20 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
 COPY --from=builder /workspace/damga .
+
+# The catalogue, baked in rather than mounted.
+#
+# A ConfigMap was the obvious alternative and it does not fit: the corpus is
+# 940,292 bytes against a 1 MiB object limit, so it would work today with 11%
+# to spare and break on an upstream that only ever grows. A volume would mean an
+# install has something else to get right before the headline feature works.
+# Baked in, the templates are as versioned as the binary and as read-only as the
+# root filesystem this runs with.
+#
+# The whole directory, including its README and the Apache-2.0 text: this image
+# redistributes those files and the licence travels with them.
+COPY --from=builder /workspace/catalog/templates /catalog
+
 USER 65532:65532
 
 ENTRYPOINT ["/damga"]

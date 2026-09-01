@@ -255,3 +255,61 @@ func TestTheInstallerRefusesAnIncompleteOrWrongCommandLine(t *testing.T) {
 		})
 	}
 }
+
+// TestTheCatalogueIsDeployedAndTheInstallerRefusesItsAbsence.
+//
+// The one-click catalogue is the product's headline feature and it is off by
+// default: with -catalog-dir unset the server answers 503 and names the flag,
+// which is right for a library and wrong for an install. So the deployed
+// manifest has to carry it, the image has to put the templates where it points,
+// and the installer has to refuse rather than produce a cluster whose catalogue
+// page is empty for a reason nobody can see from the page.
+//
+// Three files have to agree and each is read here rather than assumed. The
+// script is read as well as executed, because go test invalidates its cache on
+// files a test opened and not on ones it only ran — editing install.sh and
+// rerunning the gate would otherwise replay the previous verdict.
+func TestTheCatalogueIsDeployedAndTheInstallerRefusesItsAbsence(t *testing.T) {
+	manifest, err := os.ReadFile("../cluster/control-plane.yaml")
+	if err != nil {
+		t.Fatalf("reading cluster/control-plane.yaml: %v", err)
+	}
+	found := regexp.MustCompile(`-catalog-dir=(\S+)`).FindSubmatch(manifest)
+	if found == nil {
+		t.Fatal("cluster/control-plane.yaml has no -catalog-dir argument: this install would " +
+			"come up with no catalogue and every /catalog request would answer 503")
+	}
+	dir := string(found[1])
+
+	script, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatalf("reading install.sh: %v", err)
+	}
+	if !strings.Contains(string(script), "-catalog-dir=") {
+		t.Error("install.sh does not read -catalog-dir out of the manifest, so removing that " +
+			"flag would install a cluster with no catalogue and no complaint")
+	}
+
+	// The image is the other half: the flag points inside the container, so a
+	// Dockerfile that does not put the templates there leaves the flag correct
+	// and the directory empty.
+	dockerfile, err := os.ReadFile("../Dockerfile")
+	if err != nil {
+		t.Fatalf("reading Dockerfile: %v", err)
+	}
+	if !strings.Contains(string(dockerfile), " "+dir+"\n") {
+		t.Errorf("cluster/control-plane.yaml points -catalog-dir at %s and the Dockerfile does "+
+			"not copy the templates there", dir)
+	}
+
+	// And the build context has to include them at all. This file ignores
+	// everything by default, so the templates are only present by name.
+	ignore, err := os.ReadFile("../.dockerignore")
+	if err != nil {
+		t.Fatalf("reading .dockerignore: %v", err)
+	}
+	if !strings.Contains(string(ignore), "!catalog/templates/**") {
+		t.Error(".dockerignore does not re-include catalog/templates, so the image would be " +
+			"built without the catalogue while every manifest still says it has one")
+	}
+}

@@ -123,6 +123,24 @@ if [[ ! "$REGISTRY_HOST" =~ ^[a-z0-9.-]+(:[0-9]+)?$ ]]; then
   exit 1
 fi
 
+# Where the control plane will look for the one-click catalogue. Read from the
+# same manifest and for the same reason as the two below: the value is deployed
+# there, and a second copy here is a second thing to drift.
+#
+# Empty is a legitimate configuration — the server answers 503 and names the
+# flag — but it is not a legitimate *install*, because the catalogue is the
+# product's headline feature and an operator who removed the flag by accident
+# would find out from a page that says nothing is available. So this fails here,
+# where the message can say which line to put back.
+CATALOG_DIR="$(sed -n 's/^[[:space:]]*-[[:space:]]*-catalog-dir=\(.*\)$/\1/p' \
+  "$ROOT/cluster/control-plane.yaml" | head -1 | tr -d ' \r')"
+if [[ -z "$CATALOG_DIR" ]]; then
+  echo "install.sh: cluster/control-plane.yaml has no -catalog-dir argument, so this" >&2
+  echo "install would come up with no one-click catalogue at all. Restore the flag" >&2
+  echo "(it should read -catalog-dir=/catalog, where the image puts the templates)." >&2
+  exit 1
+fi
+
 # The DSN the control plane is deployed with. Same reasoning, same file.
 CONTROL_PLANE_DSN="$(sed -n 's/^[[:space:]]*-[[:space:]]*-evidence-dsn=\(.*\)$/\1/p' \
   "$ROOT/cluster/control-plane.yaml" | head -1 | tr -d ' \r')"
@@ -374,6 +392,15 @@ else
     run kubectl -n "$SYSTEM_NAMESPACE" set image deployment/damga "damga=${CONTROL_PLANE_IMAGE}"
   fi
   run kubectl -n "$SYSTEM_NAMESPACE" rollout status deployment/damga --timeout=300s
+  # Said now rather than discovered later, and it names one cause rather than
+  # the symptom. The flag is in the manifest — checked above — and an image
+  # built from this tree cannot lack the templates, because the build fails at
+  # the COPY when they are missing. So the one way to reach this note and still
+  # have no catalogue is an image built before the templates were vendored,
+  # which is exactly what --control-plane-image makes easy to pass in.
+  note "the catalogue is served from ${CATALOG_DIR} inside the image;"
+  note "if /catalog answers 503 after this, the running image predates the"
+  note "vendored templates — rebuild it from this tree"
 fi
 
 step "the first owner"
