@@ -20,11 +20,17 @@ machine:
 The other difference is backups. Everyone in this space takes them. This one
 restores each backup into a scratch database, counts the rows against the
 source, and puts the answer on the page — so *"we have backups"* and *"the
-backup works"* stop being the same sentence. Of eighteen platforms surveyed,
-none does this.
+backup works"* stop being the same sentence. **No platform you deploy with does
+this.** The practice is not new — Veeam has booted and verified backups in an
+isolated lab for years — but on developer platforms it is absent, and a small
+market of bolt-on services exists precisely because it is. The survey behind
+that sentence, with a source for every row, is in
+[docs/BACKUP-SURVEY.md](docs/BACKUP-SURVEY.md).
 
-**Everything is free and open source.** There is no paid tier, no enterprise
-module and no private repository holding features back.
+**Everything is free and open source.** Every feature ships in this repository
+— there is no enterprise build and nothing held back. Whether the project ever
+charges for anything is undecided; this line will say so plainly on the day it
+is, and what has already been published stays published.
 
 ## What is here today
 

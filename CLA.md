@@ -20,14 +20,17 @@ irrevocable licence to reproduce, modify, publicly display, sublicense and
 distribute your contribution and works derived from it, **under any licence
 terms, including proprietary ones.**
 
-This is the clause that matters, and the plan it was written for no longer
-exists: the open-core model was dropped on 2026-08-29, and there is no
-enterprise build and no paid tier — see [CONTRIBUTING.md](CONTRIBUTING.md).
-What the clause still does is keep the project's licence changeable later
-without having to find and ask every past contributor. Whether that is worth
-asking you to sign anything is an open question. It does not require you to
-give anything up: you keep the copyright to your contribution and may use it
-however you like, elsewhere.
+This is the clause that matters. It was written for an open-core model that
+was dropped on 2026-08-29, and for a short while it had no purpose. On
+2026-09-01 it got one again: the project intends to become something people run
+in production, and a commercial licence alongside the AGPL is one of the ways it
+may pay for its own maintenance. That option only exists while the project can
+license the whole codebase, which is what this clause preserves.
+
+There is still no enterprise build and no paid tier, and every feature is in
+this repository — see [CONTRIBUTING.md](CONTRIBUTING.md). This clause does not
+require you to give anything up: you keep the copyright to your contribution and
+may use it however you like, elsewhere.
 
 ## 2. Patent licence
 
