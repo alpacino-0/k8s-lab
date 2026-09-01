@@ -186,10 +186,65 @@ func (r *WorkloadReconciler) reconcileClaims(ctx context.Context, app *platformv
 	return nil
 }
 
+// reconcileGeneratedSecret mints what the workload asked for, once.
+//
+// Read before write, and that read is the whole mechanism: desiredGeneratedSecret
+// keeps every value it is handed and only invents the missing ones, so a
+// reconcile that could not read the existing Secret would mint a fresh set and
+// hand the application credentials its own data no longer matches. The read
+// failing is therefore an error rather than a nil, unlike the not-found case.
+//
+// Not owned by the Workload, for the reason its volumes are not: deleting an app
+// to recreate it must not destroy the only copy of a password. The Secret
+// outlives the workload and is removed with the namespace or by hand.
+func (r *WorkloadReconciler) reconcileGeneratedSecret(
+	ctx context.Context, app *platformv1alpha1.Workload,
+) error {
+	if len(app.Spec.Secrets) == 0 {
+		return nil
+	}
+	key := client.ObjectKey{Name: generatedSecretName(app), Namespace: app.Namespace}
+
+	var have corev1.Secret
+	err := r.Get(ctx, key, &have)
+	switch {
+	case apierrors.IsNotFound(err):
+		want, err := desiredGeneratedSecret(app, nil)
+		if err != nil {
+			return err
+		}
+		if err := r.Create(ctx, want); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("generated secret: %w", err)
+		}
+		return nil
+	case err != nil:
+		return fmt.Errorf("reading the generated secret: %w", err)
+	}
+
+	want, err := desiredGeneratedSecret(app, &have)
+	if err != nil {
+		return err
+	}
+	// Nothing to say. Compared on the key set rather than on the values,
+	// because the values are equal by construction — anything already there was
+	// copied — and comparing them would mean logging a diff of secrets.
+	if len(want.StringData) == len(have.Data) {
+		return nil
+	}
+	have.StringData = want.StringData
+	return r.Update(ctx, &have)
+}
+
 func (r *WorkloadReconciler) reconcileOwned(ctx context.Context, app *platformv1alpha1.Workload) error {
 	// Before the Deployment, which names the claims: a pod referring to a claim
 	// that does not exist stays Pending without saying why in the Deployment.
 	if err := r.reconcileClaims(ctx, app); err != nil {
+		return err
+	}
+
+	// Before the Deployment, which mounts it. A pod that names a Secret which
+	// does not exist stays Pending, and the Deployment says nothing about why.
+	if err := r.reconcileGeneratedSecret(ctx, app); err != nil {
 		return err
 	}
 

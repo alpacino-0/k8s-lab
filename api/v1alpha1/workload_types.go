@@ -166,6 +166,29 @@ type WorkloadSpec struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Database string `json:"database,omitempty"`
 
+	// Secrets are values the platform has to invent, and the workload needs.
+	//
+	// A request, not a value. The name of the environment variable and what kind
+	// of thing to make; never the thing itself, which is the whole point — a
+	// value written here would be a credential in the object, in the git commit
+	// that produced it, and in every diff of both.
+	//
+	// The operator mints them and reads back what it already minted, exactly the
+	// way the Database's own password works (desiredDatabaseSecret). That
+	// precedent is why this is here rather than in the control plane: a control
+	// plane that writes the Secret directly puts a value in the cluster that git
+	// has never seen, so an install rebuilt from git alone comes back without
+	// it — and silently, because nothing is missing from the manifest.
+	//
+	// Catalogue templates are what forced it: measured against the 341 that
+	// convert, 159 ask for a generated value, and refusing all of them leaves
+	// less than half the catalogue installable.
+	//
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
+	Secrets []GeneratedSecret `json:"secrets,omitempty"`
+
 	// Volumes are directories that survive the pod.
 	//
 	// Needed by most of what anybody actually installs: measured against the 371
@@ -187,6 +210,40 @@ type WorkloadSpec struct {
 	// Refused together with volumes; see the rule on WorkloadSpec.
 	Autoscale *Autoscale `json:"autoscale,omitempty"`
 }
+
+// GeneratedSecret is one value the platform invents once and then keeps.
+type GeneratedSecret struct {
+	// Name is the environment variable the workload reads it from.
+	// +kubebuilder:validation:Pattern=`^[A-Z][A-Z0-9_]*$`
+	// +kubebuilder:validation:MaxLength=64
+	Name string `json:"name"`
+
+	// Kind is what to make.
+	//
+	// Not a length or a character set, because those are decisions the platform
+	// should own and change: a template that asked for "16 characters" would
+	// pin this API to whatever was thought adequate the day it was written.
+	// +kubebuilder:validation:Enum=password;hex;base64
+	// +kubebuilder:default=password
+	Kind GeneratedKind `json:"kind,omitempty"`
+}
+
+// GeneratedKind is the shape of a generated value. The names come from the
+// compose templates this converts from, where they are spelled
+// SERVICE_PASSWORD_X, SERVICE_HEX_X and SERVICE_BASE64_X.
+type GeneratedKind string
+
+const (
+	// GeneratedPassword is a URL-safe random string. What almost everything
+	// wants, and what a database password already is here.
+	GeneratedPassword GeneratedKind = "password"
+	// GeneratedHex is lowercase hex, for things that parse their secret as one
+	// — a signing key expecting 64 hex characters will not accept base64.
+	GeneratedHex GeneratedKind = "hex"
+	// GeneratedBase64 is standard base64, for the same reason in the other
+	// direction.
+	GeneratedBase64 GeneratedKind = "base64"
+)
 
 // Volume is one directory that outlives the pod.
 type Volume struct {

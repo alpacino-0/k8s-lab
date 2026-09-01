@@ -18,6 +18,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package controller
 
 import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"fmt"
 	"maps"
 	"strings"
 
@@ -454,7 +458,19 @@ func desiredDeployment(app *platformv1alpha1.Workload) *appsv1.Deployment {
 	// EnvFrom below wins. Someone naming a database and then overriding
 	// DB_HOST is pointing the app somewhere else on purpose, and a platform
 	// that silently put its own value last would be overruling them.
-	envFrom := make([]corev1.EnvFromSource, 0, len(app.Spec.EnvFrom)+1)
+	envFrom := make([]corev1.EnvFromSource, 0, len(app.Spec.EnvFrom)+2)
+	// Generated values before the database's, and both before the tenant's, so
+	// the ordering reads the same all the way down: the further from the
+	// platform, the later it wins.
+	if len(app.Spec.Secrets) > 0 {
+		envFrom = append(envFrom, corev1.EnvFromSource{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: generatedSecretName(app),
+				},
+			},
+		})
+	}
 	if app.Spec.Database != "" {
 		envFrom = append(envFrom, corev1.EnvFromSource{
 			SecretRef: &corev1.SecretEnvSource{
@@ -916,4 +932,71 @@ func quantityOrDefault(q resource.Quantity, fallback string) resource.Quantity {
 		return resource.MustParse(fallback)
 	}
 	return q
+}
+
+// generatedSecretName is where a workload's minted values live. Its own object
+// rather than a key on something the tenant edits, so that reading it back is
+// the only way a value survives — and so that deleting the Workload can leave it
+// behind, the way a volume's claim is left behind.
+func generatedSecretName(app *platformv1alpha1.Workload) string {
+	return app.Name + "-generated"
+}
+
+// desiredGeneratedSecret mints what the workload asked for, and keeps what it
+// already minted.
+//
+// existing is what the cluster holds, or nil. A caller that cannot read it must
+// pass nil rather than an empty Secret — the same contract as
+// desiredDatabaseSecret, and for the same reason: every reconcile would
+// otherwise mint new values and every pod would restart with credentials the
+// application's own data no longer matches.
+//
+// A value is kept if it is there and regenerated only if it is missing, so
+// adding a name to the spec mints one value rather than rotating all of them.
+// Removing a name leaves its value in the Secret rather than deleting it,
+// because a key that vanishes on an edit is a key an application loses without
+// anything saying so; the Secret is cleaned up with the workload or by hand.
+func desiredGeneratedSecret(
+	app *platformv1alpha1.Workload, existing *corev1.Secret,
+) (*corev1.Secret, error) {
+	// Guarded, and the guard is the point: the doc comment above says nil means
+	// "there is nothing yet", and the first version of this called DeepCopy on
+	// it anyway. A nil *Secret deep-copies to nil and reading .Data off that
+	// panics — so the contract was written correctly and then not honoured four
+	// lines later, which envtest caught on the first run.
+	data := map[string]string{}
+	if existing != nil {
+		for k, v := range existing.Data {
+			data[k] = string(v)
+		}
+	}
+
+	for _, want := range app.Spec.Secrets {
+		if data[want.Name] != "" {
+			continue
+		}
+		raw := make([]byte, passwordBytes)
+		if _, err := rand.Read(raw); err != nil {
+			return nil, fmt.Errorf("generating %s: %w", want.Name, err)
+		}
+		switch want.Kind {
+		case platformv1alpha1.GeneratedHex:
+			data[want.Name] = hex.EncodeToString(raw)
+		case platformv1alpha1.GeneratedBase64:
+			data[want.Name] = base64.StdEncoding.EncodeToString(raw)
+		default:
+			// Base64 rather than hex: the same entropy in fewer characters, and
+			// every byte of it is safe in a connection string and in a shell.
+			data[want.Name] = base64.RawURLEncoding.EncodeToString(raw)
+		}
+	}
+
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: generatedSecretName(app), Namespace: app.Namespace,
+			Labels: labelsFor(app),
+		},
+		Type:       corev1.SecretTypeOpaque,
+		StringData: data,
+	}, nil
 }
