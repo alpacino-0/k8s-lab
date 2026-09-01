@@ -70,6 +70,23 @@ type Options struct {
 	// unresolvable image should say which one, rather than making the whole
 	// entry disappear.
 	Pin func(image string) (string, error)
+
+	// Ports reports the TCP ports an image says it listens on, for a service
+	// whose compose file declared none.
+	//
+	// A seam for the same reason Pin is, and it closes the same kind of hole
+	// from the other end. Compose leaves Workload.Spec.Port unset when nothing
+	// declared a port; the CRD then defaults it to 8080 and the operator puts
+	// an HTTP probe there. Measured on a cluster on 2026-09-01: a mongo
+	// listening on 27017 never became Ready — "dial tcp 10.244.1.3:8080:
+	// connect: connection refused" — its Service published no endpoints, and
+	// the application that named it could not connect. The entry was offered as
+	// installable throughout, and the converter's own note said the default
+	// "is probably wrong".
+	//
+	// Empty means nothing asks. An entry with a service that declared no port
+	// is then blocked rather than guessed at: see resolvePorts.
+	Ports func(image string) ([]int32, error)
 }
 
 // Plan is everything installing one entry produces, and every reason it should
@@ -200,6 +217,7 @@ func (c *Catalog) Plan(name string, o Options) (Plan, error) {
 	}
 	p.attachSecrets(res)
 	p.pinImages(o.Pin)
+	p.resolvePorts(o.Ports)
 	return p, nil
 }
 
@@ -290,6 +308,63 @@ func ownedByDatabase(want, owned []compose.Source) []string {
 // is a rescue for references the platform would otherwise refuse rather than a
 // provenance pass over all of them. Pinning everything is a stronger claim and
 // a different decision; it is not this one.
+// fieldPort names the blocker field the four refusals below share.
+const fieldPort = "port"
+
+// resolvePorts fills in the port for a workload whose compose file declared
+// none, and blocks the entry when it cannot.
+//
+// Blocking is the point. Before this, an unset port became the CRD's 8080, the
+// operator probed http://:8080/healthz, and a service listening anywhere else
+// never became Ready — so the entry installed, reported itself installable, and
+// did not work. The platform was guessing and saying so in a note nobody could
+// act on.
+//
+// Exactly one distinct port is an answer. Several is not: choosing between 80
+// and 443 is the same guess with better odds, and this exists to stop guessing.
+// Both cases name what was found, because "this image exposes two ports and the
+// platform cannot tell which one your application serves" is something a person
+// can resolve and "not installable" alone is not.
+func (p *Plan) resolvePorts(ports func(string) ([]int32, error)) {
+	for i := range p.Workloads {
+		w := &p.Workloads[i]
+		if w.Spec.Port != 0 {
+			continue
+		}
+		if ports == nil {
+			p.Blockers = append(p.Blockers, Blocker{
+				Object: w.Name, Field: fieldPort,
+				Detail: "no port is declared anywhere in the template and this installation " +
+					"cannot ask the registry, so the port it listens on is not known",
+			})
+			continue
+		}
+		found, err := ports(w.Spec.Image)
+		switch {
+		case err != nil:
+			p.Blockers = append(p.Blockers, Blocker{
+				Object: w.Name, Field: fieldPort,
+				Detail: fmt.Sprintf("no port is declared anywhere in the template and %s "+
+					"could not be asked: %v", w.Spec.Image, err),
+			})
+		case len(found) == 0:
+			p.Blockers = append(p.Blockers, Blocker{
+				Object: w.Name, Field: fieldPort,
+				Detail: fmt.Sprintf("no port is declared anywhere in the template and %s "+
+					"exposes none, so nothing says what it listens on", w.Spec.Image),
+			})
+		case len(found) > 1:
+			p.Blockers = append(p.Blockers, Blocker{
+				Object: w.Name, Field: fieldPort,
+				Detail: fmt.Sprintf("no port is declared anywhere in the template and %s "+
+					"exposes %v, so which one serves this application is a guess", w.Spec.Image, found),
+			})
+		default:
+			w.Spec.Port = found[0]
+		}
+	}
+}
+
 func (p *Plan) pinImages(pin func(string) (string, error)) {
 	images := make([]*string, 0, len(p.Workloads)+len(p.Databases))
 	objects := make([]string, 0, cap(images))

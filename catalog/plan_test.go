@@ -18,6 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package catalog_test
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -257,7 +258,7 @@ func TestAnImageTheAPIRefusesBlocksTheEntry(t *testing.T) {
 	}
 
 	t.Run("a tag is enough", func(t *testing.T) {
-		c := loadOne(t, "e", "services:\n  app:\n    image: example/app:1.2.3\n")
+		c := loadOne(t, "e", "services:\n  app:\n    image: example/app:1.2.3\n    ports: [\"8080:8080\"]\n")
 		if p := planOf(t, c, "e", catalog.Options{}); !p.Installable() {
 			t.Errorf("blockers = %v", p.Blockers)
 		}
@@ -266,7 +267,7 @@ func TestAnImageTheAPIRefusesBlocksTheEntry(t *testing.T) {
 
 // The seam that takes the offered entries that install from 119 to 280.
 func TestPinTurnsARefusedImageIntoAnInstallableOne(t *testing.T) {
-	c := loadOne(t, "e", "services:\n  app:\n    image: example/app:latest\n")
+	c := loadOne(t, "e", "services:\n  app:\n    image: example/app:latest\n    ports: [\"8080:8080\"]\n")
 
 	asked := 0
 	p := planOf(t, c, "e", catalog.Options{Pin: func(image string) (string, error) {
@@ -297,8 +298,10 @@ func TestAnImageThatCannotBeResolvedNamesItself(t *testing.T) {
 services:
   app:
     image: example/app:latest
+    ports: ["8080:8080"]
   side:
     image: example/side:latest
+    ports: ["9090:9090"]
 `)
 	p := planOf(t, c, "e", catalog.Options{Pin: func(image string) (string, error) {
 		if strings.Contains(image, "side") {
@@ -327,7 +330,9 @@ func TestAnAcceptableImageIsNeverSentToTheResolver(t *testing.T) {
 services:
   app:
     image: example/app:1.2.3
+    ports: ["8080:8080"]
   side:
+    ports: ["9090:9090"]
     image: example/side@sha256:`+strings.Repeat("c", 64)+`
 `)
 	var asked []string
@@ -348,7 +353,7 @@ services:
 // A resolver that answers without fixing anything is not believed. The check is
 // on the value that would be committed, not on the fact that a call returned.
 func TestAResolverThatChangesNothingStillBlocks(t *testing.T) {
-	c := loadOne(t, "e", "services:\n  app:\n    image: example/app:latest\n")
+	c := loadOne(t, "e", "services:\n  app:\n    image: example/app:latest\n    ports: [\"8080:8080\"]\n")
 	p := planOf(t, c, "e", catalog.Options{Pin: func(image string) (string, error) {
 		return image, nil
 	}})
@@ -395,4 +400,78 @@ func render(p catalog.Plan) string {
 		fmt.Fprintf(&b, "blocker %s\n", x)
 	}
 	return b.String()
+}
+
+// A service that declares no port takes it from the image, and an entry whose
+// port cannot be established is refused rather than guessed at.
+//
+// The guess was 8080, from the CRD's default, and it was not idle: the operator
+// puts an HTTP probe on whatever the port says. Measured on a cluster on
+// 2026-09-01 — a mongo listening on 27017 never became Ready, "dial tcp
+// 10.244.1.3:8080: connect: connection refused", its Service published no
+// endpoints, and the application that named it could not connect. The entry was
+// offered as installable the whole time.
+func TestAPortIsTakenFromTheImageOrTheEntryIsRefused(t *testing.T) {
+	const tpl = "services:\n  app:\n    image: example/db:1.0\n"
+
+	t.Run("one exposed port is the answer", func(t *testing.T) {
+		p := planOf(t, loadOne(t, "e", tpl), "e", catalog.Options{
+			Ports: func(string) ([]int32, error) { return []int32{27017}, nil },
+		})
+		if !p.Installable() {
+			t.Fatalf("blockers = %v", p.Blockers)
+		}
+		if got := p.Workloads[0].Spec.Port; got != 27017 {
+			t.Errorf("port = %d, want the one the image declares", got)
+		}
+	})
+
+	// Each of these is a different sentence on purpose. "Not installable" alone
+	// tells a person nothing they can act on; "this image exposes two ports"
+	// tells them to declare one.
+	for _, c := range []struct {
+		name  string
+		ports func(string) ([]int32, error)
+		want  string
+	}{
+		{"nothing asks", nil, "cannot ask the registry"},
+		{"the registry will not answer", func(string) ([]int32, error) {
+			return nil, errors.New("registry-1.docker.io is rate limiting this address")
+		}, "rate limiting"},
+		{"the image exposes none", func(string) ([]int32, error) {
+			return nil, nil
+		}, "exposes none"},
+		{"the image exposes several", func(string) ([]int32, error) {
+			return []int32{80, 443}, nil
+		}, "[80 443]"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p := planOf(t, loadOne(t, "e", tpl), "e", catalog.Options{Ports: c.ports})
+			if p.Installable() {
+				t.Fatalf("offered as installable with the port unknown")
+			}
+			if !strings.Contains(p.Blockers[0].String(), c.want) {
+				t.Errorf("blocker = %q, want it to say %q", p.Blockers[0], c.want)
+			}
+		})
+	}
+
+	// And a template that declares its own port never asks. The registry is a
+	// fallback, not a second opinion: a compose file that says 5432 is the
+	// author speaking, and asking anyway would make installing depend on a
+	// network call that has nothing to add.
+	t.Run("a declared port is not second-guessed", func(t *testing.T) {
+		asked := 0
+		c := loadOne(t, "e", "services:\n  app:\n    image: example/db:1.0\n    ports: [\"5432:5432\"]\n")
+		p := planOf(t, c, "e", catalog.Options{Ports: func(string) ([]int32, error) {
+			asked++
+			return []int32{9999}, nil
+		}})
+		if asked != 0 {
+			t.Errorf("the registry was asked %d times about a port the template declares", asked)
+		}
+		if got := p.Workloads[0].Spec.Port; got != 5432 {
+			t.Errorf("port = %d, want the template's own 5432", got)
+		}
+	})
 }

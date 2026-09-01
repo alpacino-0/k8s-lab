@@ -63,6 +63,7 @@ var testTemplates = fstest.MapFS{
 services:
   app:
     image: example.test/tidy:1.4.2
+    ports: ["8080:8080"]
     environment:
       - LOG_LEVEL=info
 `)},
@@ -73,6 +74,7 @@ services:
 services:
   app:
     image: example.test/secretive:2.0.0
+    ports: ["8080:8080"]
     environment:
       - API_TOKEN=${SERVICE_PASSWORD_SECRETIVE}
 `)},
@@ -83,6 +85,7 @@ services:
 services:
   app:
     image: example.test/minty:3.1.0
+    ports: ["8080:8080"]
     environment:
       - API_TOKEN=${SERVICE_PASSWORD_MINTY}
       - SIGNING_KEY=${SERVICE_HEX_MINTY}
@@ -95,6 +98,7 @@ services:
 services:
   app:
     image: example.test/composite:1.0.0
+    ports: ["8080:8080"]
     environment:
       - DATABASE_URL=postgres://${SERVICE_USER_COMPOSITE}:${SERVICE_PASSWORD_COMPOSITE}@db:5432/app
 `)},
@@ -106,6 +110,7 @@ services:
 services:
   app:
     image: example.test/shared:1.0.0
+    ports: ["8080:8080"]
     environment:
       - TOKEN_A=${SERVICE_PASSWORD_SHARED}
       - TOKEN_B=${SERVICE_PASSWORD_SHARED}
@@ -117,6 +122,7 @@ services:
 services:
   app:
     image: example.test/usery:1.0.0
+    ports: ["8080:8080"]
     environment:
       - ADMIN_USER=${SERVICE_USER_USERY}
 `)},
@@ -160,8 +166,10 @@ services:
 services:
   web:
     image: example.test/web:1.0.0
+    ports: ["8080:8080"]
   worker:
     image: example.test/worker:1.0.0
+    ports: ["8080:8080"]
 `)},
 	// Refused: a template that is only a database. Never seen in the upstream
 	// corpus — measured, 0 of 341 — but an app environment whose whole content
@@ -180,6 +188,7 @@ services:
 services:
   app:
     image: example.test/floating:latest
+    ports: ["8080:8080"]
 `)},
 }
 

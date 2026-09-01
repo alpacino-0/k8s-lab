@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path"
 	"strings"
 	"testing"
 
@@ -243,5 +244,134 @@ func TestAnAtWithNoDigestIsABadReference(t *testing.T) {
 	r := newPlatformResolver(t, &platformServer{})
 	if _, err := r.Platforms(context.Background(), "example.test/app@notadigest"); !errors.Is(err, registry.ErrReference) {
 		t.Errorf("Platforms returned %v, want ErrReference", err)
+	}
+}
+
+// What an image says it listens on, read from its config blob.
+//
+// The reason this is not a guess: before it existed, a service whose compose
+// file declared no ports left Workload.Spec.Port unset, the CRD defaulted it to
+// 8080, and the operator put an HTTP probe there. Measured on a cluster on
+// 2026-09-01, a mongo on 27017 never became Ready — "dial tcp
+// 10.244.1.3:8080: connect: connection refused" — while its own log said
+// "Ready to accept connections tcp".
+func TestAnImageIsAskedWhatItListensOn(t *testing.T) {
+	// A manifest that points at a config blob, which is what every case here
+	// needs before the ports can be read out of it.
+	const configPointer = `{"config":{"digest":"sha256:cfg"}}`
+
+	for _, c := range []struct {
+		name     string
+		manifest string
+		config   string
+		want     []int32
+	}{
+		{
+			name:     "a single manifest",
+			manifest: configPointer,
+			config:   `{"config":{"ExposedPorts":{"27017/tcp":{}}}}`,
+			want:     []int32{27017},
+		}, {
+			// Older images write the number with no protocol.
+			name:     "a bare port with no protocol",
+			manifest: configPointer,
+			config:   `{"config":{"ExposedPorts":{"6379":{}}}}`,
+			want:     []int32{6379},
+		}, {
+			// A Service this platform renders is TCP, so a port it cannot serve
+			// is not an answer — returning it would move the same silent
+			// mismatch one layer along.
+			name:     "udp is not an answer",
+			manifest: configPointer,
+			config:   `{"config":{"ExposedPorts":{"53/udp":{},"53/tcp":{}}}}`,
+			want:     []int32{53},
+		}, {
+			name:     "several, sorted, for the caller to refuse",
+			manifest: configPointer,
+			config:   `{"config":{"ExposedPorts":{"443/tcp":{},"80/tcp":{}}}}`,
+			want:     []int32{80, 443},
+		}, {
+			name:     "an image that exposes nothing",
+			manifest: configPointer,
+			config:   `{"config":{}}`,
+			want:     nil,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newPlatformResolver(t, &platformServer{manifest: c.manifest, config: c.config})
+			got, err := r.Ports(context.Background(), "example/app:1")
+			if err != nil {
+				t.Fatalf("Ports: %v", err)
+			}
+			if len(got) != len(c.want) {
+				t.Fatalf("Ports = %v, want %v", got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("Ports = %v, want %v", got, c.want)
+				}
+			}
+		})
+	}
+}
+
+// A registry that will not answer is not an image with no ports. The caller
+// refuses in both cases and says which, so "declare a port" and "wait and try
+// again" do not arrive as one sentence.
+func TestAPortQuestionThatCannotBeAnsweredIsAnError(t *testing.T) {
+	r := newPlatformResolver(t, &platformServer{status: http.StatusTooManyRequests})
+	if _, err := r.Ports(context.Background(), "example/app:1"); err == nil {
+		t.Fatal("a rate-limited registry answered a port")
+	}
+}
+
+// An index has to be followed to one of its members: the ports are in an
+// image's config and an index has none of its own.
+//
+// Its own server rather than platformServer, which answers every manifest
+// request with the same body — enough for Platforms, which stops at the index,
+// and not for this, which asks a second question whose answer is different.
+func TestPortsFollowAnIndexToAnImage(t *testing.T) {
+	const (
+		index = `{"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[` +
+			`{"platform":{"os":"unknown","architecture":"unknown"},"digest":"sha256:att"},` +
+			`{"platform":{"os":"linux","architecture":"arm64"},"digest":"sha256:img"}]}`
+		image = `{"config":{"digest":"sha256:cfg"}}`
+		cfg   = `{"config":{"ExposedPorts":{"9200/tcp":{}}}}`
+	)
+	var askedFor []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v2/", func(w http.ResponseWriter, r *http.Request) {
+		askedFor = append(askedFor, path.Base(r.URL.Path))
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/blobs/"):
+			_, _ = w.Write([]byte(cfg))
+		case strings.HasSuffix(r.URL.Path, "/manifests/1"):
+			_, _ = w.Write([]byte(index))
+		default:
+			_, _ = w.Write([]byte(image))
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	base, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	r := &registry.Resolver{Client: &http.Client{Transport: toServer{base: base}}}
+
+	got, err := r.Ports(context.Background(), "example/app:1")
+	if err != nil {
+		t.Fatalf("Ports: %v", err)
+	}
+	if len(got) != 1 || got[0] != 9200 {
+		t.Errorf("Ports = %v, want [9200]", got)
+	}
+	// The attestation is skipped rather than followed: it carries no config,
+	// and a client that took the first entry would ask for a blob that is not
+	// there and report the image as unanswerable.
+	if len(askedFor) != 3 || askedFor[1] != "sha256:img" {
+		t.Errorf("asked for %v, want the index, the image manifest, then its config", askedFor)
 	}
 }

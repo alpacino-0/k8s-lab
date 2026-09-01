@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -87,6 +89,9 @@ type manifest struct {
 	MediaType string `json:"mediaType"`
 	Manifests []struct {
 		Platform Platform `json:"platform"`
+		// Digest is what Ports follows to reach one image's config. Platforms
+		// does not need it: an index states every platform in the index itself.
+		Digest string `json:"digest"`
 	} `json:"manifests"`
 	Config struct {
 		Digest string `json:"digest"`
@@ -97,6 +102,10 @@ type manifest struct {
 	Architecture string `json:"architecture"`
 	Variant      string `json:"variant"`
 }
+
+// unknownPlatform is what buildx writes on an attestation, which rides in the
+// same index as the images and is not one.
+const unknownPlatform = "unknown"
 
 // Platforms reports every platform a reference is published for.
 //
@@ -154,7 +163,7 @@ func (r *Resolver) Platforms(ctx context.Context, image string) ([]Platform, err
 			// platform is unknown/unknown is a single-architecture image with
 			// provenance attached, and listing it invites the reader to think
 			// something runs there.
-			if m.Platform.Architecture == "unknown" || m.Platform.OS == "unknown" {
+			if m.Platform.Architecture == unknownPlatform || m.Platform.OS == unknownPlatform {
 				continue
 			}
 			if m.Platform.OS == "" && m.Platform.Architecture == "" {
@@ -295,4 +304,125 @@ func hostOf(endpoint string) string {
 	rest := strings.TrimPrefix(endpoint, "https://")
 	host, _, _ := strings.Cut(rest, "/")
 	return host
+}
+
+// imageConfig is the half of an image config blob this package reads for ports.
+//
+// Its own type rather than more fields on manifest: ExposedPorts lives under
+// "config", and manifest already reads "config" as the pointer to this blob.
+// One struct for both would have two different meanings for one key.
+type imageConfig struct {
+	Config struct {
+		// The keys are "27017/tcp" or, on older images, a bare "27017". The
+		// values are always empty objects; the set is the whole content.
+		ExposedPorts map[string]json.RawMessage `json:"ExposedPorts"`
+	} `json:"config"`
+}
+
+// Ports reports the TCP ports an image says it listens on, distinct and sorted.
+//
+// This exists because the platform was guessing. A compose service that
+// declares no ports left Workload.Spec.Port unset, the CRD defaulted it to
+// 8080, and the operator put an HTTP probe on 8080 — so a mongo listening on
+// 27017 never became Ready, its Service published no endpoints, and the
+// application that named it could not connect. Measured on a cluster on
+// 2026-09-01: "Startup probe failed: dial tcp 10.244.1.3:8080: connect:
+// connection refused", against an image whose own log said "Ready to accept
+// connections tcp" on 6379.
+//
+// The image knows. EXPOSE is written into the config blob by whoever built it,
+// and mongo says 27017, valkey 6379, elasticsearch 9200. Asking is one request
+// more than assuming and is the difference between a declaration and a guess.
+//
+// UDP-only ports are not reported. A Service this platform renders is TCP, so a
+// port it cannot serve is not an answer — and returning it would produce the
+// same silent mismatch one layer along.
+//
+// An index is followed through its first image manifest. Exposed ports are a
+// property of what was built rather than of the architecture it was built for,
+// and an index whose members disagreed about them would be an image nobody
+// could describe in one sentence anyway.
+func (r *Resolver) Ports(ctx context.Context, image string) ([]int32, error) {
+	name, digest, pinned := strings.Cut(image, "@")
+	if pinned && !strings.Contains(digest, ":") {
+		return nil, fmt.Errorf("%w: %s: %q is not a digest", ErrReference, image, digest)
+	}
+	ref, err := parse(name)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrReference, image, err)
+	}
+	target := ref.tag
+	if pinned {
+		target = digest
+	}
+
+	body, err := r.manifestBody(ctx, ref, target)
+	if err != nil {
+		return nil, err
+	}
+	var doc manifest
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, fmt.Errorf("%w: %s sent a manifest that is not JSON: %w",
+			ErrUnavailable, ref.host, err)
+	}
+
+	if len(doc.Manifests) > 0 {
+		chosen := ""
+		for _, m := range doc.Manifests {
+			// Attestations carry no config to read, and buildx writes them
+			// into the same index with platform unknown/unknown.
+			if m.Platform.Architecture == unknownPlatform || m.Platform.OS == unknownPlatform {
+				continue
+			}
+			if m.Digest != "" {
+				chosen = m.Digest
+				break
+			}
+		}
+		if chosen == "" {
+			return nil, fmt.Errorf("%w: %s offered an index with no image in it",
+				ErrUnavailable, image)
+		}
+		if body, err = r.manifestBody(ctx, ref, chosen); err != nil {
+			return nil, err
+		}
+		doc = manifest{}
+		if err := json.Unmarshal(body, &doc); err != nil {
+			return nil, fmt.Errorf("%w: %s sent a manifest that is not JSON: %w",
+				ErrUnavailable, ref.host, err)
+		}
+	}
+	if doc.Config.Digest == "" {
+		return nil, fmt.Errorf("%w: %s is neither an index nor an image manifest",
+			ErrUnavailable, image)
+	}
+
+	raw, err := r.blob(ctx, ref, doc.Config.Digest)
+	if err != nil {
+		return nil, err
+	}
+	var conf imageConfig
+	if err := json.Unmarshal(raw, &conf); err != nil {
+		return nil, fmt.Errorf("%w: %s sent a config that is not JSON: %w",
+			ErrUnavailable, ref.host, err)
+	}
+
+	seen := map[int32]bool{}
+	var out []int32
+	for key := range conf.Config.ExposedPorts {
+		num, proto, hasProto := strings.Cut(key, "/")
+		if hasProto && !strings.EqualFold(proto, "tcp") {
+			continue
+		}
+		n, err := strconv.Atoi(num)
+		if err != nil || n < 1 || n > 65535 {
+			continue
+		}
+		if !seen[int32(n)] {
+			seen[int32(n)] = true
+			out = append(out, int32(n))
+		}
+	}
+	slices.Sort(out)
+	return out, nil
 }

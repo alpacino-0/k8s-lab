@@ -316,6 +316,15 @@ type Options struct {
 	// one of those rather than this.
 	Pin func(image string) (string, error)
 
+	// Ports answers what an image listens on, for a catalogue service whose
+	// compose file declared no ports. nil with image pinning on installs the
+	// registry client, the same way Pin does.
+	//
+	// One switch for both, because they fail together: an install that will not
+	// call a registry cannot ask either question, and an entry that needs
+	// either answer is refused rather than guessed at.
+	Ports func(image string) ([]int32, error)
+
 	// Panel is the front-end bundle, served at "/". nil mounts nothing, which
 	// is what the free build does today because there is no bundle yet.
 	//

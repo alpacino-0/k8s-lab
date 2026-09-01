@@ -273,7 +273,10 @@ func installFromCatalog(g guard, st stores) http.Handler {
 			return
 		}
 
-		opts := catalog.Options{Namespace: req.Namespace, Domain: req.Domain, Pin: st.pin}
+		opts := catalog.Options{
+			Namespace: req.Namespace, Domain: req.Domain,
+			Pin: st.pin, Ports: st.ports,
+		}
 		if req.VolumeSize != "" {
 			size, err := resource.ParseQuantity(req.VolumeSize)
 			if err != nil {

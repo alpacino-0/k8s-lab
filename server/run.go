@@ -223,7 +223,9 @@ type stores struct {
 	catalog CatalogSource
 	// pin resolves an image to a digest at install time. nil is no pinning,
 	// which is what an install that turned it off asked for.
-	pin     func(image string) (string, error)
+	pin func(image string) (string, error)
+	// ports answers what an image listens on when the template does not say.
+	ports   func(image string) ([]int32, error)
 	writer  *gitwrite.Writer
 	gitAuth GitAuth
 }
@@ -327,6 +329,7 @@ func (o Options) handler(store evidence.Store, idStore identity.Store) (http.Han
 		evidence: store, placement: o.Placement,
 		backups: o.Backups, builds: o.Builds, registry: o.Config.Registry, catalog: cat,
 		pin:    o.Pin,
+		ports:  o.Ports,
 		writer: &gitwrite.Writer{Evidence: store}, gitAuth: o.GitAuth,
 	}
 	for _, rt := range tenantRoutes {
@@ -473,11 +476,22 @@ func (o Options) withDefaults() Options {
 	if o.Config.ShutdownTimeout == 0 {
 		o.Config.ShutdownTimeout = 15 * time.Second
 	}
-	if o.Pin == nil && !o.Config.NoImagePinning {
+	if !o.Config.NoImagePinning {
 		// One resolver for the process, because its cache is what stops a
 		// catalogue page of templates that all name postgres from being
-		// hundreds of round trips for one answer.
-		o.Pin = (&registry.Resolver{}).Pin
+		// hundreds of round trips for one answer — and because both questions
+		// it answers are asked about the same images.
+		shared := &registry.Resolver{}
+		if o.Pin == nil {
+			o.Pin = shared.Pin
+		}
+		if o.Ports == nil {
+			// A context of its own: Plan is not given one, and a port lookup
+			// that could hang for ever would hold an install open.
+			o.Ports = func(image string) ([]int32, error) {
+				return shared.Ports(context.Background(), image)
+			}
+		}
 	}
 	if o.Config.Registry == "" {
 		// The same value BindFlags gives the flag, named rather than repeated.
