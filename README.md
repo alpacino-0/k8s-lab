@@ -47,13 +47,19 @@ installs alongside itself. A Dockerfile is used when the repository has one and
 the language is detected when it does not. A `Workload` that names a domain gets
 a certificate as well as an ingress.
 
-**Not here yet, stated as what is missing rather than what exists.** Nothing
-triggers a build from a git push — no webhook, nothing polling — so a build
-happens because somebody asked for one. The catalogue is a library with no
-consumer: it can read a directory of templates and turn one into resources, and
-no endpoint or screen reaches it, so there is no one-click n8n yet. Domains work
-from the API and not from the panel. And there is no live log streaming, no CLI,
-and no one-command installer.
+**Not here yet, stated as what is missing rather than what exists.** Domains
+work from the API and not from the panel. There is no `exec` into a running
+container and no scheduled task. Backups are proven by restore but do not go to
+S3. An application's own metrics — its CPU, its memory, its restarts — are not
+collected, and nothing tells you when one breaks: the alert chain is wired and
+tested as far as Alertmanager, and its receiver is still `null`.
+
+The catalogue installs 202 of the 341 templates it offers, and the rest are
+refused by name rather than silently: mostly an image the API will not accept
+and values this platform cannot mint. One of them, gotify, is proven end to end
+in CI — installed from the catalogue into a real cluster and answering on its
+own endpoint. The other 201 are what `whyRefused` says will install, which is
+not the same as having watched them run.
 
 ## What was removed, and why
 

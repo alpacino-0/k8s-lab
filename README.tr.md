@@ -44,12 +44,19 @@ adlandırıyor, platform onu klonluyor, imaj üretiyor ve yanında kurduğu bir
 depoya itiyor. Repoda Dockerfile varsa o kullanılıyor, yoksa dil tanınıyor. Alan
 adı bildiren bir `Workload` artık ingress'in yanında sertifika da alıyor.
 
-**Henüz yok — var olanla değil, eksik olanla anlatılmış hâli.** Bir git push'u
-derlemeye çeviren hiçbir şey yok: ne webhook ne yoklama, yani derleme birisi
-istediği için oluyor. Katalog tüketicisi olmayan bir kütüphane: bir şablon
-dizinini okuyup birini kaynaklara çevirebiliyor, ama ona ulaşan bir uç ya da
-ekran yok — yani tek tuşla n8n henüz yok. Alan adları API'den çalışıyor,
-panelden değil. Ve canlı log akışı, CLI ve tek komutluk kurulum yok.
+**Henüz yok — var olanla değil, eksik olanla anlatılmış hâli.** Alan adları
+API'den çalışıyor, panelden değil. Çalışan bir konteynere `exec` yok, zamanlanmış
+görev yok. Yedekler geri yüklenerek kanıtlanıyor ama S3'e gitmiyor. Bir
+uygulamanın kendi metrikleri — CPU'su, belleği, yeniden başlamaları —
+toplanmıyor, ve biri bozulduğunda size kimse söylemiyor: alarm zinciri
+Alertmanager'a kadar kurulu ve sınanıyor, receiver'ı hâlâ `null`.
+
+Katalog, sunduğu 341 şablonun 202'sini kuruyor; kalanı sessizce değil adıyla
+reddediliyor — çoğunlukla API'nin kabul etmediği bir imaj ve bu platformun
+üretemediği değerler yüzünden. İçlerinden biri, gotify, CI'da uçtan uca
+kanıtlanıyor: katalogdan gerçek bir kümeye kuruluyor ve kendi ucundan cevap
+veriyor. Diğer 201'i ise `whyRefused`'ın "kurulur" dediği şey, ki bu onların
+koştuğunu görmüş olmakla aynı şey değil.
 
 ## Ne kaldırıldı, neden
 
