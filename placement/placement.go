@@ -176,6 +176,36 @@ func (t Trigger) Validate() error {
 	return nil
 }
 
+// Collision reports what a placement being written would land on top of, in the
+// words of what it costs rather than of which columns matched.
+//
+// Shared by every store rather than written in each, for the reason the rest of
+// this package spells things once: three implementations answering the same
+// question in three sentences is three sentences to keep true.
+//
+// Both messages name the environment that already holds it, because that is the
+// one thing the person who typed this cannot see and the only thing they can
+// act on. Neither names a tenant: a repository and a namespace both belong to
+// one tenant already, so there is nobody else to name.
+//
+// have is assumed not to be want. Put is create-or-replace, and a row that
+// conflicted with itself would make every update after the first one fail.
+func Collision(want, have Placement) error {
+	if have.RepoURL == want.RepoURL && have.Branch == want.Branch && have.Path == want.Path {
+		return fmt.Errorf(
+			"%w: %s/%s already writes to %q on branch %q of this repository, and two "+
+				"environments writing one directory overwrite each other's manifest",
+			ErrConflict, have.App, have.Env, want.Path, want.Branch)
+	}
+	if have.Namespace == want.Namespace && have.App == want.App {
+		return fmt.Errorf(
+			"%w: %s/%s is already the workload %q in namespace %q, and two environments "+
+				"in one namespace are one running app",
+			ErrConflict, have.App, have.Env, want.App, want.Namespace)
+	}
+	return nil
+}
+
 // Store is where placements live. The same shape as the other two stores in
 // this repository: an interface the paid build can replace, with one SQL
 // implementation configured per engine behind it.
@@ -196,6 +226,29 @@ type Store interface {
 	// remembers. One tenant may hold as many namespaces as it likes, and may
 	// put as many apps in one as it likes; what it may not do is take one that
 	// is in use elsewhere.
+	//
+	// It also fails with ErrConflict when two placements would land in the
+	// same place, which is a different question from the two above: those are
+	// about tenants and this one is about environments.
+	//
+	// Env reaches exactly one thing in this system — the key of this row. It is
+	// not in the file a manifest is written to, which is RepoURL plus Branch
+	// plus Path plus a constant filename, and it is not in the object that
+	// manifest names, which is App plus Namespace. So two environments that
+	// agree on either tuple are not two environments; they are one, with two
+	// names, and the way that shows up is a deploy to one replacing the other's
+	// desired state with nothing said.
+	//
+	// Measured before it was fixed: POST /apps accepted api/prod and api/qa
+	// pointed at the same repository, branch and path, and accepted api/prod
+	// and api/dev in one namespace. Both answered 201, and both pairs resolved
+	// to one file and one Workload.
+	//
+	// The invariant the plan states — a tenant's environment is a namespace —
+	// is therefore enforced from this side rather than assumed: what is refused
+	// is the collision, not the layout, so a tenant is still free to put two
+	// apps in one namespace or to feed several environments from one
+	// repository along different paths.
 	Put(ctx context.Context, p Placement) (Placement, error)
 
 	// Get returns one placement.

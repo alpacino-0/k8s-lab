@@ -52,43 +52,13 @@ func TestTheClaimIsAConstraint(t *testing.T) {
 		t.Skipf("set %s to run this", dsnEnv)
 	}
 	ctx := context.Background()
-
-	schema := fmt.Sprintf("placement_claim_%d", time.Now().UnixNano())
-	admin, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("sql.Open: %v", err)
-	}
-	if _, err := admin.Exec("CREATE SCHEMA " + schema); err != nil {
-		t.Fatalf("CREATE SCHEMA: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec("DROP SCHEMA " + schema + " CASCADE"); err != nil {
-			t.Errorf("DROP SCHEMA: %v", err)
-		}
-		if err := admin.Close(); err != nil {
-			t.Errorf("closing the admin connection: %v", err)
-		}
-	})
-
-	scoped, err := url.Parse(dsn)
-	if err != nil {
-		t.Fatalf("parsing the DSN: %v", err)
-	}
-	q := scoped.Query()
-	q.Set("search_path", schema)
-	scoped.RawQuery = q.Encode()
-
-	store, err := postgres.Open(ctx, scoped.String())
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	store, scopedDSN := scopedStore(t, dsn, "claim")
 
 	const repo = "https://github.com/damgahq/contested"
 
 	// A second pool, so the held transaction cannot be the same connection the
 	// store is about to use.
-	other, err := sql.Open("pgx", scoped.String())
+	other, err := sql.Open("pgx", scopedDSN)
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
@@ -159,6 +129,154 @@ func TestTheClaimIsAConstraint(t *testing.T) {
 		t.Errorf("RepoOwner = %q, want t_beta", owner)
 	}
 	if _, err := store.Get(ctx, "t_alpha", "api", "prod"); !errors.Is(err, placement.ErrNotFound) {
+		t.Errorf("the refused placement was written anyway: %v", err)
+	}
+}
+
+// scopedStore opens a placement store inside a schema of its own, so two cases
+// against one database cannot see each other's rows or each other's claims.
+//
+// Extracted when the second case arrived rather than copied: the cleanup here
+// has a failure mode worth having in one place — a DROP SCHEMA CASCADE waits on
+// any transaction still holding a lock, so a case that leaves one open stops
+// reporting a failure and starts hanging until the package times out.
+func scopedStore(t *testing.T, dsn, what string) (placement.Store, string) {
+	t.Helper()
+	ctx := context.Background()
+
+	schema := fmt.Sprintf("placement_%s_%d", what, time.Now().UnixNano())
+	admin, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := admin.Exec("CREATE SCHEMA " + schema); err != nil {
+		t.Fatalf("CREATE SCHEMA: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := admin.Exec("DROP SCHEMA " + schema + " CASCADE"); err != nil {
+			t.Errorf("DROP SCHEMA: %v", err)
+		}
+		if err := admin.Close(); err != nil {
+			t.Errorf("closing the admin connection: %v", err)
+		}
+	})
+
+	scoped, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parsing the DSN: %v", err)
+	}
+	q := scoped.Query()
+	q.Set("search_path", schema)
+	scoped.RawQuery = q.Encode()
+
+	store, err := postgres.Open(ctx, scoped.String())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store, scoped.String()
+}
+
+// The unique indexes in 0005, against the thing the SELECT in Put cannot do.
+//
+// Put asks "does anything already land here" and then writes. Under READ
+// COMMITTED that question is answered from a snapshot: a row another
+// transaction has inserted and not committed is invisible, so two environments
+// landing in one directory both see nothing and both proceed. The index is what
+// makes the second one fail, and without it the SELECT is a check that passes
+// at exactly the moment it is needed.
+//
+// The same forced interleaving as TestTheClaimIsAConstraint, and PostgreSQL for
+// the same reason: SQLite serialises writers behind one lock and would answer
+// correctly even with no index at all.
+//
+// What this asserts is narrower than the conformance suite's version, and
+// deliberately so. There the refusal is ErrConflict with a sentence, because
+// the SELECT saw the row. Here the SELECT could not, so what is left is the
+// constraint — and a driver error is the right outcome. The claim being tested
+// is that the write does not succeed.
+func TestTwoEnvironmentsCannotRaceIntoOneDirectory(t *testing.T) {
+	dsn := os.Getenv(dsnEnv)
+	if dsn == "" {
+		t.Skipf("set %s to run this", dsnEnv)
+	}
+	ctx := context.Background()
+	store, scopedDSN := scopedStore(t, dsn, "landing")
+
+	const (
+		repo   = "https://github.com/damgahq/two-envs"
+		tenant = "t_alpha"
+		dir    = "apps/api"
+		app    = "api"
+		branch = "main"
+	)
+
+	// prod exists and is committed, so the repository and namespace claims are
+	// already alpha's and neither of those is what answers below.
+	if _, err := store.Put(ctx, placement.Placement{
+		TenantID: tenant, App: app, Env: "prod",
+		RepoURL: repo, Branch: branch, Path: "other/api", Namespace: "alpha-prod",
+	}); err != nil {
+		t.Fatalf("the committed placement: %v", err)
+	}
+
+	other, err := sql.Open("pgx", scopedDSN)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer func() { _ = other.Close() }()
+
+	tx, err := other.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	// staging takes the directory, and does not commit. Nothing can read this
+	// row, which is the whole point.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO placement (tenant_id, app, env, repo_url, branch, path, namespace, created_at, updated_at)
+		VALUES ($1, $5, 'staging', $2, $6, $3, 'alpha-staging', $4, $4)`,
+		tenant, repo, dir, "2026-09-01T00:00:00.000000Z", app, branch); err != nil {
+		t.Fatalf("the held placement: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.Put(ctx, placement.Placement{
+			TenantID: tenant, App: app, Env: "qa",
+			RepoURL: repo, Branch: branch, Path: dir, Namespace: "alpha-qa",
+		})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("Put returned %v while an uncommitted row held %q: it never blocked, so "+
+			"nothing but timing was keeping two environments out of one directory", err, dir)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("committing the held placement: %v", err)
+	}
+	committed = true
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("both environments were written into one directory: each deploy now " +
+				"overwrites the other's workload.yaml, and neither says so")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Put never returned after the held row was committed")
+	}
+
+	if _, err := store.Get(ctx, tenant, app, "qa"); !errors.Is(err, placement.ErrNotFound) {
 		t.Errorf("the refused placement was written anyway: %v", err)
 	}
 }
