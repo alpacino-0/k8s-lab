@@ -190,7 +190,7 @@ func stateRepo(t *testing.T) string {
 	if _, err := git.PlainInit(bare, true); err != nil {
 		t.Fatalf("init: %v", err)
 	}
-	work := filepath.Join(dir, "seed")
+	work := filepath.Join(dir, seedName)
 	seed, err := git.PlainInit(work, false)
 	if err != nil {
 		t.Fatalf("seed init: %v", err)
@@ -210,8 +210,8 @@ func stateRepo(t *testing.T) string {
 	if _, err := tree.Add("README.md"); err != nil {
 		t.Fatalf("seed add: %v", err)
 	}
-	who := &object.Signature{Name: "seed", Email: "seed@example.test", When: time.Now()}
-	if _, err := tree.Commit("seed", &git.CommitOptions{Author: who, Committer: who}); err != nil {
+	who := &object.Signature{Name: seedName, Email: seedEmail, When: time.Now()}
+	if _, err := tree.Commit(seedName, &git.CommitOptions{Author: who, Committer: who}); err != nil {
 		t.Fatalf("seed commit: %v", err)
 	}
 	head, err := seed.Head()
@@ -265,7 +265,7 @@ func seedWorkload(t *testing.T, repoPath string, app platformv1alpha1.Workload) 
 	if _, err := tree.Add(filepath.Join(lifeDir, manifest.File)); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	who := &object.Signature{Name: "seed", Email: "seed@example.test", When: time.Now()}
+	who := &object.Signature{Name: seedName, Email: seedEmail, When: time.Now()}
 	if _, err := tree.Commit("seed a workload", &git.CommitOptions{Author: who, Committer: who}); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -724,37 +724,46 @@ func TestRestartRefusesAViewer(t *testing.T) {
 	}
 }
 
-// A deploy nothing ever observed has no image on its record, and a rollback to
-// it refuses rather than guessing.
+// A deploy that nothing observed can still be rolled back to.
 //
-// This is the limitation worth stating plainly: the git write path does not
-// record which image it deployed. Writer.Deploy opens the record with the ref,
-// the actor and the source; evidence.Image is filled in later by the observer,
-// which reads the container image off the live Deployment. So on an install
-// running with ObserveDeploys off — a legitimate way to run a control plane
-// that does not live in the target cluster — every record carries an empty
-// image and nothing can be rolled back to.
+// This test asserted the opposite when it was written, and the reason it
+// changed is worth keeping. internal/gitwrite opened a record with the ref, the
+// actor and the source and left evidence.Image empty; the observer filled it in
+// later from the live Deployment. So on an install running with ObserveDeploys
+// off — a legitimate way to run a control plane that does not live in the
+// target cluster — every record carried an empty image and there was nothing to
+// roll back to. Refusing was the only honest answer available.
 //
-// Refusing is the only honest answer available here. The image is recoverable
-// in principle: the record's transition carries the commit that deploy pushed,
-// and the manifest at that commit names the image. Reading a file at an
-// arbitrary revision is a capability internal/gitwrite does not have.
-func TestARollbackOnAnUnobservedDeployRefusesRatherThanGuessing(t *testing.T) {
+// It was the wrong thing to fix here. The record should have carried what was
+// asked for from the moment it was asked, and it does now: the write path
+// records the image, and the observer's image remains a separate fact about
+// what ended up running. The refusal this replaced is still reachable for a
+// record that genuinely has no image, and the case below asserts that too.
+func TestARollbackReachesADeployNothingObserved(t *testing.T) {
 	l := newLifecycle(t)
-	// Deployed and deliberately not observed.
 	if code, body := l.deploy(`{"image":"` + imageOne + `"}`); code != http.StatusAccepted {
 		t.Fatalf("deploy = %d: %s", code, body)
+	}
+	if code, body := l.deploy(`{"image":"` + imageTwo + `"}`); code != http.StatusAccepted {
+		t.Fatalf("second deploy = %d: %s", code, body)
 	}
 	before := commitsOnMain(t, l.repo)
 
 	code, body := l.rollback("1", accMember)
-	if code != http.StatusConflict {
-		t.Fatalf("rollback to an unobserved deploy = %d, want 409: %s", code, body)
+	if code != http.StatusAccepted {
+		t.Fatalf("rollback to an unobserved deploy = %d, want 202: %s\n"+
+			"the write path records the image now, so there is something to roll back to",
+			code, body)
 	}
-	if !strings.Contains(body, "no image") {
-		t.Errorf("the refusal does not say what is missing: %s", body)
-	}
-	if after := commitsOnMain(t, l.repo); after != before {
-		t.Errorf("a refused rollback committed: %d commits, was %d", after, before)
+	if after := commitsOnMain(t, l.repo); after != before+1 {
+		t.Errorf("a rollback did not commit: %d commits, was %d", after, before)
 	}
 }
+
+// The identity that writes the fixture commits these suites start from. Named
+// once because two files seed repositories the same way, and a reader comparing
+// them should be comparing one value to itself.
+const (
+	seedName  = "seed"
+	seedEmail = "seed@example.test"
+)

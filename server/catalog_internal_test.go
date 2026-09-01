@@ -529,7 +529,7 @@ func testBareRepo(t *testing.T) string {
 	}
 	// An empty bare repository cannot be cloned, so the first commit is made
 	// beside it and pushed.
-	work := filepath.Join(dir, "seed")
+	work := filepath.Join(dir, seedName)
 	seed, err := git.PlainInit(work, false)
 	if err != nil {
 		t.Fatalf("seed init: %v", err)
@@ -549,8 +549,8 @@ func testBareRepo(t *testing.T) string {
 	if _, err := tree.Add("README.md"); err != nil {
 		t.Fatalf("seed add: %v", err)
 	}
-	who := &object.Signature{Name: "seed", Email: "seed@example.test", When: time.Now()}
-	if _, err := tree.Commit("seed", &git.CommitOptions{Author: who, Committer: who}); err != nil {
+	who := &object.Signature{Name: seedName, Email: seedEmail, When: time.Now()}
+	if _, err := tree.Commit(seedName, &git.CommitOptions{Author: who, Committer: who}); err != nil {
 		t.Fatalf("seed commit: %v", err)
 	}
 	head, err := seed.Head()
