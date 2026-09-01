@@ -163,6 +163,10 @@ function mountCatalog(root, base) {
 // The two guards that let this file be both a page and a module, for the reason
 // app.js gives: the browser has document and no module, node --test has the
 // reverse, and the panel has no build step to reconcile them.
+if (typeof window !== 'undefined') {
+  window.damgaCatalog = { catalogQuery, canInstall, refusals, mountCatalog };
+}
+
 if (typeof module !== 'undefined') {
   module.exports = { catalogQuery, canInstall, refusals, mountCatalog };
 }

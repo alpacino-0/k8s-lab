@@ -194,6 +194,16 @@ async function pickTenant(tenantId) {
 
   const nav = $("apps");
   nav.replaceChildren();
+
+  // Above the list and present whether or not there is one. A tenant with
+  // nothing deployed is exactly the tenant that wants this, and the empty
+  // branch below used to return before anything else was offered — which left
+  // the one page that can create an app reachable only from a tenant that
+  // already had one.
+  const catalogue = el("button", { type: "button", class: "catalogue" }, "Install an application");
+  catalogue.addEventListener("click", () => showCatalog());
+  nav.append(catalogue);
+
   if (!apps.length) {
     nav.append(el("p", { class: "muted" }, "Nothing has been deployed here yet."));
     render(el("p", { class: "muted empty" },
@@ -209,31 +219,48 @@ async function pickTenant(tenantId) {
   await pickApp(apps[0]);
 }
 
-// The health view's stop function, or null. Kept at module scope because
-// leaving one app for another has to close the one before it — the same reason
-// the log view returns a stop function rather than assuming the page never
-// changes.
-let stopHealth = null;
+// The stop functions of everything currently mounted.
+//
+// One list rather than a variable per view, because the rule is the same for
+// all of them and it is easy to add a view and forget it: leaving an app for
+// another one, or for the catalogue, has to close what the last one opened. A
+// log stream that is not closed is a connection per app somebody has looked at,
+// all of them still held open on the server.
+let mounted = [];
 
-// mountHealth is the seam onto metrics.js, which is loaded by a plain script
-// tag and publishes itself on window. Absent when that tag is missing, and a
-// missing health box is a better outcome than a page that fails to render at
-// all.
-function mountHealth(el, prefix) {
-  const module = typeof window !== "undefined" ? window.damgaMetrics : null;
-  if (!module) {
-    el.replaceChildren();
-    return null;
+function stopMounted() {
+  for (const stop of mounted) {
+    if (typeof stop === "function") stop();
   }
-  return module.mountMetrics(el, prefix, { fetcher: api });
+  mounted = [];
+}
+
+// The seams onto the three files that are loaded by plain script tags and
+// publish themselves on window.
+//
+// Absent is handled rather than assumed. The panel has no build step, so a
+// missing script tag is a missing global — and a page that throws on one is a
+// page with no evidence view either. Each of these leaves its box empty and the
+// rest of the page renders.
+function mountFrom(globalName, mount) {
+  const module = typeof window !== "undefined" ? window[globalName] : null;
+  if (!module) return null;
+  return mount(module);
+}
+
+function mountHealth(el, prefix) {
+  return mountFrom("damgaMetrics", (m) => m.mountMetrics(el, prefix, { fetcher: api }));
+}
+
+// The log view. It returns its own stop function and manages its own
+// reconnects; what it needs from here is somewhere to draw and the base URL.
+function mountLogs(el, prefix) {
+  return mountFrom("damgaLogs", (m) => m.mountLogs(el, prefix, {}));
 }
 
 async function pickApp(app) {
   state.ref = app;
-  if (stopHealth) {
-    stopHealth();
-    stopHealth = null;
-  }
+  stopMounted();
   for (const button of $("apps").children) {
     const match = button.textContent === `${app.app} ${app.env}`;
     button.setAttribute("aria-current", String(match));
@@ -241,7 +268,46 @@ async function pickApp(app) {
   await showEvidence();
 }
 
+// ---------------------------------------------------------------- catalogue
+
+// The catalogue is the tenant's, not an app's, so it is mounted over the whole
+// detail pane rather than into a box beside a deploy record.
+//
+// Nothing here decides what can be installed. catalog.js asks the install
+// endpoint with dryRun and prints the refusals it gets back word for word,
+// which is the same rule the health view is under: the page shows what the API
+// said, and the moment it works out an answer for itself the page and the
+// endpoint can disagree about the same template.
+function showCatalog() {
+  stopMounted();
+  for (const button of $("apps").children) {
+    if (button.setAttribute) button.setAttribute("aria-current", "false");
+  }
+  state.ref = null;
+
+  const root = el("div", { class: "catalogue-view" });
+  render(root);
+
+  const load = mountFrom("damgaCatalog", (m) => m.mountCatalog(root, tenantBase()));
+  if (!load) {
+    // The script tag is missing. Said rather than left as a blank pane, for
+    // the reason the health view leaves its box empty and the page still
+    // renders: a view that silently is not there looks like a catalogue with
+    // nothing in it.
+    render(el("p", { class: "muted empty" },
+      "The catalogue view did not load; /catalog.js is not being served."));
+    return;
+  }
+  load().catch(fail);
+}
+
 // ---------------------------------------------------------------- evidence
+
+// The tenant's own root. The catalogue lives here rather than under an app,
+// because it is what you use before there is one.
+function tenantBase() {
+  return `/api/v1/tenants/${encodeURIComponent(state.tenant)}`;
+}
 
 function base() {
   const { tenant, ref } = state;
@@ -369,11 +435,19 @@ async function showEvidence() {
   const health = el("div", { class: "box", style: "margin-top:1rem" });
   parts.push(health);
 
+  // And what the process is writing, under what the platform knows about it.
+  // Last because it is the only thing on the page that keeps arriving.
+  const logs = el("div", { class: "box", style: "margin-top:1rem" },
+    el("h3", {}, "Logs"));
+  parts.push(logs);
+
   render(...parts);
 
   // After render, because replaceChildren would otherwise drop what mount put
   // in. api and not fetch: it is the one place a 401 becomes the sign-in form.
-  stopHealth = mountHealth(health, prefix);
+  const logBody = el("div", {});
+  logs.append(logBody);
+  mounted.push(mountHealth(health, prefix), mountLogs(logBody, prefix));
 }
 
 // ---------------------------------------------------------------- rendering

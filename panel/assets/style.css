@@ -123,4 +123,47 @@ tbody tr:last-child td { border-bottom: 0; }
    rather than two, which was how it looked the first time it was rendered. */
 .footnote-limits { font-size: .82rem; margin: .7rem 0 .4rem; }
 .footnote-limits .limit { display: block; }
+
+/* The log view. It had none: the module was written, tested, and never loaded
+   by the page, so nothing had ever drawn it.
+   The min-height and the border are the point rather than decoration. A stream
+   that is connecting, or that stopped, has no lines in it, and an unstyled
+   <pre> with no lines collapses to nothing — which leaves the status line above
+   reading as a caption on an application that printed nothing. An empty box is
+   visibly an empty box. */
+.logs {
+  min-height: 12rem; max-height: 26rem; overflow: auto;
+  margin: .5rem 0 0; padding: .6rem .7rem;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--bg);
+  font-size: .8rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+}
+/* The stream's own status, coloured by what logs.js already decided. */
+p[data-ok="true"] { color: var(--ok); }
+p[data-ok="false"] { color: var(--bad); }
+
+/* The catalogue, which had none either. */
+.catalogue { width: 100%; text-align: left; margin-bottom: .5rem; font-weight: 600; }
+.catalogue-view h2 { margin: 0 0 .8rem; font-size: 1.1rem; }
+#catalog-search {
+  width: 100%; padding: .5rem .6rem; margin-bottom: 1rem;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--bg); color: inherit;
+}
+#catalog-list { display: grid; gap: .5rem; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); }
+.catalog-entry {
+  display: grid; gap: .2rem; text-align: left; padding: .6rem .7rem;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel); color: inherit; cursor: pointer;
+}
+.catalog-entry span { font-size: .8rem; color: var(--muted); }
+#catalog-detail { margin-top: 1.2rem; }
+#catalog-detail h3 { margin: 0 0 .4rem; }
+/* A refusal is the endpoint's answer and the reason it gave, and it has to read
+   as the reason this entry cannot be installed rather than as a footnote. */
+.refusal {
+  margin: .3rem 0; padding: .45rem .6rem; font-size: .85rem;
+  border-left: 3px solid var(--warn); background: var(--panel); border-radius: var(--radius);
+}
+.install { margin-top: .7rem; }
 a { color: var(--accent); }
