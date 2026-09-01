@@ -110,6 +110,26 @@ type Config struct {
 	// and not a field the control plane holds.
 	Registry string
 
+	// PinImages resolves a catalogue entry's images to digests at install time.
+	//
+	// What it buys, measured against the upstream corpus of 371 files of which
+	// 341 are offered: 119 entries install with this off, and 280 with a
+	// resolver that answers for every image. The 161 in between are entries
+	// upstream names by moving tag, which WorkloadSpec.Image refuses.
+	//
+	// Off by default, and not because the gain is in doubt. Turning it on makes
+	// installing depend on a registry answering, and pinning runs over every
+	// image rather than only the refused ones — so an entry whose tag was
+	// already explicit, and which installs today, stops installing while the
+	// registry is unreachable or rate limiting. Whether that trade is worth
+	// making by default is a decision about the product; the number above is
+	// what it is worth, and it is the same number either way.
+	//
+	// False in the flag and false as the zero value, which is what every other
+	// bool here does. Two defaults for one switch is a switch that disagrees
+	// with itself, and this one was written the other way first.
+	PinImages bool
+
 	// CatalogDir is the directory the one-click templates are read from.
 	//
 	// A directory rather than a bundle built into the binary, and the reason is
@@ -158,6 +178,8 @@ func (c *Config) BindFlags(f *flag.FlagSet) {
 		"how long a login lasts")
 	f.StringVar(&c.Registry, "registry", defaultRegistry,
 		"registry a build pushes to when the request does not name an image")
+	f.BoolVar(&c.PinImages, "pin-images", false,
+		"resolve a catalogue entry's images to digests at install time")
 	f.StringVar(&c.CatalogDir, "catalog-dir", "",
 		"directory holding the one-click catalogue templates; empty offers no catalogue")
 	f.StringVar(&c.GitTokenFile, "git-token-file", "",
@@ -244,6 +266,16 @@ type Options struct {
 	// configured, a deploy is refused with a message that says which flag is
 	// missing rather than whatever the forge says about anonymous writes.
 	GitAuth GitAuth
+
+	// Pin resolves an image reference to one the Workload API accepts. nil with
+	// Config.PinImages on installs the registry client; nil with it off means
+	// no pinning at all.
+	//
+	// A seam because a registry client is one of the answers and not the only
+	// one — catalog.Options.Pin says so where it declares the hole: a mirror, a
+	// lockfile committed beside the templates, and an air-gapped install wants
+	// one of those rather than this.
+	Pin func(image string) (string, error)
 
 	// Panel is the front-end bundle, served at "/". nil mounts nothing, which
 	// is what the free build does today because there is no bundle yet.

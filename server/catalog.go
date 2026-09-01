@@ -273,7 +273,7 @@ func installFromCatalog(g guard, st stores) http.Handler {
 			return
 		}
 
-		opts := catalog.Options{Namespace: req.Namespace, Domain: req.Domain}
+		opts := catalog.Options{Namespace: req.Namespace, Domain: req.Domain, Pin: st.pin}
 		if req.VolumeSize != "" {
 			size, err := resource.ParseQuantity(req.VolumeSize)
 			if err != nil {
@@ -282,13 +282,16 @@ func installFromCatalog(g guard, st stores) http.Handler {
 			}
 			opts.VolumeSize = size
 		}
-		// Options.Pin is deliberately not set, and it is the largest single
-		// reason an entry is refused below. Resolving an image to a digest
-		// means asking a registry at install time, and what asks — a client
-		// here, a mirror, a lockfile beside the templates — is an open
-		// decision. Measured against the upstream corpus: 119 of the 341
-		// entries offered are installable with this empty, and 280 with it
-		// filled in.
+		// Options.Pin is filled from Config.PinImages, which is off until an
+		// install turns it on. It is the largest single reason an entry is
+		// refused below: measured against the upstream corpus of 371 files,
+		// 341 offered, 119 install with it empty and 280 with a resolver that
+		// answers for every image.
+		//
+		// What fills it is still a decision rather than a fact — a registry
+		// client is one answer, a mirror or a lockfile beside the templates are
+		// others — which is why it arrives through the seam instead of being
+		// constructed here.
 		plan, err := src.Plan(req.Template, opts)
 		if err != nil {
 			// The only errors Plan returns are an unknown entry and a template

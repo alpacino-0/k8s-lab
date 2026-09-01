@@ -43,6 +43,7 @@ import (
 	placementmem "github.com/damgahq/damga/placement/memory"
 	placementpg "github.com/damgahq/damga/placement/postgres"
 	placementsqlite "github.com/damgahq/damga/placement/sqlite"
+	"github.com/damgahq/damga/registry"
 )
 
 // Run starts the control plane and blocks until ctx is cancelled.
@@ -208,6 +209,9 @@ type stores struct {
 	// catalog is nil on an install with no templates mounted, which the two
 	// endpoints that read it answer 503 for rather than pretending to.
 	catalog CatalogSource
+	// pin resolves an image to a digest at install time. nil is no pinning,
+	// which is what an install that turned it off asked for.
+	pin     func(image string) (string, error)
 	writer  *gitwrite.Writer
 	gitAuth GitAuth
 }
@@ -306,6 +310,7 @@ func (o Options) handler(store evidence.Store, idStore identity.Store) (http.Han
 	st := stores{
 		evidence: store, placement: o.Placement,
 		backups: o.Backups, builds: o.Builds, registry: o.Config.Registry, catalog: cat,
+		pin:    o.Pin,
 		writer: &gitwrite.Writer{Evidence: store}, gitAuth: o.GitAuth,
 	}
 	for _, rt := range tenantRoutes {
@@ -416,6 +421,12 @@ func (o Options) withDefaults() Options {
 	}
 	if o.Config.ShutdownTimeout == 0 {
 		o.Config.ShutdownTimeout = 15 * time.Second
+	}
+	if o.Pin == nil && o.Config.PinImages {
+		// One resolver for the process, because its cache is what stops a
+		// catalogue page of templates that all name postgres from being
+		// hundreds of round trips for one answer.
+		o.Pin = (&registry.Resolver{}).Pin
 	}
 	if o.Config.Registry == "" {
 		// The same value BindFlags gives the flag, named rather than repeated.
