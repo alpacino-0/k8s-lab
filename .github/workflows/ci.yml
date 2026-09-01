@@ -676,6 +676,58 @@ jobs:
       # This repository at this commit, and app/ inside it, because a fixture
       # repository would be a Dockerfile written to make the build pass. The
       # thing being tested is whether an ordinary repository builds.
+      # The redis engine, which shipped green and had never started.
+      #
+      # The session that absorbed chart/templates/redis.yaml tested it at the
+      # render level — the StatefulSet, the port, the secret key, the fsGroup —
+      # and said plainly that no pod had ever run. That is the same gap the
+      # buildpack path had: a second branch of a type, proved by tests that
+      # stand up no cluster. `--requirepass "$REDIS_PASSWORD"` is a shell
+      # expansion inside a container spec, and whether it expands is not a
+      # question a unit test can answer.
+      - name: A redis Database must reach Ready and take a password
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: platform.damga.co/v1alpha1
+          kind: Database
+          metadata:
+            name: ci-redis
+            namespace: damga
+          spec:
+            engine: redis
+            image: redis:8.2.4
+            storage: 128Mi
+          EOF
+          kubectl -n damga wait --for=condition=Ready database/ci-redis --timeout=300s || {
+            echo "::group::why redis did not start"
+            kubectl -n damga get database ci-redis -o jsonpath='{.status.conditions}' | tr ',' '\n'
+            kubectl -n damga get pod,pvc -l app.kubernetes.io/instance=ci-redis -o wide
+            kubectl -n damga describe pod -l app.kubernetes.io/instance=ci-redis | tail -30
+            kubectl -n damga logs -l app.kubernetes.io/instance=ci-redis --tail=40 || true
+            echo "::endgroup::"
+            exit 1
+          }
+
+          # The password has to have reached the server, not merely the Secret.
+          # An unauthenticated PING answering PONG would mean --requirepass never
+          # took effect, which is the failure this engine can have while looking
+          # entirely healthy.
+          pass=$(kubectl -n damga get secret ci-redis -o jsonpath='{.data.REDIS_PASSWORD}' | base64 -d)
+          [ -n "$pass" ] || { echo "no password in the secret"; exit 1; }
+
+          kubectl -n damga exec statefulset/ci-redis -- \
+            redis-cli ping 2>&1 | grep -qi 'NOAUTH\|auth' \
+            || { echo "redis answered an unauthenticated PING — requirepass did not take"; exit 1; }
+
+          kubectl -n damga exec statefulset/ci-redis -- \
+            env REDISCLI_AUTH="$pass" redis-cli set ci-probe ok | grep -qx OK \
+            || { echo "an authenticated write failed"; exit 1; }
+          kubectl -n damga exec statefulset/ci-redis -- \
+            env REDISCLI_AUTH="$pass" redis-cli get ci-probe | grep -qx ok \
+            || { echo "what was written did not come back"; exit 1; }
+
+          kubectl -n damga delete database ci-redis
+
       - name: A Build must produce an image the cluster can pull
         run: |
           cat <<EOF | kubectl apply -f -
