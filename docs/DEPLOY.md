@@ -52,7 +52,7 @@ with a message saying which way round they go.
 | Flag | When |
 |---|---|
 | `--issuer letsencrypt-prod` | the default is `letsencrypt-staging`, deliberately: rehearse against the server that does not rate-limit failures |
-| `--skip-k3s` | k3s is already there, or the kubeconfig points elsewhere |
+| `--skip-k3s` | k3s is already there, or the kubeconfig points elsewhere. The install then asks the cluster what already holds ports 80 and 443, and refuses rather than installing an ingress controller that could never get an address — on stock k3s that is Traefik, and the refusal names it and says how to remove it |
 | `--skip-node-config` | do not write the containerd redirect or restart k3s |
 | `--control-plane-image <ref>` | run a control plane you built yourself instead of the published one |
 | `--skip-control-plane` | the platform and the reference tenant only |

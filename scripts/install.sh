@@ -225,9 +225,78 @@ require_root() {
 install_k3s() {
   # Traefik is disabled because the chart depends on ingress-nginx annotations
   # (limit-rps, limit-burst-multiplier, limit-connections) that Traefik does not
-  # implement. Installing both and choosing later is not an option: two
-  # controllers claiming the same Ingress is a coin toss.
+  # implement.
+  #
+  # This used to say that installing both leaves two controllers claiming the
+  # same Ingress, and that the winner is a coin toss. Measured on 2026-09-02,
+  # and wrong in both halves. There is no contest over the Ingress: every
+  # Ingress this platform creates carries ingressClassName: nginx, and Traefik
+  # does not look at those. The contest is over the ADDRESS -- both klipper-lb
+  # DaemonSets want hostPort 80 and 443 -- and it is not a toss. The first claim
+  # wins, Traefik's is made when the cluster boots, and this script always runs
+  # afterwards. Traefik wins every time, on every run.
+  #
+  # Which is why disabling it here is only half the job. This function is the
+  # path where we build the cluster ourselves; --skip-k3s inherits somebody
+  # else's, and has to look instead. See refuse_if_the_ingress_ports_are_taken.
   run bash -c "curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='--disable traefik' sh -"
+}
+
+# Refuse a cluster where something already holds the ports the ingress needs.
+#
+# --skip-k3s means the cluster came from somewhere else, and on a stock k3s that
+# somewhere else installed Traefik. Its klipper-lb DaemonSet and the one this
+# script is about to create both want hostPort 80 and 443, and the scheduler
+# gives them to whoever asked first -- which is never us.
+#
+# The install does not fail when that happens, and that is the whole reason this
+# check exists. Measured on 2026-09-02 on two fresh clusters, identically both
+# times: the installer printed "Damga is ready.", exited 0 and handed over a
+# password, while ingress-nginx's Service sat at <pending> and port 80 served
+# Traefik's 404. ingress-nginx had the Ingress and was answering 308 correctly
+# on its own nodePort the entire time -- the routes and the address never met.
+# Every surface a person would check read healthy, `kubectl get ingress`
+# included: it shows the node IP, which Traefik advertises and ingress-nginx
+# never got.
+#
+# Matched on behaviour and not on the name traefik, because anything already
+# holding 80 or 443 through a LoadBalancer Service does this -- an ingress-nginx
+# that is already installed, or an haproxy in front of MetalLB.
+refuse_if_the_ingress_ports_are_taken() {
+  local services holders
+  services="$(kubectl get svc -A -o jsonpath=\
+'{range .items[?(@.spec.type=="LoadBalancer")]}\
+{.metadata.namespace}/{.metadata.name}{range .spec.ports[*]} {.port}{end}{"\n"}{end}')"
+  # Our own is not a conflict: on a re-run it is the Service we installed.
+  holders="$(printf '%s\n' "$services" | awk '
+    $1 ~ /^ingress-nginx\// { next }
+    { for (i = 2; i <= NF; i++) if ($i == 80 || $i == 443) { print $1; next } }')"
+  if [[ -z "$holders" ]]; then
+    return 0
+  fi
+  {
+    echo "install.sh: something in this cluster already serves the ingress ports:"
+    printf '  %s\n' $holders
+    echo
+    echo "ingress-nginx needs hostPort 80 and 443 and the first claim wins, so it"
+    echo "would never get an address here: its Service stays <pending> and the port"
+    echo "keeps answering whatever answers now. The install would not fail. It would"
+    echo "finish, say it is ready, and print you a password for a site that serves"
+    echo "somebody else's 404."
+    echo
+    echo "On a stock k3s this is Traefik, and the way out is to take the ports:"
+    echo "  kubectl -n kube-system delete svc traefik"
+    echo "  kubectl -n kube-system delete helmchart traefik"
+    echo
+    echo "Delete the Service, not the Deployment. Measured: deleting only the"
+    echo "Deployment leaves its klipper-lb pods holding the ports -- they follow the"
+    echo "Service -- and takes the address from a 404 to a refused connection."
+    echo
+    echo "Neither is durable on its own; k3s re-applies Traefik from"
+    echo "/var/lib/rancher/k3s/server/manifests/traefik.yaml. Remove it there, or"
+    echo "reinstall k3s with --disable traefik."
+  } >&2
+  exit 1
 }
 
 wait_for_ingress_controller() {
@@ -364,6 +433,10 @@ fi
 step "k3s"
 if [[ "$INSTALL_K3S" == "no" ]]; then
   note "skipped; using the kubeconfig already in scope"
+  # The cluster is somebody else's, so ask it what is already here. Step 1 asks
+  # that question about the machine and never about the cluster, and this is the
+  # one flag that makes the difference matter.
+  run refuse_if_the_ingress_ports_are_taken
 elif [[ "$DRY_RUN" != "1" ]] && command -v k3s >/dev/null 2>&1; then
   note "k3s is already installed"
 else
