@@ -38,6 +38,20 @@ CONTROL_PLANE_IMAGE=""
 BOOTSTRAP="yes"
 DRY_RUN="${DRY_RUN:-0}"
 
+# The control plane's binary inside its image, by absolute path.
+#
+# /damga and not damga. The image is gcr.io/distroless/static: no shell, and no
+# PATH lookup for a bare name, so `kubectl exec -- damga bootstrap` fails with
+# "executable file not found in $PATH". Measured on k3s on 2026-09-02 — the
+# installer reached its last step and could not create the first owner, which
+# ends an install nobody can log into.
+#
+# Named once because it was spelled twice in this file and both were wrong,
+# while a third copy in ci.yml was right — and only the right one ever ran, so
+# CI stayed green for two days over a script no CI job executes.
+# scripts/install_test.go holds this against the Dockerfile's ENTRYPOINT.
+CONTROL_PLANE_BIN="/damga"
+
 # Versions, pinned here and nowhere else in this file.
 INGRESS_VERSION="controller-v1.13.0"
 CERT_MANAGER_VERSION="v1.16.2"
@@ -207,6 +221,43 @@ install_k3s() {
   run bash -c "curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC='--disable traefik' sh -"
 }
 
+wait_for_ingress_controller() {
+  # Two waits, because they fail differently and only one of them is a timeout.
+  #
+  # `kubectl wait` against a label selector that matches nothing answers "no
+  # matching resources found" straight away — it does not spend its own
+  # --timeout waiting for the object to turn up. So a wait placed directly after
+  # an apply races the API server writing the Pod, and loses. Measured on k3s on
+  # 2026-09-02: the Deployment and the Pod both carry creationTimestamp
+  # 00:20:52 and the error printed in that same second, twenty seconds into a
+  # fresh install. Nobody had seen it because no CI job runs this script.
+  #
+  # Deliberately not a sleep. A sleep is a guess about somebody else's
+  # scheduler, and the repository has paid three times this week for a check
+  # whose claim was right and whose timing was wrong. This waits for the object
+  # to exist, then for it to be ready, and prints how long each took — so the
+  # next person to read a slow install has the number rather than a suspicion.
+  # The first clean run through this function printed 2s and 124s: the Pod took
+  # two seconds to exist, and two minutes to be ready. The old wait asked at
+  # zero and was answered at zero, so those two seconds were the whole bug and
+  # the two minutes were never the part that needed waiting for.
+  local start=$SECONDS deadline=$((SECONDS + 300))
+  until [[ -n "$(kubectl -n ingress-nginx get pod \
+      -l app.kubernetes.io/component=controller -o name 2>/dev/null)" ]]; do
+    if (( SECONDS >= deadline )); then
+      echo "install.sh: no ingress-nginx controller pod exists after $((SECONDS - start))s." >&2
+      echo "The manifest applied, so this is the Deployment not producing a Pod:" >&2
+      kubectl -n ingress-nginx get deploy,replicaset,pod >&2 || true
+      return 1
+    fi
+    sleep 2
+  done
+  note "the controller pod existed after $((SECONDS - start))s"
+  kubectl wait -n ingress-nginx --for=condition=Ready pod \
+    -l app.kubernetes.io/component=controller --timeout=300s
+  note "it was ready after $((SECONDS - start))s"
+}
+
 write_containerd_redirect() {
   # The half of the registry that lives on the node, and the half that gets
   # missed — because the build that produced the image succeeds either way and
@@ -269,7 +320,7 @@ bootstrap_owner() {
   # tell the two apart has to either parse the message or never re-run.
   local status=0
   kubectl -n "$SYSTEM_NAMESPACE" exec -i deploy/damga -- \
-    damga bootstrap -evidence-dsn "$CONTROL_PLANE_DSN" \
+    "$CONTROL_PLANE_BIN" bootstrap -evidence-dsn "$CONTROL_PLANE_DSN" \
     -email "$EMAIL" -tenant "$TENANT" || status=$?
   case "$status" in
     0) ;;
@@ -313,8 +364,7 @@ fi
 step "ingress controller"
 run kubectl apply -f \
   "https://raw.githubusercontent.com/kubernetes/ingress-nginx/${INGRESS_VERSION}/deploy/static/provider/baremetal/deploy.yaml"
-run kubectl wait -n ingress-nginx --for=condition=Ready pod \
-  -l app.kubernetes.io/component=controller --timeout=300s
+run wait_for_ingress_controller
 # k3s ships klipper-lb, which binds the node's ports, so a LoadBalancer Service
 # works with no cloud provider behind it. The baremetal manifest ships NodePort.
 run kubectl patch svc ingress-nginx-controller -n ingress-nginx --type=json \
@@ -410,7 +460,7 @@ if [[ "$BOOTSTRAP" == "yes" ]]; then
   # whoever ran this command and to nobody else.
   run bootstrap_owner
 else
-  note "skipped; run \`kubectl -n ${SYSTEM_NAMESPACE} exec -it deploy/damga -- damga bootstrap ...\` yourself"
+  note "skipped; run \`kubectl -n ${SYSTEM_NAMESPACE} exec -it deploy/damga -- ${CONTROL_PLANE_BIN} bootstrap ...\` yourself"
 fi
 
 if [[ "$DRY_RUN" == "1" ]]; then

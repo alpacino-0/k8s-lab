@@ -313,3 +313,167 @@ func TestTheCatalogueIsDeployedAndTheInstallerRefusesItsAbsence(t *testing.T) {
 			"built without the catalogue while every manifest still says it has one")
 	}
 }
+
+// What the installer runs inside the control plane's container is the path the
+// Dockerfile installs, in every place it says it.
+//
+// The image is gcr.io/distroless/static: no shell, and no PATH lookup for a
+// bare name. `kubectl exec -- damga bootstrap` fails with "executable file not
+// found in $PATH", which ends an install at its last step with nobody able to
+// log in. Measured on k3s on 2026-09-02, and then measured again with the
+// absolute path, which created the owner.
+//
+// The guard is here rather than the fix alone because of the shape it came in.
+// The same call was written three times: ci.yml had /damga and was right,
+// install.sh had a bare damga twice — once in the command it runs and once in
+// the advice it prints when you skip it — and both were wrong. Only the right
+// copy ever executed, so CI was green for two days over a script no CI job
+// runs. That is the fourth time this repository has paid for one value living
+// in several places, and the first three are already written down.
+func TestTheInstallerExecsThePathTheImageInstalls(t *testing.T) {
+	dockerfile, err := os.ReadFile("../Dockerfile")
+	if err != nil {
+		t.Fatalf("reading the Dockerfile: %v", err)
+	}
+	entrypoint := regexp.MustCompile(`ENTRYPOINT \["([^"]+)"\]`).FindSubmatch(dockerfile)
+	if entrypoint == nil {
+		t.Fatal("the Dockerfile declares no ENTRYPOINT, so this case has nothing to hold " +
+			"the installer against")
+	}
+	want := string(entrypoint[1])
+
+	script, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatalf("reading install.sh: %v", err)
+	}
+	// One spelling in the file, and it is the one the image installs.
+	declared := regexp.MustCompile(`(?m)^CONTROL_PLANE_BIN="([^"]+)"`).FindSubmatch(script)
+	if declared == nil {
+		t.Fatal("install.sh no longer names the control plane's binary in one place; " +
+			"it was written out twice before, and both copies were wrong")
+	}
+	if got := string(declared[1]); got != want {
+		t.Errorf("install.sh runs %q in the container and the Dockerfile installs %q; "+
+			"a bare name has no PATH to resolve in a distroless image", got, want)
+	}
+
+	// And nowhere spells it the other way. This is the half that catches a
+	// third copy being added rather than the two that existed being changed —
+	// which is how this arrived: the wrong spelling was added beside a right
+	// one and nothing compared them.
+	//
+	// Over the commands and not over the comments. The first version of this
+	// read the whole file and failed on the paragraph in install.sh explaining
+	// why a bare name does not work — prose quoting the mistake is how the
+	// mistake gets explained, and a guard that cannot tell the two apart makes
+	// the explanation unwritable.
+	var commands strings.Builder
+	for line := range strings.SplitSeq(string(script), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		commands.WriteString(line)
+		commands.WriteByte('\n')
+	}
+	base := want[strings.LastIndex(want, "/")+1:]
+	for _, bare := range []string{
+		"-- " + base + " ",
+		" " + base + " bootstrap",
+	} {
+		if strings.Contains(commands.String(), bare) {
+			t.Errorf("install.sh runs %q, which resolves through a PATH the image "+
+				"does not have; it has to be %s", bare, want)
+		}
+	}
+}
+
+// A condition-wait on a label selector has to be preceded, in the same
+// function, by a wait for the object to exist.
+//
+// `kubectl wait --for=condition=Ready -l ...` against a selector that matches
+// nothing does not wait: it answers "no matching resources found" immediately
+// and returns non-zero, spending none of its --timeout. Placed straight after
+// the apply that creates the object, it races the API server and loses.
+// Measured on k3s on 2026-09-02: the ingress-nginx Deployment and its Pod both
+// carry creationTimestamp 00:20:52 and the wait failed inside that same second,
+// twenty seconds into a fresh install. The fixed run printed "existed after 2s"
+// — the whole margin the old command needed and did not take.
+//
+// Structural rather than behavioural, because the failure is a race and a test
+// that tried to reproduce it would be the same guess about somebody else's
+// scheduler that the fix refuses to make. What is checkable is the shape: the
+// existence poll and the condition-wait live together, so moving the wait back
+// out to the top level — which is exactly what reverting the fix does — has
+// nowhere to find one.
+func TestNoConditionWaitRunsBeforeTheObjectIsKnownToExist(t *testing.T) {
+	script, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatalf("reading install.sh: %v", err)
+	}
+
+	// Comments dropped and continuations folded, so a command spelled over
+	// three lines is one string to search and the paragraph above explaining
+	// the race is not mistaken for the race.
+	var folded []string
+	var pending string
+	for line := range strings.SplitSeq(string(script), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if cut, ok := strings.CutSuffix(line, `\`); ok {
+			pending += cut + " "
+			continue
+		}
+		folded = append(folded, pending+line)
+		pending = ""
+	}
+
+	// The enclosing function, or "" for the top level of the script.
+	opens := regexp.MustCompile(`^([a-z_][a-z0-9_]*)\(\)\s*\{`)
+	selector := regexp.MustCompile(`-l\s+(\S+)`)
+	blocks := map[string][]string{}
+	scope := ""
+	for _, line := range folded {
+		if m := opens.FindStringSubmatch(line); m != nil {
+			scope = m[1]
+			continue
+		}
+		if scope != "" && line == "}" {
+			scope = ""
+			continue
+		}
+		blocks[scope] = append(blocks[scope], line)
+	}
+
+	checked := 0
+	for scope, lines := range blocks {
+		body := strings.Join(lines, "\n")
+		for _, line := range lines {
+			if !strings.Contains(line, "kubectl wait") || !strings.Contains(line, "--for=condition=") {
+				continue
+			}
+			m := selector.FindStringSubmatch(line)
+			if m == nil {
+				continue // waiting on a named object, which exists or does not
+			}
+			checked++
+			// The poll that proves the object turned up: the same selector,
+			// asked with -o name so an empty answer is an empty string.
+			if !strings.Contains(body, "-o name") || strings.Count(body, m[1]) < 2 {
+				where := "the top level of the script"
+				if scope != "" {
+					where = scope + "()"
+				}
+				t.Errorf("in %s, `kubectl wait --for=condition` runs against %s with nothing "+
+					"first waiting for a pod to match it; a selector that matches nothing is "+
+					"answered \"no matching resources found\" in zero seconds, so this races "+
+					"the apply above it and does not retry", where, m[1])
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("install.sh has no condition-wait on a label selector at all; this case " +
+			"passed by finding nothing, which is how a guard stops guarding")
+	}
+	t.Logf("condition-waits on a label selector checked: %d", checked)
+}
