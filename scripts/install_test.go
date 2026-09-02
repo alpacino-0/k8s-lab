@@ -53,10 +53,17 @@ const (
 // runnable in the same gate as everything else.
 func plan(t *testing.T) []string {
 	t.Helper()
-	cmd := exec.Command("bash", "./install.sh",
+	return planWith(t)
+}
+
+// planWith is plan, plus the flags whose effect on the plan is under test.
+func planWith(t *testing.T, extra ...string) []string {
+	t.Helper()
+	args := append([]string{"./install.sh",
 		flagDomain, someDomain,
 		flagEmail, someEmail,
-		flagTenant, someTenant)
+		flagTenant, someTenant}, extra...)
+	cmd := exec.Command("bash", args...)
 	cmd.Env = append(os.Environ(), "DRY_RUN=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -476,4 +483,118 @@ func TestNoConditionWaitRunsBeforeTheObjectIsKnownToExist(t *testing.T) {
 			"passed by finding nothing, which is how a guard stops guarding")
 	}
 	t.Logf("condition-waits on a label selector checked: %d", checked)
+}
+
+// commands returns only the lines that are commands the installer would run.
+//
+// The plan interleaves commands with step headings and notes, and a rule about
+// what the installer DOES has to be asked of the commands alone. A guard that
+// searches the whole output can be satisfied by a sentence describing the thing
+// it is meant to forbid -- which makes the sentence unwritable, and it is
+// usually the sentence that explains why the rule exists.
+func commands(lines []string) []string {
+	var out []string
+	for _, line := range lines {
+		if after, ok := strings.CutPrefix(line, "RUN "); ok {
+			out = append(out, after)
+		}
+	}
+	return out
+}
+
+// The --skip-k3s path asks the cluster what is already holding the ingress
+// ports; the path that installs k3s does not, because it disabled Traefik.
+//
+// --skip-k3s is documented in docs/DEPLOY.md as "k3s is already there, or the
+// kubeconfig points elsewhere" -- the door for everyone who already has a
+// cluster. On a stock k3s that cluster has Traefik, whose klipper-lb DaemonSet
+// holds hostPort 80 and 443, and ingress-nginx never gets an address.
+//
+// The half that matters is the second assertion. A check that only proved the
+// probe is present would also pass for a script that probes unconditionally,
+// and probing after we disabled Traefik ourselves would refuse the install on
+// the strength of the Service we just created.
+func TestTheSkipK3sPathAsksTheClusterWhatIsAlreadyThere(t *testing.T) {
+	const probe = "refuse_if_the_ingress_ports_are_taken"
+
+	skipped := commands(planWith(t, "--skip-k3s"))
+	at := firstLineWith(skipped, probe)
+	if at < 0 {
+		t.Fatalf("--skip-k3s runs no %s; it inherits a cluster this script did not "+
+			"build, and nothing asks that cluster whether the ingress ports are free", probe)
+	}
+
+	// Before the ingress goes in, or it is a post-mortem rather than a check.
+	apply := firstLineWith(skipped, "deploy/static/provider/baremetal/deploy.yaml")
+	if apply < 0 {
+		t.Fatal("the plan no longer applies the ingress-nginx manifest; this case " +
+			"orders the probe against it and has lost its second half")
+	}
+	if at > apply {
+		t.Errorf("%s runs at command %d, after the ingress-nginx apply at %d; the "+
+			"point is to refuse before installing a controller that cannot get an "+
+			"address", probe, at, apply)
+	}
+
+	own := commands(plan(t))
+	if i := firstLineWith(own, probe); i >= 0 {
+		t.Errorf("the plan that installs k3s itself also runs %s (command %d); that "+
+			"path passes --disable traefik, so the only LoadBalancer holding those "+
+			"ports is the one this script is about to create", probe, i)
+	}
+}
+
+// The refusal tells you to delete the Service, and warns off the Deployment.
+//
+// Behavioural rather than a grep of the script, because what is under test is
+// the text a person actually gets. kubectl and helm are stubbed, so this needs
+// no cluster and the installer exits at step 2 having changed nothing.
+//
+// The advice is the measurement. On 2026-09-02, deleting only the Traefik
+// Deployment left its klipper-lb pods holding 80 and 443 -- they follow the
+// Service -- so ingress-nginx stayed <pending> and the address went from
+// Traefik's 404 to a refused connection. The obvious advice makes it worse, and
+// that is exactly the kind of thing a later edit "tidies" back in.
+func TestTheRefusalSaysToDeleteTheServiceAndNotTheDeployment(t *testing.T) {
+	bin := t.TempDir()
+	// Answers the one query the probe makes, in the shape kubectl would.
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("writing the %s stub: %v", name, err)
+		}
+	}
+	write("kubectl", "#!/bin/sh\nprintf 'kube-system/traefik 80 443\\n'\n")
+	write("helm", "#!/bin/sh\nexit 0\n")
+
+	cmd := exec.Command("bash", "./install.sh",
+		flagDomain, someDomain, flagEmail, someEmail, flagTenant, someTenant,
+		"--skip-k3s", "--skip-node-config")
+	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	said := string(out)
+
+	if err == nil {
+		t.Fatalf("install.sh carried on against a cluster where kube-system/traefik "+
+			"already holds 80 and 443; it has to refuse, because it would otherwise "+
+			"finish, say it is ready, and serve somebody else's 404\n%s", said)
+	}
+	if !strings.Contains(said, "kube-system/traefik") {
+		t.Errorf("the refusal does not name what it found; it has to say which "+
+			"Service is holding the ports\n%s", said)
+	}
+	if !strings.Contains(said, "delete svc traefik") {
+		t.Errorf("the refusal does not tell the operator to delete the Service. "+
+			"That is the removal that was measured to work\n%s", said)
+	}
+	if !strings.Contains(said, "not the Deployment") {
+		t.Errorf("the refusal no longer warns against deleting the Deployment. "+
+			"Measured: the klipper-lb pods follow the Service, so deleting the "+
+			"Deployment keeps the ports held and turns the 404 into a refused "+
+			"connection -- the obvious advice is the wrong advice\n%s", said)
+	}
+	if !strings.Contains(said, "disable traefik") {
+		t.Errorf("the refusal does not say how to make the removal durable; k3s "+
+			"re-applies Traefik from its manifests directory\n%s", said)
+	}
 }
