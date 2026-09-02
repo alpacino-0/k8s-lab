@@ -92,13 +92,22 @@ spec:
       - ServerSideApply=true
     managedNamespaceMetadata:
       labels:
-        # The namespace joins the admission policies by carrying the label,
-        # so a GitOps-managed release is held to the same rules as a
-        # hand-deployed one.
+        # Pod Security Admission, so a GitOps-managed release is held to the
+        # same rules as a hand-deployed one. A damga.co/policies label sat here
+        # too, opting the namespace into admission policies that were removed
+        # on 2026-08-29 — an opt-in to nothing.
+        #
+        # These labels are applied when the namespace is created and are not
+        # maintained afterwards, which selfHeal above does not change: measured
+        # against Argo CD v3.1.8, a pod-security label removed from a namespace
+        # managed this way was never restored — not in four minutes, not after a
+        # forced sync, not after a hard refresh — while this Application went on
+        # reporting Synced and Healthy. A tenant namespace is a committed
+        # manifest for that reason (internal/manifest/fence.go); this one is not
+        # yet, and the difference is measured rather than assumed.
         pod-security.kubernetes.io/enforce: restricted
         pod-security.kubernetes.io/audit: restricted
         pod-security.kubernetes.io/warn: restricted
-        damga.co/policies: enforced
     retry:
       limit: 5
       backoff:

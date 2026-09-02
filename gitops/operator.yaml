@@ -75,10 +75,13 @@ spec:
     syncOptions:
       # Deliberately no CreateNamespace. The Namespace is one of the manifests
       # this source renders, and it carries the Pod Security Admission labels
-      # and the damga.co/policies label that subject the operator to the
-      # rules it enforces on everyone else. A namespace conjured by Argo CD
-      # would carry none of them and every policy would silently not apply —
-      # the failure this whole change exists to close.
+      # that subject the operator to the rules it enforces on everyone else. A
+      # namespace conjured by Argo CD would carry none of them and the
+      # admission level would silently not apply — the failure this whole
+      # change exists to close. Rendering it also means selfHeal restores those
+      # labels, which managedNamespaceMetadata does not: measured against Argo
+      # CD v3.1.8, a label removed from a namespace managed that way was never
+      # put back.
       - ServerSideApply=true
     retry:
       limit: 5

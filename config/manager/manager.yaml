@@ -14,16 +14,10 @@ metadata:
     pod-security.kubernetes.io/enforce-version: latest
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
-    damga.co/policies: enforced
-    # Permits the token exemption its own pod claims. Both keys are
-    # required: the pod asks, the namespace allows, and neither alone is
-    # enough — so no workload can hand itself a credential by editing its
-    # own manifest.
-    damga.co/api-access: permitted
-    # `make operator-deploy` builds damga-operator locally and loads it into
-    # the node, the same as the reference tenant. The GitOps path installs the
-    # signed ghcr.io image instead and does not rely on this.
-    damga.co/unsigned-images: permitted
+    # Three damga.co labels used to be here — the policy opt-in, the token
+    # exemption and the unsigned-image exemption. Every rule that read them was
+    # removed with the admission policies on 2026-08-29; what stayed was a
+    # namespace claiming exemptions from nothing.
   name: system
 ---
 apiVersion: apps/v1
@@ -48,14 +42,12 @@ spec:
       labels:
         control-plane: controller-manager
         app.kubernetes.io/name: damga-platform
-        # A controller is the one workload that genuinely cannot run without a
-        # service-account token, and damga-workload-hygiene requires every
-        # pod to refuse one unless it says otherwise here. Declared rather than
-        # assumed: the mount below is deliberate, and this label is what makes
-        # `kubectl get pods -l damga.co/api-access` list every pod in the
-        # cluster holding a credential for the API server.
-        damga.co/api-access: required
     spec:
+      # A controller is the one workload that genuinely cannot run without a
+      # service-account token. This used to be declared as well as taken, in a
+      # damga.co/api-access label that the damga-workload-hygiene policy read;
+      # the policy went on 2026-08-29 and the label was left asking permission
+      # of nothing, which reads as a control and is not one.
       automountServiceAccountToken: true
       # TODO(user): Uncomment the following code to configure the nodeAffinity expression
       # according to the platforms which are supported by your solution.
