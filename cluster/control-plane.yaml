@@ -118,6 +118,42 @@ subjects:
     name: damga
     namespace: damga-system
 ---
+# Delivery: one Argo CD Application per placement, and nothing else in that
+# namespace.
+#
+# This is the second thing the control plane writes to a cluster, and like the
+# first it is scoped to one namespace and one kind. What it buys is the link the
+# product was missing — a commit that something applies — and what it
+# deliberately cannot do is delete: an Application that a server can remove is a
+# tenant's whole deployment that a server can stop applying, silently, and the
+# manifests would still be in git saying otherwise.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: damga-delivery
+  namespace: argocd
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: [applications]
+    # patch and create, because delivery is idempotent: the same placement
+    # delivered twice has to address the object the first call made rather than
+    # fail on a name that already exists.
+    verbs: [get, create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: damga-delivery
+  namespace: argocd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: damga-delivery
+subjects:
+  - kind: ServiceAccount
+    name: damga
+    namespace: damga-system
+---
 # Leader election, so two replicas do not both observe deploys.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

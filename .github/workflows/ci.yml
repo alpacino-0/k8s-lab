@@ -1537,6 +1537,106 @@ jobs:
 
           kubectl -n damga delete workload ew-target --ignore-not-found
 
+      # The link the product was missing until today, and the measurement the
+      # design turns on.
+      #
+      # Nothing in this repository installed Argo CD — the installer said so in
+      # its own list of what it does not do, "Argo CD. Nothing applies what a
+      # deploy commits" — so a tenant's manifests were committed correctly and
+      # watched by nothing. Two things are proved here, in the order they have
+      # to hold: that a namespace and its quota arrive together from git, and
+      # that the fence around them survives being taken down.
+      #
+      # The second is why the fence is a manifest at all. Measured against this
+      # Argo CD: a namespace created through CreateNamespace=true and labelled
+      # through managedNamespaceMetadata never got a removed pod-security label
+      # back — not in four minutes, not after a forced sync, not after a hard
+      # refresh — while the Application reported Synced and Healthy throughout.
+      # Committed as ordinary manifests, the same label came back in five
+      # seconds. An Argo CD upgrade that quietly changed that would take the
+      # fence with it, so it is measured on every run.
+      - name: Argo CD applies what a commit says, and puts the fence back
+        run: |
+          helm repo add argo https://argoproj.github.io/argo-helm >/dev/null
+          helm upgrade --install argocd argo/argo-cd \
+            --version "$(grep -A3 'variable "argocd_version"' terraform/variables.tf \
+                          | sed -n 's/.*default *= *"\([^"]*\)".*/\1/p')" \
+            --namespace argocd --create-namespace \
+            --values cluster/argocd-values.yaml --wait --timeout 12m
+
+          # The control plane has to be able to write the Application it
+          # delivers, and RBAC is the half that fails silently: the endpoint
+          # answers 201 either way and only the "delivery" line in the body
+          # says which happened.
+          kubectl auth can-i create applications.argoproj.io -n argocd \
+            --as=system:serviceaccount:damga-system:damga | grep -qx yes || {
+            echo "::error::the control plane may not create Argo CD Applications, so every"
+            echo "::error::install commits manifests that nothing will ever apply"
+            exit 1
+          }
+
+          cat <<EOF | kubectl apply -f -
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: delivery-probe
+            namespace: argocd
+          spec:
+            project: default
+            source:
+              repoURL: https://github.com/${{ github.repository }}
+              path: test/delivery
+              targetRevision: ${{ github.sha }}
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: damga-delivery-probe
+            syncPolicy:
+              automated: { prune: true, selfHeal: true }
+          EOF
+
+          # The container and what bounds it, in one sync. A namespace that
+          # arrives without its quota is the failure this ordering exists to
+          # prevent, so both are waited for.
+          for _ in $(seq 1 60); do
+            kubectl get ns damga-delivery-probe >/dev/null 2>&1 && \
+              kubectl -n damga-delivery-probe get resourcequota probe-quota >/dev/null 2>&1 && break
+            sleep 5
+          done
+          kubectl get ns damga-delivery-probe -o jsonpath='{.metadata.labels}' | tee /tmp/fence.out
+          echo
+          grep -q '"pod-security.kubernetes.io/enforce":"restricted"' /tmp/fence.out || {
+            echo "::error::the namespace arrived without its pod-security label, so a workload"
+            echo "::error::would land in a namespace with no fence"
+            kubectl -n argocd get app delivery-probe -o yaml | tail -40
+            exit 1
+          }
+          kubectl -n damga-delivery-probe get resourcequota probe-quota >/dev/null || {
+            echo "::error::the namespace came without the quota that bounds it"
+            exit 1
+          }
+
+          # And now take the fence down by hand.
+          kubectl label ns damga-delivery-probe pod-security.kubernetes.io/enforce-
+          back=""
+          for _ in $(seq 1 36); do
+            v=$(kubectl get ns damga-delivery-probe \
+                  -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null)
+            [ -n "$v" ] && { back="yes"; break; }
+            sleep 5
+          done
+          [ -n "$back" ] || {
+            echo "::error::a pod-security label removed from a delivered namespace was not put"
+            echo "::error::back within three minutes. The fence can be taken down and nothing"
+            echo "::error::calls it drift, which is exactly the behaviour these manifests exist"
+            echo "::error::to avoid; see internal/manifest/fence.go"
+            kubectl -n argocd get app delivery-probe -o jsonpath='{.status.sync.status} {.status.health.status}'
+            exit 1
+          }
+          echo "the fence was removed and restored"
+
+          kubectl -n argocd delete app delivery-probe --ignore-not-found
+          kubectl delete ns damga-delivery-probe --ignore-not-found --wait=false
+
       - name: A Build must produce an image the cluster can pull
         run: |
           cat <<EOF | kubectl apply -f -

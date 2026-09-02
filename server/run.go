@@ -139,6 +139,21 @@ func Run(ctx context.Context, o Options) error {
 		o.Backups = NewClusterBackups(reader)
 	}
 
+	// Delivery, when there is a cluster to deliver into. Said out loud when
+	// there is not, because the failure it produces is the quietest one this
+	// product has: every deploy succeeds, every record says pending, and
+	// nothing ever applies a manifest.
+	if o.Delivery == nil {
+		deliverer, err := o.clusterDelivery()
+		switch {
+		case err != nil:
+			log.Warn("no cluster to deliver into: a deploy will commit and nothing will "+
+				"apply it", "error", err)
+		default:
+			o.Delivery = deliverer
+		}
+	}
+
 	handler, err := o.handler(store, idStore)
 	if err != nil {
 		return err
@@ -212,6 +227,9 @@ type stores struct {
 	placement placement.Store
 	backups   BackupReader
 	builds    BuildCreator
+	// delivery writes the Argo CD Application that applies what this tenant
+	// commits. nil is an install where nothing does.
+	delivery Deliverer
 	// registry is not a store, and it is here because the route table gives a
 	// handler exactly two arguments. It is install-wide configuration a handler
 	// needs, which is the same kind of thing gitAuth already is — and unlike
@@ -328,9 +346,10 @@ func (o Options) handler(store evidence.Store, idStore identity.Store) (http.Han
 	st := stores{
 		evidence: store, placement: o.Placement,
 		backups: o.Backups, builds: o.Builds, registry: o.Config.Registry, catalog: cat,
-		pin:    o.Pin,
-		ports:  o.Ports,
-		writer: &gitwrite.Writer{Evidence: store}, gitAuth: o.GitAuth,
+		delivery: o.Delivery,
+		pin:      o.Pin,
+		ports:    o.Ports,
+		writer:   &gitwrite.Writer{Evidence: store}, gitAuth: o.GitAuth,
 	}
 	for _, rt := range tenantRoutes {
 		mux.Handle(rt.method+" "+tenantScope+rt.suffix, rt.handler(g, st))

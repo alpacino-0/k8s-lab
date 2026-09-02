@@ -300,6 +300,13 @@ type Options struct {
 	// notify.Wrap for why the absence is not a degraded mode.
 	Notifier notify.Notifier
 
+	// Delivery turns a commit into something the cluster applies, by writing an
+	// Argo CD Application for each placement. nil delivers nothing, and the
+	// endpoints that would have used it say so — a commit nobody applies is
+	// this product's oldest silent failure and it is not going to be reported
+	// as a deployment.
+	Delivery Deliverer
+
 	// GitAuth answers how to authenticate to a repository. nil means the
 	// free build's answer, built from Config.GitTokenFile — and with no token
 	// configured, a deploy is refused with a message that says which flag is

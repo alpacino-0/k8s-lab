@@ -41,6 +41,15 @@ DRY_RUN="${DRY_RUN:-0}"
 # Versions, pinned here and nowhere else in this file.
 INGRESS_VERSION="controller-v1.13.0"
 CERT_MANAGER_VERSION="v1.16.2"
+# The argo-helm chart version, and it has to equal terraform's argocd_version:
+# two installers of the same component that disagree produce two clusters that
+# are not the same cluster. scripts/install_test.go reads both and fails when
+# they drift.
+ARGOCD_CHART_VERSION="8.5.10"
+# The operator's published image. Overridable for the same reason
+# --control-plane-image is: an installer pointed at a tree that has not been
+# published yet needs somewhere to get one.
+OPERATOR_IMAGE="${OPERATOR_IMAGE:-ghcr.io/damgahq/damga-operator:1.0.0}"
 
 usage() {
   cat <<TXT
@@ -353,6 +362,37 @@ step "custom resource definitions"
 # for field — config/crd/kustomization.yaml has no active patches.
 run kubectl apply -f "$ROOT/config/crd/bases"
 
+step "the operator"
+# Without this, a Workload is a row in etcd: nothing renders it into a
+# Deployment, and a deploy commits and stays pending for ever. This was in the
+# list of what the installer does not do, and that list was honest — which is
+# why the fix is here rather than in the list.
+#
+# `kubectl apply -k` rather than kustomize or make: kubectl carries its own
+# kustomize, so this needs nothing on the machine that is not already needed.
+# It re-applies the CRDs the step above installed, which is idempotent and keeps
+# the ordering rule intact — the CRDs still land before the build namespace.
+run kubectl apply -k "$ROOT/config/default"
+run kubectl -n damga-platform-system set image deployment/damga-platform-controller-manager \
+  "manager=${OPERATOR_IMAGE}"
+run kubectl -n damga-platform-system rollout status \
+  deployment/damga-platform-controller-manager --timeout=300s
+
+step "Argo CD"
+# The other half of the same absence. The operator turns a Workload into a
+# Deployment; Argo CD is what turns a commit into a Workload. With neither, the
+# product's write path ends in a git repository nobody reads.
+#
+# The same chart and the same values terraform uses, at the same pinned version,
+# so an installer-built cluster and a terraform-built one are the same cluster.
+run helm repo add argo https://argoproj.github.io/argo-helm
+run helm repo update argo
+run helm upgrade --install argocd argo/argo-cd \
+  --version "$ARGOCD_CHART_VERSION" \
+  --namespace argocd --create-namespace \
+  --values "$ROOT/cluster/argocd-values.yaml" \
+  --wait --timeout 12m
+
 step "the image store"
 run kubectl apply -f "$ROOT/cluster/registry.yaml" -f "$ROOT/cluster/build-namespace.yaml"
 run kubectl -n damga-registry rollout status deployment/registry --timeout=300s
@@ -434,10 +474,6 @@ Done.
 
 What this did NOT install, said out loud rather than discovered:
 
-  - The operator. Nothing reconciles a Workload into a Deployment yet, so a
-    deploy commits and stays pending. It needs an image and a kustomize deploy;
-    see Makefile.operator.
-  - Argo CD. Nothing applies what a deploy commits.
   - A git token. The control plane runs without -git-token-file, so the deploy
     endpoint refuses with a message naming that flag. Nothing else is affected.
 

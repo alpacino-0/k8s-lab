@@ -561,8 +561,10 @@ func TestInstallingOverAnExistingManifestIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("installing into an empty directory failed: %v", err)
 	}
-	if len(files) != 1 {
-		t.Fatalf("a one-object entry committed %d files, want 1", len(files))
+	// The entry's one object, plus the namespace and the quota it lands in.
+	if len(files) != 3 {
+		t.Fatalf("a one-object entry committed %d files, want 3: the workload, the namespace "+
+			"and its quota", len(files))
 	}
 	if _, ok := files[manifest.File]; !ok {
 		t.Fatalf("the app is not in %s, which is the one file every later deploy reads",
@@ -788,11 +790,12 @@ func TestAMultiObjectEntryCommitsAFilePerObject(t *testing.T) {
 	}
 
 	names := committedNames(t, repo)
-	if len(names) != 2 {
+	if len(names) != 4 {
 		// The keys and not the map: a failure message carrying two YAML files
 		// as byte slices is a failure message nobody reads.
 		t.Fatalf("the directory holds %v; a workload and a database are two objects and two "+
-			"files, or one of them is an object nothing creates", slices.Sorted(maps.Keys(names)))
+			"files, and the namespace and quota they land in are two more",
+			slices.Sorted(maps.Keys(names)))
 	}
 	if _, ok := names[manifest.File]; !ok {
 		t.Fatalf("the app is not in %s, which is the one file every later deploy reads: %v",
@@ -814,7 +817,7 @@ func TestAMultiObjectEntryCommitsAFilePerObject(t *testing.T) {
 	// workload points at that string.
 	var database string
 	for name := range names {
-		if name != manifest.File {
+		if name != manifest.File && name != manifest.NamespaceFile && name != manifest.QuotaFile {
 			database = name
 		}
 	}

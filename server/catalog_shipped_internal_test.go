@@ -307,6 +307,13 @@ func TestTheInstalledObjectsKeepTheirComposeGroup(t *testing.T) {
 	}
 
 	for name, body := range files {
+		// The namespace and its quota are the container rather than objects of
+		// the entry: the converter did not produce them, the placement did, and
+		// no NetworkPolicy selects them. The label marks what the east-west
+		// rule has to be able to find, which is pods.
+		if name == manifest.NamespaceFile || name == manifest.QuotaFile {
+			continue
+		}
 		app, err := manifest.Parse(body)
 		if err != nil {
 			// Databases render through a different type; the label matters for

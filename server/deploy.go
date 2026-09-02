@@ -192,7 +192,20 @@ func renderDeploy(place placement.Placement, req deployRequest) renderFunc {
 		if err != nil {
 			return nil, err
 		}
-		return carryForward(map[string][]byte{manifest.File: body}, current), nil
+		// The fence travels with every commit, not only with an install: an app
+		// created through POST /apps and deployed has no other way to get one,
+		// and a workload that lands in a namespace with no quota is the failure
+		// this platform already paid for from the other end.
+		//
+		// Rendered rather than carried forward, because these two files are
+		// core/v1 and manifest.Owns recognises only this platform's own group —
+		// so nothing would keep them, and nothing would remove them either.
+		files, err := manifest.Fence(place.Namespace)
+		if err != nil {
+			return nil, err
+		}
+		files[manifest.File] = body
+		return carryForward(files, current), nil
 	}
 }
 
