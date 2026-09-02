@@ -25,6 +25,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package scripts
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"os/exec"
@@ -543,6 +544,59 @@ func TestTheInstallerInstallsWhatMakesADeployRun(t *testing.T) {
 	} {
 		if strings.Contains(string(body), stale) {
 			t.Errorf("install.sh still tells the operator %q while installing it", stale)
+		}
+	}
+}
+
+// Argo CD is installed before the manifest that declares a Role inside its
+// namespace.
+//
+// cluster/control-plane.yaml carries a Role and a RoleBinding in `argocd` —
+// the permission that lets the control plane write the Application it
+// delivers. Applied first, kubectl answers `namespaces "argocd" not found`
+// and the install stops with the control plane half-created.
+//
+// install.sh has always had this order. CI had it backwards and a run proved
+// it, which is the shape this repository keeps meeting: one fact in two
+// places, and only one of them exercised. Here both are, so both are held.
+func TestArgoCDIsInstalledBeforeTheManifestThatNeedsItsNamespace(t *testing.T) {
+	manifest, err := os.ReadFile("../cluster/control-plane.yaml")
+	if err != nil {
+		t.Fatalf("reading the control plane manifest: %v", err)
+	}
+	if !bytes.Contains(manifest, []byte("namespace: argocd")) {
+		t.Skip("the control plane manifest no longer declares anything in argocd; " +
+			"this ordering has nothing left to protect")
+	}
+
+	// The apply is matched as a command and not as a filename, because both
+	// files name control-plane.yaml in prose first — install.sh explains what it
+	// is long before it applies it. A check that cannot tell a rule from its
+	// documentation makes the documentation unwritable, and the first version of
+	// this case reported install.sh, whose order has always been right.
+	for _, f := range []struct{ name, path, install, apply string }{
+		{"install.sh", "install.sh", "helm upgrade --install argocd", `apply -f "$ROOT/cluster/control-plane.yaml"`},
+		{"ci.yml", "../.github/workflows/ci.yml", "helm upgrade --install argocd", "apply -f cluster/control-plane.yaml"},
+	} {
+		body, err := os.ReadFile(f.path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", f.name, err)
+		}
+		install := bytes.Index(body, []byte(f.install))
+		apply := bytes.Index(body, []byte(f.apply))
+		if install < 0 {
+			t.Errorf("%s no longer installs Argo CD, and the control plane manifest still "+
+				"declares a Role in its namespace", f.name)
+			continue
+		}
+		if apply < 0 {
+			t.Errorf("%s no longer applies the control plane manifest", f.name)
+			continue
+		}
+		if install > apply {
+			t.Errorf("%s applies cluster/control-plane.yaml at byte %d and installs Argo CD at "+
+				"byte %d; the manifest declares a Role in the argocd namespace and kubectl "+
+				"answers `namespaces \"argocd\" not found`", f.name, apply, install)
 		}
 	}
 }

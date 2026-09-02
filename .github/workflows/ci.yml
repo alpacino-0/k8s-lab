@@ -370,6 +370,26 @@ jobs:
       # three things a unit test cannot: the image starts under `restricted`,
       # the panel is served from inside the binary, and the ServiceAccount can
       # do exactly what it is meant to and nothing more.
+      # Before the control plane, because cluster/control-plane.yaml declares a
+      # Role and a RoleBinding in the argocd namespace — the permission that
+      # lets the control plane write the Application it delivers. Applying it
+      # first fails with `namespaces "argocd" not found`, which is what this run
+      # did before this step existed.
+      #
+      # scripts/install.sh has had this order all along: Argo CD, then the
+      # control plane. CI had it backwards, which is the fifth time this
+      # repository has paid for one fact living in two places — and the first
+      # time the copy that ran was the wrong one, which is why it was caught
+      # here rather than by somebody's install.
+      - name: Install Argo CD
+        run: |
+          helm repo add argo https://argoproj.github.io/argo-helm >/dev/null
+          helm upgrade --install argocd argo/argo-cd \
+            --version "$(grep -A3 'variable "argocd_version"' terraform/variables.tf \
+                          | sed -n 's/.*default *= *"\([^"]*\)".*/\1/p')" \
+            --namespace argocd --create-namespace \
+            --values cluster/argocd-values.yaml --wait --timeout 12m
+
       - name: Deploy the control plane
         run: |
           kubectl apply -f cluster/control-plane.yaml
@@ -1557,13 +1577,6 @@ jobs:
       # fence with it, so it is measured on every run.
       - name: Argo CD applies what a commit says, and puts the fence back
         run: |
-          helm repo add argo https://argoproj.github.io/argo-helm >/dev/null
-          helm upgrade --install argocd argo/argo-cd \
-            --version "$(grep -A3 'variable "argocd_version"' terraform/variables.tf \
-                          | sed -n 's/.*default *= *"\([^"]*\)".*/\1/p')" \
-            --namespace argocd --create-namespace \
-            --values cluster/argocd-values.yaml --wait --timeout 12m
-
           # The control plane has to be able to write the Application it
           # delivers, and RBAC is the half that fails silently: the endpoint
           # answers 201 either way and only the "delivery" line in the body
