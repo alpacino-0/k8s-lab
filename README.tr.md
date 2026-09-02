@@ -218,25 +218,26 @@ ve bir replikayı yerine geleni hazır olmadan düşürmeyen güncelleme.
 Bunlar varsayılan değil. Hiçbirini kapatan alan yok, çünkü CRD'de tanımlı değil.
 
 ```bash
-make policies                              # etiketli namespace ve kurallar
+make policies                              # etiketli namespace ve tenant kotası
 make operator-install                      # CRD
 make operator-deploy                       # controller
 kubectl apply -k config/samples/           # bir Workload
 kubectl -n damga wait --for=condition=Ready workload/workload-sample
 ```
 
-Namespace önemli. Üç kabul politikası da — ve imza kuralı da —
-`damga.co/policies: enforced` etiketine bağlanıyor. Bu etiketi taşımayan bir
-namespace, kuralları zayıf bir namespace değil — hiç kuralı olmayan bir
-namespace, ve bunu söyleyen hiçbir şey yok.
+Namespace önemli, ve onu önemli kılan şey Pod Security Admission — bu deponun
+kurduğu bir kural değil, API sunucusunun kendi okuduğu bir etiket. O etiketleri
+taşımayan bir namespace, kuralları zayıf bir namespace değil; hiç kuralı olmayan
+bir namespace, ve bunu söyleyen hiçbir şey yok.
 
-İki etiket istisna tanıyor ve hiçbirini bir iş yükü kendine veremiyor:
-`damga.co/api-access: permitted` ayrıca talep eden bir pod'un token'ını
-bırakıyor, `damga.co/unsigned-images: permitted` ise `make up`'ın ürettiği
-yerel `damga-*` imajlarını kabul ediyor. İkincisi şunun için var: imzasız bir
-imaj hiçbir imza kuralının değerlendiremediği bir imaj demek, ve sessizce
-kabul edilmesi *hiç kontrol edilmedi* ile *doğrulandı*'yı birbirinin aynı
-gösteriyordu.
+2026-08-29'a kadar burada üç `ValidatingAdmissionPolicy` ile bir imza kuralı da
+`damga.co/policies: enforced` etiketine bağlanıyordu, iki etiket de onlara
+istisna tanıyordu. Kurallar, uğruna yazıldıkları ücretli katmanla birlikte
+kaldırıldı — ne kontrol ettiklerini `policies/README.md` yazıyor — etiketler ise
+2026-09-02'ye kadar onlardan sağ kaldı. Kendi dersi olan bir şey bu: bir
+namespace, bağlı olduğu kural gittikten dört gün sonra hâlâ o kuralın altındaymış
+gibi görünebiliyor. Bugün bir şeyi zorlayan, yukarıdaki kabul seviyesi ile
+yanındaki tenant kotası; ikisi de sessizce değil, görünür biçimde reddediyor.
 
 ---
 

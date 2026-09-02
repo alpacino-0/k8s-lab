@@ -16,11 +16,8 @@ metadata:
     pod-security.kubernetes.io/enforce-version: latest
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
-    # Opts this namespace into the ValidatingAdmissionPolicy bindings.
-    damga.co/policies: enforced
-    # And out of one of them. `make up` builds damga-app locally and loads it
-    # into the node; it never reaches a registry, so it has no signature and
-    # never will. This label is the namespace saying so out loud rather than
-    # the rule quietly allowing it everywhere. A tenant namespace does not
-    # carry it, and there an unsigned image is rejected.
-    damga.co/unsigned-images: permitted
+    # Two labels used to be here, opting this namespace into the
+    # ValidatingAdmissionPolicy bindings and out of the image-signature one.
+    # The policies were removed on 2026-08-29 and the labels outlived them by
+    # four days: nothing selected on them, so they were a rule this file
+    # appeared to be under and was not.

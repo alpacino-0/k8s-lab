@@ -225,24 +225,26 @@ Those are not defaults. No field turns any of them off, because none is defined
 in the CRD.
 
 ```bash
-make policies                              # the labelled namespace and the rules
+make policies                              # the labelled namespace and the tenant quota
 make operator-install                      # the CRD
 make operator-deploy                       # the controller
 kubectl apply -k config/samples/           # a Workload
 kubectl -n damga wait --for=condition=Ready workload/workload-sample
 ```
 
-The namespace matters. All three admission policies bind to
-`damga.co/policies: enforced`, and so does the image signature rule. A namespace
-without that label is not a namespace with weaker rules — it is one with no
-rules at all, and nothing says so.
+The namespace matters, and what makes it matter is Pod Security Admission — a
+label the API server reads itself, not a rule this repository installs. A
+namespace without those labels is not a namespace with weaker rules; it is one
+with no rules at all, and nothing says so.
 
-Two labels grant exceptions, and neither can be granted by a workload to itself:
-`damga.co/api-access: permitted` lets a pod that also asks keep its service
-account token, and `damga.co/unsigned-images: permitted` admits the locally
-built `damga-*` images that `make up` produces. The second exists because an
-unsigned image is one no signature rule can evaluate, and admitting it silently
-made *never checked* look exactly like *verified*.
+Until 2026-08-29 three `ValidatingAdmissionPolicy` objects and an image
+signature rule bound here too, keyed to a `damga.co/policies: enforced` label,
+with two more labels granting exceptions to them. They were removed with the
+paid tier they were built for — `policies/README.md` says what they checked —
+and the labels outlived them until 2026-09-02, which is its own lesson: a
+namespace can look like it is under a rule for four days after the rule is
+gone. What enforces something today is the admission level above and the tenant
+quota beside it, both of which fail visibly rather than quietly.
 
 ---
 
