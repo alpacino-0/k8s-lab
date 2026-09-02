@@ -477,3 +477,72 @@ func TestNoConditionWaitRunsBeforeTheObjectIsKnownToExist(t *testing.T) {
 	}
 	t.Logf("condition-waits on a label selector checked: %d", checked)
 }
+
+// Two installers of the same component, at two versions, produce two clusters
+// that are not the same cluster.
+//
+// terraform/ installs Argo CD for `make up` and scripts/install.sh installs it
+// on a server, and both name a chart version. A drift between them is invisible
+// until somebody debugs a behaviour on one that the other does not have — and
+// this project has already measured one such behaviour: whether a namespace's
+// pod-security labels survive being removed depends on how the namespace was
+// made, and the answer was different from what the documentation implied.
+func TestTheInstallerAndTerraformPinTheSameArgoCD(t *testing.T) {
+	script, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tf, err := os.ReadFile("../terraform/variables.tf")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inScript := regexp.MustCompile(`ARGOCD_CHART_VERSION="([^"]+)"`).FindSubmatch(script)
+	if inScript == nil {
+		t.Fatal("install.sh names no ARGOCD_CHART_VERSION, so it installs whatever the chart " +
+			"repository serves today")
+	}
+	inTerraform := regexp.MustCompile(`(?s)variable "argocd_version".*?default\s*=\s*"([^"]+)"`).
+		FindSubmatch(tf)
+	if inTerraform == nil {
+		t.Fatal("terraform/variables.tf has no argocd_version default")
+	}
+
+	if string(inScript[1]) != string(inTerraform[1]) {
+		t.Fatalf("install.sh installs Argo CD %s and terraform installs %s; the two ways to "+
+			"build this platform disagree about what is on it",
+			inScript[1], inTerraform[1])
+	}
+}
+
+// The installer must actually install the two things whose absence it used to
+// declare. The list was honest and is now shorter, and this is what keeps it
+// from being shortened without the steps being added.
+func TestTheInstallerInstallsWhatMakesADeployRun(t *testing.T) {
+	lines := plan(t)
+
+	for _, want := range []struct{ what, needle string }{
+		{"the operator, which turns a Workload into a Deployment", "config/default"},
+		{"Argo CD, which applies what a deploy commits", "argo/argo-cd"},
+	} {
+		if firstLineWith(lines, want.needle) < 0 {
+			t.Errorf("the plan never installs %s. Without it a deploy commits and nothing "+
+				"happens, which is the failure this installer used to describe in its own "+
+				"closing notes", want.what)
+		}
+	}
+
+	// And the notes must not still claim they are missing.
+	body, err := os.ReadFile("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stale := range []string{
+		"Nothing applies what a deploy commits",
+		"Nothing reconciles a Workload into a Deployment yet",
+	} {
+		if strings.Contains(string(body), stale) {
+			t.Errorf("install.sh still tells the operator %q while installing it", stale)
+		}
+	}
+}

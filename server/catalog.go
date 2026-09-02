@@ -412,11 +412,25 @@ func installFromCatalog(g guard, st stores) http.Handler {
 			return
 		}
 
+		// And the last link: something that applies what was just committed.
+		// Until this existed the endpoint answered 201 for an install that
+		// would never run — the manifests were correct, in the right
+		// repository, and nothing was watching it.
+		delivered := "the manifests are committed and an Argo CD Application is watching them"
+		if err := deliverPlacement(r.Context(), st, place); err != nil {
+			// Not a failure of the install: the app is registered and the
+			// manifests are pushed, and both survive. What is missing is the
+			// thing that applies them, and saying which half is missing is the
+			// difference between "retry the install" and "look at Argo CD".
+			delivered = "the manifests are committed and nothing is applying them yet: " + err.Error()
+		}
+
 		w.WriteHeader(http.StatusCreated)
 		writeJSON(w, map[string]any{
-			keyApp:   toWirePlacement(place),
-			"plan":   toWirePlan(plan, nil),
-			"deploy": toWireRecord(result.Record),
+			keyDelivery: delivered,
+			keyApp:      toWirePlacement(place),
+			"plan":      toWirePlan(plan, nil),
+			"deploy":    toWireRecord(result.Record),
 		})
 	})
 }
@@ -645,7 +659,14 @@ func renderInstall(
 					"app that exists", place.Path)
 		}
 
-		out := make(map[string][]byte, len(plan.Workloads)+len(plan.Databases))
+		// The container, in the same commit as what goes in it. Argo CD applies
+		// a Namespace before the namespaced objects beside it, so one sync
+		// brings the fence and the application — measured on a real cluster,
+		// where the namespace and its quota arrived together in the first sync.
+		out, err := manifest.Fence(place.Namespace)
+		if err != nil {
+			return nil, err
+		}
 		for i := range plan.Workloads {
 			app := plan.Workloads[i]
 			asked := app.Name

@@ -140,7 +140,7 @@ func createApp(g guard, st stores) http.Handler {
 		for _, f := range []struct{ what, value string }{
 			{"app name", req.App},
 			{"environment", req.Env},
-			{"namespace", req.Namespace},
+			{fieldNamespace, req.Namespace},
 		} {
 			if f.value == "" {
 				problem(w, http.StatusBadRequest, "an app needs an app name, an environment and a namespace")
@@ -210,8 +210,17 @@ func createApp(g guard, st stores) http.Handler {
 			return
 		}
 
+		// The Application is created with the placement rather than with the
+		// first deploy, so the commit a deploy makes has something already
+		// watching for it. Argo CD polls, so one that appears afterwards still
+		// finds the commit — it just waits for a poll rather than a sync.
+		delivered := "an Argo CD Application is watching this app's directory"
+		if err := deliverPlacement(r.Context(), st, got); err != nil {
+			delivered = "nothing is applying this app's commits yet: " + err.Error()
+		}
+
 		w.WriteHeader(http.StatusCreated)
-		writeJSON(w, map[string]any{"app": toWirePlacement(got)})
+		writeJSON(w, map[string]any{"app": toWirePlacement(got), keyDelivery: delivered})
 	})
 }
 
