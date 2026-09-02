@@ -150,6 +150,21 @@ only asserting: the number is the only witness this failure has.
 So when you add a seam, grep its call sites and decide for each one what the
 empty value now means there. Green tests are not evidence that you have.
 
+**A flag can be exercised without its condition being exercised.** Running the
+code path a flag opens is not the same as creating the situation the flag exists
+for, and a passing run of the first reads exactly like a passing run of the
+second. `--skip-k3s` was verified against a cluster built with Traefik disabled
+by hand — the flag ran, and the thing it exists to survive, a cluster that
+already has an ingress controller, was never there. Measured afterwards on a
+stock cluster: the install exits 0, prints "Damga is ready", and serves someone
+else's 404 on port 80 forever.
+
+The same trap catches the check written to close it. On kind there are no
+LoadBalancer Services at all, so the preflight that refuses an install over a
+controller already holding 80 and 443 passes by finding nothing. When a green
+run does not exercise the condition, say so where the green appears — a tick
+that means less than it looks like is worse than a missing one.
+
 **Commit messages** are lowercase, describe the change, and say why in the body
 when the why is not obvious. `git log` is the record of reasoning.
 

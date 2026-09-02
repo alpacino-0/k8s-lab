@@ -203,6 +203,71 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
 
+  # ------------------------------------------------ the installer, for real
+  #
+  # Nothing executed scripts/install.sh until this job existed. Its own test
+  # exercises DRY_RUN, which by construction cannot see anything that only
+  # fails against a real API server — and both blockers found on 2026-09-02
+  # were exactly that: a container path that does not resolve in a distroless
+  # image, and a wait that answered before the object existed.
+  #
+  # Its own job rather than a step in the cluster job, and the reason is
+  # measured. A second install.sh run against a cluster that already has one is
+  # idempotent but not inert: 103 resources unchanged, 8 configured, 2 created,
+  # and the ones that move are the ingress controller's Deployment, its Service
+  # and its admission-webhook jobs. The cluster job asserts HTTPS, the redirect,
+  # the Secure cookie and ingress routing through that controller. Restarting
+  # the thing under test mid-job produces flakes that read as product bugs.
+  #
+  # What it tests is the INSTALLER against the PUBLISHED product: install.sh
+  # pulls the operator by tag and the control plane by digest, so a regression
+  # in the images this commit builds is the cluster job's ground, not this
+  # one's. What a user runs is what this one runs.
+  install:
+    name: The installer builds a cluster
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [test, manifests]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.16.3
+      - name: Create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          cluster_name: install
+          config: kind-config.yaml
+          version: v0.33.0
+          node_image: kindest/node:v1.36.4
+      # Before install.sh, not after. Its last step creates the first owner
+      # through `kubectl exec`, and kind-config.yaml has the kubelets ask the
+      # cluster CA for serving certificates that nothing auto-approves. Without
+      # this the exec fails with "remote error: tls: internal error" at step 14,
+      # having done every other step correctly. Measured 2026-09-02.
+      - name: Approve kubelet serving certificates
+        run: ./scripts/approve-kubelet-certs.sh
+      # The exit code is the assertion. install.sh runs under `set -euo
+      # pipefail`, so 0 means all fourteen steps applied — the operator and
+      # Argo CD included, which it did not install until today.
+      #
+      # --skip-node-config leaves the containerd redirect unwritten, so a build
+      # would push an image this node cannot pull. That is the cluster job's
+      # ground; this one asks only whether the installer completes.
+      #
+      # Known limit, stated because a green tick will otherwise be read as more
+      # than it is: kind has no LoadBalancer Services, so the preflight that
+      # refuses an install over a controller already holding 80 and 443 passes
+      # here by finding nothing. The flag runs; the condition it exists for
+      # does not. That check was measured on stock k3s instead.
+      - name: Install, for real
+        run: |
+          ./scripts/install.sh \
+            --domain demo.example.test \
+            --email ci@example.test \
+            --tenant acme \
+            --skip-k3s --skip-node-config
+
   # ------------------------------------------------------------- operator
   operator:
     name: Build and test the operator
@@ -465,8 +530,28 @@ jobs:
       - name: Install ingress-nginx
         run: |
           kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.13.0/deploy/static/provider/baremetal/deploy.yaml
+
+          # Existence first, then the condition. `kubectl wait --for=condition`
+          # against a selector matching nothing answers "no matching resources
+          # found" immediately and spends none of its --timeout, so this line
+          # has never been protected by the 300s beside it. It has stayed green
+          # because kind creates the pod inside the same second — measured on
+          # k3s, the same wait needed 2s to find the pod and 124s for it to be
+          # ready, and the 2s were the entire bug.
+          #
+          # Third instance of this shape in this file. The other two were fixed
+          # earlier today, and this one was found by reading rather than by
+          # going red, which is what a fast cluster buys you until it does not.
+          started=$(date +%s)
+          for _ in $(seq 1 60); do
+            kubectl -n ingress-nginx get pod -l app.kubernetes.io/component=controller \
+              -o name 2>/dev/null | grep -q . && break
+            sleep 1
+          done
+          echo "the controller pod existed after $(($(date +%s)-started))s"
           kubectl wait -n ingress-nginx --for=condition=Ready pod \
             -l app.kubernetes.io/component=controller --timeout=300s
+          echo "it was ready after $(($(date +%s)-started))s"
           # Both ports, matching the two mappings in kind-config.yaml. Pinning
           # only HTTP leaves 8443 pointing at nothing, which is a confusing way
           # to fail: the certificate is issued, the listener is up, and the
