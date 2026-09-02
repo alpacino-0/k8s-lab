@@ -12,7 +12,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { catalogQuery, canInstall, refusals } = require('./assets/catalog.js');
+const { catalogQuery, canInstall, refusals, planError } = require('./assets/catalog.js');
 
 test('an empty filter asks for the whole catalogue', () => {
   assert.strictEqual(catalogQuery(), '');
@@ -172,4 +172,44 @@ test('no status ends in silence', () => {
       assert.strictEqual(out.text, body.detail, 'the server said it better than this page can');
     }
   }
+});
+
+// A refusal the panel could not show, because it never looked at the status.
+//
+// catalogApi returns { status, body } rather than throwing, and select() used
+// to hand the body straight to render(). A 400 has no workloads and no
+// refusals, so render() drew the entry's name and stopped: clicking an entry
+// looked like clicking nothing. It happened on exactly the tenant most likely
+// to be looking — a new one, whose form defaults are empty because they come
+// from apps it does not have yet.
+test('a failed plan says what the server said, not nothing', () => {
+  assert.equal(
+    planError(400, { detail: 'an install needs an app name, an environment and a namespace', status: 400 }),
+    'an install needs an app name, an environment and a namespace',
+  );
+});
+
+test('a failed plan with no detail still names the status', () => {
+  const said = planError(502, null);
+  assert.match(said, /502/, 'the status is the only thing left to say and it has to be said');
+});
+
+// The form has to be built before the plan can send render() home.
+//
+// Structural, and it is the only shape available: render() assembles DOM and is
+// not exported, so this reads the file the way wiring_test.js does. It is bound
+// here because the defect was an ordering — the form, the namespace note and
+// the repository note all sat after an early return on canInstall(), so a
+// tenant with nothing deployed got a refusal it had no way to answer, and the
+// note written for exactly that tenant was invisible to exactly that tenant.
+test('the install form is built before the plan can return early', () => {
+  const src = require('node:fs').readFileSync(require.resolve('./assets/catalog.js'), 'utf8');
+  const form = src.indexOf("catalogEl('div', { class: 'install-form' }");
+  const gate = src.indexOf('if (!canInstall(plan))');
+  assert.ok(form !== -1, 'the install form is gone');
+  assert.ok(gate !== -1, 'the plan no longer gates anything');
+  assert.ok(
+    form < gate,
+    'canInstall() returns before the form is built, so a refused plan hides the fields that would fix it',
+  );
 });

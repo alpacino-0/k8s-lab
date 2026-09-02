@@ -171,6 +171,13 @@ async function catalogApi(path, options = {}) {
   return { status: res.status, body: parsed, text: body };
 }
 
+// planError says what the server said, and names the status when it said
+// nothing. "the plan could not be made" would be true of all of them.
+function planError(status, body) {
+  const detail = body && typeof body.detail === 'string' ? body.detail : '';
+  return detail || `the plan request failed with ${status} and no detail`;
+}
+
 function catalogEl(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -238,11 +245,30 @@ function mountCatalog(root, base, options = {}) {
     // and a preview of something else: this used to dry-run a namespace and a
     // path the install would never have used.
     const form = formValues(entry);
-    const { body } = await catalogApi(
+    const { status, body } = await catalogApi(
       `${base}/apps/${encodeURIComponent(form.app)}/envs/${encodeURIComponent(form.env)}/from-catalog`, {
         method: 'POST',
         body: JSON.stringify(installBody(entry, form, { dryRun: true })),
       });
+
+    // The status is read, and it did not used to be. catalogApi returns a
+    // status rather than throwing, so a 400 arrived here as a plan: an object
+    // with no workloads and no refusals, which render() draws as the entry's
+    // name and nothing else. Clicking an entry looked like clicking nothing.
+    //
+    // A tenant with no apps yet is exactly when it happens — the form defaults
+    // come from what the tenant already has, so repoUrl and namespace are empty
+    // and the endpoint refuses with "an install needs an app name, an
+    // environment and a namespace". That is the first thing a new installation
+    // does, and it was the one case with no output.
+    if (status !== 200) {
+      catalogState.plan = null;
+      detail.replaceChildren(
+        catalogEl('h3', { text: entry.name }),
+        catalogEl('p', { class: 'refusal', text: planError(status, body) }),
+      );
+      return;
+    }
     catalogState.plan = body;
     render(entry, body);
   };
@@ -289,14 +315,25 @@ function mountCatalog(root, base, options = {}) {
     for (const reason of refusals(plan)) {
       nodes.push(catalogEl('p', { class: 'refusal', text: reason }));
     }
-    if (!canInstall(plan)) {
-      detail.replaceChildren(...nodes);
-      return;
-    }
 
+    // The form is drawn whether or not the plan can be installed, and it did
+    // not used to be: everything below here sat behind an early return on
+    // canInstall(). On a tenant with nothing deployed the defaults are empty,
+    // because they come from what the tenant already has, so the endpoint
+    // refuses with "an install needs an app name, an environment and a
+    // namespace" — and the form that supplies those names was hidden by the
+    // refusal it exists to clear. Clicking an entry on a new installation
+    // showed a refusal and no way to answer it.
+    //
+    // The note about namespaces was behind the same return, which is the sharp
+    // part: it was written for a tenant with no namespaces and was invisible
+    // to exactly that tenant.
+    //
+    // What the plan gates now is the button, which is the thing that should
+    // not be pressed while the endpoint is refusing.
     const guess = formValues(entry);
     const form = catalogEl('div', { class: 'install-form' },
-      field('app', 'Name', entry.name),
+      field('app', 'Name', guess.app),
       field('env', 'Environment', guess.env),
       field('repoUrl', 'Repository for its manifests', guess.repoUrl, targets.repos),
       field('branch', 'Branch', guess.branch, targets.branches),
@@ -319,6 +356,20 @@ function mountCatalog(root, base, options = {}) {
       nodes.push(catalogEl('p', { class: 'install-note', text:
         'The manifests are committed to a repository damga can push to. This tenant has none ' +
         'recorded yet, so the address has to be typed in.' }));
+    }
+
+    // Changing a field re-plans. Without this the form clears the refusal in
+    // the reader's head and nowhere else: they would type a namespace, see the
+    // same refusal, and have nothing to press.
+    for (const name of ['app', 'env', 'repoUrl', 'branch', 'namespace', 'path']) {
+      if (fields[name]) fields[name].addEventListener('change', () => { select(entry).catch(() => {}); });
+    }
+
+    if (!canInstall(plan)) {
+      nodes.push(catalogEl('p', { class: 'install-note', text:
+        'The plan is re-checked when a field changes.' }));
+      detail.replaceChildren(...nodes);
+      return;
     }
 
     const status = catalogEl('p', { class: 'install-status' });
@@ -373,14 +424,14 @@ function mountCatalog(root, base, options = {}) {
 // reverse, and the panel has no build step to reconcile them.
 if (typeof window !== 'undefined') {
   window.damgaCatalog = {
-    catalogQuery, canInstall, refusals, mountCatalog,
+    catalogQuery, canInstall, refusals, planError, mountCatalog,
     installTargets, defaultPath, installBody, installOutcome,
   };
 }
 
 if (typeof module !== 'undefined') {
   module.exports = {
-    catalogQuery, canInstall, refusals, mountCatalog,
+    catalogQuery, canInstall, refusals, planError, mountCatalog,
     installTargets, defaultPath, installBody, installOutcome,
   };
 }
