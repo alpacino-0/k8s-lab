@@ -111,7 +111,13 @@ gitops: ## Install Argo CD and let it reconcile the release from git
 	helm repo update
 	helm upgrade --install argocd argo/argo-cd -n argocd --create-namespace \
 	  -f cluster/argocd-values.yaml --wait --timeout 12m
-	kubectl create namespace damga-gitops --dry-run=client -o yaml | kubectl apply -f -
+	@# The fence, applied before the sealed secret that has to land inside it.
+	@# `kubectl create namespace` was here and it created a bare one: between
+	@# that and Argo CD's first sync the namespace had no Pod Security labels
+	@# and no quota, and the secret went into it. These are the same two files
+	@# the Application applies (gitops/fence), so Argo CD adopts them rather
+	@# than fighting them.
+	kubectl apply -f gitops/fence/
 	@# Sealed rather than applied directly. The demo's password is random and
 	@# disposable, so there is nothing here worth committing — but the path a real
 	@# deployment takes is the one exercised, not a shortcut around it.

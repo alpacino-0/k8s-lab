@@ -401,9 +401,15 @@ Bu cluster'da ölçülen:
 | `kubectl scale --replicas=5` (git 2 diyor) | **5 saniyede** 2'ye döndü, `OutOfSync → Synced` kaydedildi |
 | `kubectl delete deployment` | **5 saniyede** yeniden oluşturuldu |
 
-Namespace, Pod Security Admission etiketlerini ve politika katılım etiketini
-`managedNamespaceMetadata` üzerinden alıyor; yani GitOps ile yönetilen bir
-sürüm, elle kurulan bir sürümle tam olarak aynı kurallara tabi.
+Namespace artık manifest'lerden biri, ve bu bir ayrıntı değil düzeltme. Pod
+Security Admission etiketlerini `managedNamespaceMetadata` üzerinden alıyordu;
+o yol etiketleri namespace oluşturulurken koyuyor ve bir daha dokunmuyor:
+Argo CD v3.1.8'e karşı ölçüldü — elle silinen bir etiket dört dakikada geri
+gelmedi, zorlanmış sync'te de, hard refresh'te de gelmedi, ve Application boyunca
+Synced/Healthy dedi. Drift düzeltme gösterisi kendi çitindeki drift'i
+düzeltemiyordu. Dosya olarak commit edilince — `gitops/fence/`, bir kiracının
+çitini yazan kodun ta kendisinden üretiliyor — aynı etiket on saniye içinde geri
+geliyor.
 
 **Sürüklenme olmayan kalıcı bir OutOfSync.** Application tam senkronken
 `OutOfSync` görünüyordu. API sunucusu StatefulSet `volumeClaimTemplates`
