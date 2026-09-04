@@ -283,6 +283,37 @@ func (w *Writer) Deploy(ctx context.Context, req Request) (Result, error) {
 }
 
 // commit does the git half: clone, write, commit as the user, push.
+// Files returns what is committed under target, without writing anything.
+//
+// The same clone the commit path makes, stopping before it changes anything.
+// It exists because a reader needs the desired state and the alternatives were
+// both worse: a second clone written beside this one is the parallel write
+// path this package exists to prevent, and reading the cluster instead answers
+// a different question — what Argo CD has applied so far, which lags a commit
+// by however long the next sync takes. An endpoint that creates a database and
+// then cannot list it has not created anything a person can see.
+//
+// A directory that is not there yet is an empty map, for the reason readDir
+// says: the first write to an app is the ordinary case.
+func (w *Writer) Files(ctx context.Context, target Target) (map[string][]byte, error) {
+	cloneOpts := &git.CloneOptions{
+		URL: target.RepoURL, Auth: target.Auth,
+		Depth: 1, SingleBranch: true,
+	}
+	if target.Branch != "" {
+		cloneOpts.ReferenceName = plumbing.NewBranchReferenceName(target.Branch)
+	}
+	repo, err := git.CloneContext(ctx, memory.NewStorage(), memfs.New(), cloneOpts)
+	if err != nil {
+		return nil, fmt.Errorf("cloning %s: %w", target.RepoURL, err)
+	}
+	tree, err := repo.Worktree()
+	if err != nil {
+		return nil, err
+	}
+	return readDir(tree, target.Dir)
+}
+
 func (w *Writer) commit(ctx context.Context, req Request, rolloutID string, at time.Time) (string, error) {
 	// In memory, and shallow. A tenant's state repository holds manifests, so
 	// it is small by construction; a worktree on disk would be one more thing

@@ -163,7 +163,8 @@ func rollbackRoute(g guard, st stores) http.Handler {
 				// whole of what a rollback wants — and reusing it is what stops
 				// a second renderer from drifting away from the first.
 				return renderDeploy(place, deployRequest{Image: target.Image.RequestedRef})
-			})
+			},
+			commitOptions{})
 	})
 }
 
@@ -223,7 +224,8 @@ func scaleRoute(g guard, st stores) http.Handler {
 		replicas := *req.Replicas
 		commitChange(w, r, st, sub, ref,
 			fmt.Sprintf("scale %s/%s to %d replicas", ref.App, ref.Env, replicas),
-			func(place placement.Placement) renderFunc { return renderScale(place, replicas) })
+			func(place placement.Placement) renderFunc { return renderScale(place, replicas) },
+			commitOptions{})
 	})
 }
 
@@ -302,6 +304,7 @@ func commitChange(
 	w http.ResponseWriter, r *http.Request, st stores,
 	sub authz.Subject, ref evidence.Ref, message string,
 	render func(placement.Placement) renderFunc,
+	opts commitOptions,
 ) {
 	place, err := st.placement.Get(r.Context(), ref.TenantID, ref.App, ref.Env)
 	switch {
@@ -331,6 +334,7 @@ func commitChange(
 		Ref:     ref,
 		Message: message,
 		Render:  render(place),
+		Owns:    owns(opts.MayRemove),
 	})
 	switch {
 	case errors.Is(err, gitwrite.ErrNoChange):
@@ -345,6 +349,15 @@ func commitChange(
 			"this app autoscales, so its replica count is the autoscaler's; "+
 				"change the autoscale range instead")
 		return
+	case errors.Is(err, errDatabaseExists):
+		problem(w, http.StatusConflict, err.Error())
+		return
+	case errors.Is(err, errNoSuchDatabase):
+		problem(w, http.StatusNotFound, err.Error())
+		return
+	case errors.Is(err, errLastManifest):
+		problem(w, http.StatusConflict, err.Error())
+		return
 	case errors.Is(err, errPinnedByVolumes):
 		problem(w, http.StatusConflict,
 			"this app has a persistent volume, so it runs exactly one replica: "+
@@ -358,7 +371,46 @@ func commitChange(
 	// Accepted, like a deploy: a commit was pushed and that is all that is true
 	// yet. What the cluster did with it is the observer's to say.
 	w.WriteHeader(http.StatusAccepted)
-	writeJSON(w, toWireRecord(result.Record))
+	if opts.Note == "" {
+		writeJSON(w, toWireRecord(result.Record))
+		return
+	}
+	writeJSON(w, map[string]any{"record": toWireRecord(result.Record), "note": opts.Note})
+}
+
+// commitOptions is what a caller wants that is not the render.
+//
+// A struct rather than more parameters, because both fields are the kind that
+// change what a commit does and neither should be a bare true in a call.
+type commitOptions struct {
+	// Note is said alongside the record. It exists for one route: removing a
+	// database is a commit whose consequences for the data are not in the
+	// commit, and the moment to say so is the response to the request that
+	// asked for it. See deleteDatabase.
+	Note string
+
+	// MayRemove lets gitwrite delete files this platform wrote that the render
+	// stopped producing.
+	//
+	// Off by default and per caller, which is gitwrite's own rule rather than
+	// this file's: "a caller that has not thought about deletion therefore does
+	// not get it". A rollback and a scale rewrite one manifest and never
+	// withdraw one, so they must not gain the ability to; removing a database
+	// is nothing but a withdrawal, and without this it commits a change that
+	// gitwrite then discards — which surfaced as "this is already what is
+	// committed" rather than as anything about deletion.
+	MayRemove bool
+}
+
+// owns answers gitwrite's per-file question, or declines to.
+func owns(mayRemove bool) func(string, []byte) bool {
+	if !mayRemove {
+		return nil
+	}
+	// By content and not by name, which is what manifest.Owns is for: a
+	// filename is a convention, and recognising somebody else's file as ours
+	// removes work from a repository they cannot push to.
+	return func(_ string, body []byte) bool { return manifest.Owns(body) }
 }
 
 // renderScale changes the replica count and leaves everything else committed.

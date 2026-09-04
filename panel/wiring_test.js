@@ -32,6 +32,7 @@ const views = [
   { file: 'catalog.js', global: 'damgaCatalog' },
   { file: 'exec.js', global: 'damgaExec' },
   { file: 'settings.js', global: 'damgaSettings' },
+  { file: 'databases.js', global: 'damgaDatabases' },
 ];
 
 test('every view is loaded by the page, before the script that uses it', () => {
@@ -83,7 +84,8 @@ test('app.js reaches every view, and reaches it by the published name', () => {
 test('the page has rules for what the views draw', () => {
   const css = read('style.css');
   for (const selector of ['.logs', '.catalog-entry', '.refusal', '#catalog-list',
-    '.exec-output', '.exec-form', '.settings-row', '.settings-warning', '.tabs']) {
+    '.exec-output', '.exec-form', '.settings-row', '.settings-warning', '.tabs',
+    '.db-row', '.db-credentials', '.db-form']) {
     // Terminated, not merely present. `.exec-outputX { }` contains the string
     // '.exec-output' and would report a rule that styles nothing on the page.
     assert.ok(new RegExp(`\\${selector}(?![\\w-])`).test(css),
@@ -210,4 +212,24 @@ test('the settings page stores nothing that was typed into it', () => {
     assert.ok(!source.includes(forbidden),
       `settings.js uses ${forbidden}: this is the page where passwords are typed`);
   }
+});
+
+// The databases view, and the same two orphan checks the others carry.
+test('the databases view is mounted and reachable', () => {
+  const app = read('app.js');
+  assert.ok(/function mountDatabases\(/.test(app), 'app.js has no mountDatabases');
+  const calls = app.match(/(?<!function )(?<!m\.)mountDatabases\(/g) || [];
+  assert.ok(calls.length >= 1,
+    'mountDatabases is defined and never called: the database endpoint is reachable ' +
+    'from curl and from nowhere on the page');
+  assert.ok(/mounted\.push\([\s\S]*?mountDatabases/.test(app),
+    'mountDatabases is called but its stop function is not collected');
+
+  assert.ok(/function showDatabases\(/.test(app), 'app.js has no showDatabases');
+  const shown = app.match(/(?<!function )showDatabases\b/g) || [];
+  assert.ok(shown.length >= 1,
+    'showDatabases is defined and nothing navigates to it: the tab exists in the source ' +
+    'and not in the browser');
+  assert.ok(/appTabs\(["']databases["']\)/.test(app),
+    'the databases view does not draw the tab strip, so there is no way back from it');
 });

@@ -294,7 +294,24 @@ function mountSettings(el, prefix) {
   }));
 }
 
-// Two views over one application: what it did, and what it is set to.
+// The databases view. Raw Response for the reason the settings view needs one:
+// this page prints the endpoint's refusal, so it has to see the body of a 400.
+function mountDatabases(el, prefix) {
+  return mountFrom("damgaDatabases", (m) => m.mountDatabases(el, prefix, {
+    fetcher: async (path, options = {}) => {
+      const res = await fetch(path, {
+        credentials: "same-origin",
+        ...options,
+        headers: { "Accept": "application/json", ...(options.headers || {}) },
+      });
+      if (res.status === 401) throw new NotSignedIn("not signed in");
+      return res;
+    },
+  }));
+}
+
+// Three views over one application: what it did, what it is set to, and what
+// it stores.
 //
 // A strip rather than a second entry in the app list, because they are the
 // same app and the list is how you choose which app. The current one is a
@@ -305,6 +322,7 @@ function appTabs(active) {
   for (const tab of [
     { id: "overview", label: "Overview", go: showEvidence },
     { id: "settings", label: "Settings", go: showSettings },
+    { id: "databases", label: "Databases", go: showDatabases },
   ]) {
     if (tab.id === active) {
       const here = el("span", { class: "tab", "aria-current": "true" }, tab.label);
@@ -337,6 +355,27 @@ function showSettings() {
     box,
   );
   mounted.push(mountSettings(box, prefix));
+}
+
+// The databases view: one click, and a Postgres or a Redis exists.
+//
+// The engine was always here — the Database CRD carries both, with backups and
+// a restore rehearsal — and the only way to ask for one was kubectl.
+// docs/PLAN.md §7.
+function showDatabases() {
+  const prefix = base();
+  stopMounted();
+  const { app, env } = state.ref;
+  const box = el("div", {});
+  render(
+    appTabs("databases"),
+    el("h2", {}, `${app} · ${env}`),
+    el("p", { class: "sub muted" },
+      "Postgres and Redis, committed to git like everything else. Credentials are " +
+      "generated into a Secret your application reads and are never in git."),
+    box,
+  );
+  mounted.push(mountDatabases(box, prefix));
 }
 
 // The exec view, and the one seam here that cannot use api().

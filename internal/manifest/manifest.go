@@ -160,6 +160,36 @@ func RenderDatabase(db platformv1alpha1.Database) ([]byte, error) {
 	return out, nil
 }
 
+// ParseDatabase reads a committed Database back.
+//
+// Strict, for the reason Parse is: a field this build does not know is an
+// error and not a silent drop. The cost of the alternative is sharper here
+// than for a Workload — a dropped `backup` block is a database that quietly
+// stops being backed up, and nothing about the commit that did it would say
+// so.
+//
+// A file holding something else is not an error: the caller is walking a
+// directory that also holds Workloads, a namespace and a quota, and "this is
+// not a Database" is the ordinary answer for most of it. It is reported as
+// (zero, false) so a walk can skip rather than fail.
+func ParseDatabase(body []byte) (platformv1alpha1.Database, bool) {
+	var head struct {
+		APIVersion string `json:"apiVersion"`
+		Kind       string `json:"kind"`
+	}
+	if err := yaml.Unmarshal(body, &head); err != nil {
+		return platformv1alpha1.Database{}, false
+	}
+	if head.Kind != "Database" || head.APIVersion != platformv1alpha1.GroupVersion.String() {
+		return platformv1alpha1.Database{}, false
+	}
+	var db platformv1alpha1.Database
+	if err := yaml.UnmarshalStrict(body, &db); err != nil {
+		return platformv1alpha1.Database{}, false
+	}
+	return db, true
+}
+
 // Parse reads a committed file back.
 //
 // Strict: a file with a field this build does not know is an error rather than
