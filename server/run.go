@@ -154,6 +154,21 @@ func Run(ctx context.Context, o Options) error {
 		}
 	}
 
+	// The same shape delivery uses, and the same reason for the warning: an
+	// install with no cluster can still serve everything except this, and
+	// finding out at the moment somebody types a password is finding out from
+	// them.
+	if o.Secrets == nil {
+		writer, err := o.clusterSecretWriter()
+		switch {
+		case err != nil:
+			log.Warn("no cluster to hold secret values in: an app's literal settings can be "+
+				"set and a secret cannot", "error", err)
+		default:
+			o.Secrets = writer
+		}
+	}
+
 	handler, err := o.handler(store, idStore)
 	if err != nil {
 		return err
@@ -222,6 +237,14 @@ const tenantScope = "/api/v1/tenants/{tenant}"
 // One struct rather than a parameter each, so the route table stays one table
 // as endpoints grow. What is deliberately NOT in here is anything that could
 // answer "who is asking": that comes from the guard and from nowhere else.
+// managedByDamga is what this platform writes into app.kubernetes.io/managed-by
+// on the objects it creates outside git.
+const managedByDamga = "damga"
+
+// settingsPath is the one route suffix two files have to agree on: the table
+// below and the test that drives it.
+const settingsPath = "/apps/{app}/envs/{env}/settings"
+
 type stores struct {
 	evidence  evidence.Store
 	placement placement.Store
@@ -243,7 +266,11 @@ type stores struct {
 	// which is what an install that turned it off asked for.
 	pin func(image string) (string, error)
 	// ports answers what an image listens on when the template does not say.
-	ports   func(image string) ([]int32, error)
+	ports func(image string) ([]int32, error)
+	// secrets writes the values a user typed into the cluster. nil is an
+	// install with nowhere to put one, and the settings endpoint says so
+	// rather than committing a manifest that names a Secret nothing wrote.
+	secrets SecretWriter
 	writer  *gitwrite.Writer
 	gitAuth GitAuth
 }
@@ -305,6 +332,15 @@ var tenantRoutes = []struct {
 	// template, and no field of a Workload reaches the pod template.
 	{http.MethodPost, "/apps/{app}/envs/{env}/restart", restartRoute},
 	{http.MethodPost, "/apps/{app}/envs/{env}/scale", scaleRoute},
+	// What an app is configured with. The read is app:view, because everything
+	// it returns is either in the commit already or is a name — a secret's
+	// value is never in the answer and the control plane cannot read one. The
+	// write is its own action; see authz/rbac.
+	{http.MethodGet, settingsPath, settingsRoute},
+	// A settings change is a commit, which is what this has that Coolify's
+	// "Save changes" does not: a history, an author, and a rollback — for
+	// everything except a secret's value, which git never carries.
+	{http.MethodPut, settingsPath, updateSettingsRoute},
 	// The only route that runs somebody else's code, and the only one whose
 	// effect no commit describes. It is here rather than beside the deploy
 	// routes because it is not one: a deploy changes what will run and this
@@ -356,6 +392,7 @@ func (o Options) handler(store evidence.Store, idStore identity.Store) (http.Han
 		delivery: o.Delivery,
 		pin:      o.Pin,
 		ports:    o.Ports,
+		secrets:  o.Secrets,
 		writer:   &gitwrite.Writer{Evidence: store}, gitAuth: o.GitAuth,
 	}
 	for _, rt := range tenantRoutes {

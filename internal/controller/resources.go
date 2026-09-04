@@ -38,6 +38,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	platformv1alpha1 "github.com/damgahq/damga/api/v1alpha1"
+	"github.com/damgahq/damga/internal/manifest"
 )
 
 // Everything in this block is the platform's decision rather than the user's.
@@ -104,6 +105,14 @@ const (
 	// boot, a process that runs a migration first.
 	startupPeriodSecs    int32 = 5
 	startupFailureBudget int32 = 60
+
+	// What a probe does when the workload says nothing. These were literals in
+	// desiredDeployment until spec.health could carry them; they are named now
+	// because two places have to agree on what "unset" renders as, and a
+	// literal in one of them is how they stop agreeing.
+	defaultProbePeriodSecs  int32 = 5
+	defaultProbeTimeoutSecs int32 = 3
+	defaultProbeFailures    int32 = 3
 
 	// composeGroupLabel marks every object one catalogue entry produced, with
 	// the entry's name as the value.
@@ -476,12 +485,16 @@ func desiredDeployment(app *platformv1alpha1.Workload) *appsv1.Deployment {
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path: path,
-					Port: intstr.FromInt32(app.Spec.Port),
+					Port: intstr.FromInt32(probePort(app)),
 				},
 			},
-			PeriodSeconds:    5,
-			TimeoutSeconds:   3,
-			FailureThreshold: 3,
+			// Zero means the platform's own answer, so every manifest written
+			// before these fields existed renders exactly the bytes it did
+			// before — which is what keeps adding them from rolling every pod
+			// on the next reconcile.
+			PeriodSeconds:    orDefault(app.Spec.Health.IntervalSeconds, defaultProbePeriodSecs),
+			TimeoutSeconds:   orDefault(app.Spec.Health.TimeoutSeconds, defaultProbeTimeoutSecs),
+			FailureThreshold: orDefault(app.Spec.Health.FailureThreshold, defaultProbeFailures),
 		}
 	}
 
@@ -511,6 +524,22 @@ func desiredDeployment(app *platformv1alpha1.Workload) *appsv1.Deployment {
 		envFrom = append(envFrom, corev1.EnvFromSource{
 			SecretRef: &corev1.SecretEnvSource{
 				LocalObjectReference: corev1.LocalObjectReference{Name: app.Spec.Database},
+			},
+		})
+	}
+	// The values the user gave, after the two the platform produced and before
+	// any Secret they named themselves: a person who sets DB_HOST here is
+	// overriding the database's, which is the same rule the comment above
+	// states, one step further out.
+	//
+	// Referenced by name and never read. The control plane writes this Secret
+	// and the operator does not look inside it, which is why a value the user
+	// typed can reach a container without existing anywhere the operator, the
+	// commit or this object can show it.
+	if len(app.Spec.UserSecrets) > 0 {
+		envFrom = append(envFrom, corev1.EnvFromSource{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: manifest.UserSecretName(app.Name)},
 			},
 		})
 	}
@@ -658,13 +687,40 @@ func startupProbe(app *platformv1alpha1.Workload) *corev1.Probe {
 		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{
 				Path: app.Spec.Health.LivenessPath,
-				Port: intstr.FromInt32(app.Spec.Port),
+				Port: intstr.FromInt32(probePort(app)),
 			},
 		},
+		// The budget stays the platform's on purpose. spec.health.intervalSeconds
+		// is how often a *running* container is asked whether it is still alive;
+		// this is how long a starting one is given to answer at all, and a
+		// workload that lengthened its interval would otherwise shorten nothing
+		// and lengthen its startup budget by twelve times without asking.
 		PeriodSeconds:    startupPeriodSecs,
-		TimeoutSeconds:   3,
+		TimeoutSeconds:   orDefault(app.Spec.Health.TimeoutSeconds, defaultProbeTimeoutSecs),
 		FailureThreshold: startupFailureBudget,
 	}
+}
+
+// probePort is where the probes knock.
+//
+// spec.health.port when it is set, and the workload's own port when it is not.
+// The second is the assumption that was here unconditionally, and it is the
+// most common reason a catalogue entry never becomes Ready: an application that
+// answers its API on one port and nothing at all on 8080 is probed on 8080,
+// fails, and is restarted for ever by the liveness probe.
+func probePort(app *platformv1alpha1.Workload) int32 {
+	if app.Spec.Health.Port != 0 {
+		return app.Spec.Health.Port
+	}
+	return app.Spec.Port
+}
+
+// orDefault is "zero means the platform decides", in one place.
+func orDefault(v, fallback int32) int32 {
+	if v == 0 {
+		return fallback
+	}
+	return v
 }
 
 func desiredService(app *platformv1alpha1.Workload) *corev1.Service {

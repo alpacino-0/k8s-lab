@@ -28,6 +28,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	platformv1alpha1 "github.com/damgahq/damga/api/v1alpha1"
+	"github.com/damgahq/damga/internal/manifest"
 )
 
 const (
@@ -47,6 +48,11 @@ const (
 	// ever passed through.
 	rolloutAnnotation  = annotationPrefix + "rollout"
 	revisionAnnotation = "deployment.kubernetes.io/revision"
+
+	// The two Secrets a workload can be handed that this package does not
+	// create: one the tenant named themselves, one the control plane writes.
+	tenantSecret = "extra-secrets"
+	userSecret   = "blog-env"
 
 	// A rollout id and the one that replaces it.
 	oldRollout = "t_1"
@@ -586,7 +592,7 @@ func TestReconcileAnnotationsOwnsOnlyItsOwnPrefix(t *testing.T) {
 func TestNamingADatabaseInjectsItsCredentials(t *testing.T) {
 	withDB := app(func(a *platformv1alpha1.Workload) {
 		a.Spec.Database = dbName
-		a.Spec.EnvFrom = []string{"extra-secrets"}
+		a.Spec.EnvFrom = []string{tenantSecret}
 	})
 	c := desiredDeployment(withDB).Spec.Template.Spec.Containers[0]
 
@@ -601,7 +607,7 @@ func TestNamingADatabaseInjectsItsCredentials(t *testing.T) {
 	// Kubernetes, so a variable the tenant sets explicitly overrides the
 	// platform's — somebody naming a database and then overriding DB_HOST is
 	// pointing the app elsewhere on purpose.
-	if names[1] != "extra-secrets" {
+	if names[1] != tenantSecret {
 		t.Errorf("envFrom = %v; the tenant's own secrets must come last or the "+
 			"platform silently overrules them", names)
 	}
@@ -620,5 +626,139 @@ func TestNoDatabaseMeansNoInjectedSecret(t *testing.T) {
 	c := desiredDeployment(app()).Spec.Template.Spec.Containers[0]
 	if len(c.EnvFrom) != 0 {
 		t.Errorf("envFrom = %v for a workload that named no database", c.EnvFrom)
+	}
+}
+
+// --- health settings ---------------------------------------------------------
+
+// The port a probe knocks on, and the most common reason a catalogue entry
+// never becomes Ready.
+//
+// spec.port is the address of the application; the health endpoint is not
+// always on it. Until this field existed the probes assumed it was, so an app
+// serving on one port and answering health on another was probed on the wrong
+// one — restarted for ever by a liveness probe that was never pointed at it,
+// with nothing anywhere saying why.
+func TestTheProbesKnockWhereHealthSaysAndNotWhereTheAppServes(t *testing.T) {
+	a := app(func(a *platformv1alpha1.Workload) {
+		a.Spec.Port = 27017
+		a.Spec.Health.Port = 8081
+	})
+	c := desiredDeployment(a).Spec.Template.Spec.Containers[0]
+
+	for name, p := range map[string]*corev1.Probe{
+		"startup": c.StartupProbe, "liveness": c.LivenessProbe, "readiness": c.ReadinessProbe,
+	} {
+		if got := p.HTTPGet.Port.IntValue(); got != 8081 {
+			t.Errorf("the %s probe knocks on %d and spec.health.port says 8081", name, got)
+		}
+	}
+	// And the container still declares the application's own port. The Service
+	// targets that by name, so a health port that moved it would take the app
+	// off the network in order to fix a probe.
+	if got := c.Ports[0].ContainerPort; got != 27017 {
+		t.Errorf("the container publishes %d, not the port the application serves on", got)
+	}
+}
+
+func TestWithNoHealthPortTheProbesUseTheAppsOwn(t *testing.T) {
+	c := desiredDeployment(app(func(a *platformv1alpha1.Workload) {
+		a.Spec.Port = 3000
+	})).Spec.Template.Spec.Containers[0]
+
+	if got := c.ReadinessProbe.HTTPGet.Port.IntValue(); got != 3000 {
+		t.Errorf("the readiness probe knocks on %d for a workload that set no health port", got)
+	}
+}
+
+// Timing, and the case that matters more than the timing: a manifest written
+// before these fields existed has to render exactly what it rendered before.
+// Anything else rolls every pod of every app on the reconcile after an upgrade.
+func TestProbeTimingIsTheWorkloadsAndZeroIsThePlatformsAnswer(t *testing.T) {
+	tuned := desiredDeployment(app(func(a *platformv1alpha1.Workload) {
+		a.Spec.Health.IntervalSeconds = 30
+		a.Spec.Health.TimeoutSeconds = 10
+		a.Spec.Health.FailureThreshold = 6
+	})).Spec.Template.Spec.Containers[0]
+
+	for name, p := range map[string]*corev1.Probe{
+		"liveness": tuned.LivenessProbe, "readiness": tuned.ReadinessProbe,
+	} {
+		if p.PeriodSeconds != 30 || p.TimeoutSeconds != 10 || p.FailureThreshold != 6 {
+			t.Errorf("the %s probe runs %ds/%ds/%d and the workload asked for 30s/10s/6",
+				name, p.PeriodSeconds, p.TimeoutSeconds, p.FailureThreshold)
+		}
+	}
+
+	unset := desiredDeployment(app()).Spec.Template.Spec.Containers[0]
+	if p := unset.LivenessProbe; p.PeriodSeconds != 5 || p.TimeoutSeconds != 3 || p.FailureThreshold != 3 {
+		t.Errorf("a workload that set no health timing renders %ds/%ds/%d; it rendered 5s/3s/3 "+
+			"before these fields existed, and every committed manifest depends on that",
+			p.PeriodSeconds, p.TimeoutSeconds, p.FailureThreshold)
+	}
+
+	// The startup budget is the platform's and stays the platform's. It is how
+	// long a container is given to answer at all, not how often a running one
+	// is asked, and folding the two together would let a workload that wanted
+	// calmer liveness checks quietly get twelve times the startup budget.
+	if got := tuned.StartupProbe.PeriodSeconds * tuned.StartupProbe.FailureThreshold; got != 300 {
+		t.Errorf("the startup budget moved to %ds when the workload changed its probe interval", got)
+	}
+}
+
+// --- the values a user gave --------------------------------------------------
+
+// The third kind of value, and the one that was missing: not a literal in the
+// commit, not something the platform invented, but something the user typed.
+//
+// The operator's whole part in it is this reference. It never reads the Secret,
+// which is what lets a value reach a container without existing in this object,
+// in the commit that produced it, or anywhere the operator could log it.
+func TestUserSecretsAreInjectedByReferenceAndComeAfterThePlatforms(t *testing.T) {
+	a := app(func(a *platformv1alpha1.Workload) {
+		a.Spec.Secrets = []platformv1alpha1.GeneratedSecret{{Name: "SESSION_KEY"}}
+		a.Spec.Database = dbName
+		a.Spec.UserSecrets = []string{"SMTP_PASSWORD"}
+		a.Spec.EnvFrom = []string{tenantSecret}
+	})
+	c := desiredDeployment(a).Spec.Template.Spec.Containers[0]
+
+	names := make([]string, 0, len(c.EnvFrom))
+	for _, e := range c.EnvFrom {
+		names = append(names, e.SecretRef.Name)
+	}
+	want := []string{"blog-generated", dbName, userSecret, tenantSecret}
+	if len(names) != len(want) {
+		t.Fatalf("envFrom = %v, want %v", names, want)
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Fatalf("envFrom = %v, want %v: later entries win in Kubernetes, so a value the "+
+				"user typed has to come after the ones the platform produced and before a "+
+				"Secret they named themselves", names, want)
+		}
+	}
+	// The name is the contract with the control plane, which writes this object
+	// and is the only thing that can. A convention in two places drifts, and
+	// this one drifts into a pod that stays Pending with the reason in an event.
+	if manifest.UserSecretName(a.Name) != userSecret {
+		t.Errorf("UserSecretName is %q", manifest.UserSecretName(a.Name))
+	}
+	// And no value of any of them is anywhere on the pod spec.
+	for _, e := range c.Env {
+		if e.Name == "SMTP_PASSWORD" {
+			t.Error("a user secret was rendered as a literal env var, which puts its value " +
+				"in the object and in the commit")
+		}
+	}
+}
+
+func TestNoUserSecretsMeansNoReference(t *testing.T) {
+	c := desiredDeployment(app()).Spec.Template.Spec.Containers[0]
+	for _, e := range c.EnvFrom {
+		if e.SecretRef.Name == userSecret {
+			t.Error("a workload that named no user secrets references the Secret anyway, " +
+				"so its pod waits for an object nothing creates")
+		}
 	}
 }

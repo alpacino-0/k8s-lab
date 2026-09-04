@@ -67,6 +67,19 @@ func (a *Authorizer) Authorize(
 		// way to say so — and the action set is closed precisely so that a new
 		// endpoint forces this decision instead of borrowing a neighbour's.
 		return authz.Decision{Allow: role != roleViewer, Reason: role + " may change how an app runs"}, nil
+	case authz.ActionAppSettings:
+		// With the deploy right rather than beside scale and restart, and the
+		// difference is what the action can express. A scale changes how many
+		// copies run; a setting changes what the process talks to — the
+		// database it opens, the API it authenticates against — and a
+		// build-time one changes what goes into the image. That is a change to
+		// what the application does, which is the promise app:deploy makes.
+		//
+		// It is still its own action and not app:deploy itself, because the two
+		// are not the same permission in the other direction: this one cannot
+		// introduce code, and an install that wants somebody who may configure
+		// an app without shipping a release has a name for it now.
+		return authz.Decision{Allow: role != roleViewer, Reason: role + " may configure an app"}, nil
 	case authz.ActionAppDelete:
 		// Grouped with deploying rather than with administration, and it was
 		// tenant:admin for one release because this action did not exist yet.

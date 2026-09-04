@@ -459,6 +459,16 @@ func (in *WorkloadSpec) DeepCopyInto(out *WorkloadSpec) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.BuildEnv != nil {
+		in, out := &in.BuildEnv, &out.BuildEnv
+		*out = make([]EnvVar, len(*in))
+		copy(*out, *in)
+	}
+	if in.UserSecrets != nil {
+		in, out := &in.UserSecrets, &out.UserSecrets
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	in.Resources.DeepCopyInto(&out.Resources)
 	out.Health = in.Health
 	if in.Autoscale != nil {

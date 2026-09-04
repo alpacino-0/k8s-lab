@@ -61,12 +61,47 @@ type Resources struct {
 // purpose: a readiness failure removes one replica from a Service, a liveness
 // failure restarts it. Pointing liveness at a dependency turns one slow database
 // into every replica restarting at once.
+// +kubebuilder:validation:XValidation:rule="!has(self.timeoutSeconds) || !has(self.intervalSeconds) || self.timeoutSeconds <= self.intervalSeconds",message="the probe timeout must not exceed the interval between probes"
 type Health struct {
 	// +kubebuilder:default="/healthz"
 	LivenessPath string `json:"livenessPath,omitempty"`
 
 	// +kubebuilder:default="/readyz"
 	ReadinessPath string `json:"readinessPath,omitempty"`
+
+	// Port the probes call. Zero means spec.port, which is what almost every
+	// workload wants.
+	//
+	// It is here because the assumption underneath it is wrong often enough to
+	// be the single most common way a catalogue install fails to become Ready:
+	// an application that serves its API on one port and its health endpoint on
+	// another gets probed on the wrong one, answers nothing, and is restarted
+	// for ever by a liveness probe that was never pointed at it. Coolify has
+	// this field; this had a comment saying the port was assumed.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port,omitempty"`
+
+	// IntervalSeconds is how often the probes run. Zero keeps the platform's
+	// five, which is right for a web service and far too impatient for
+	// something that takes a second to answer under load.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=300
+	IntervalSeconds int32 `json:"intervalSeconds,omitempty"`
+
+	// TimeoutSeconds is how long one probe may take. Zero keeps three.
+	//
+	// It has to be no larger than the interval: a probe that is still running
+	// when the next one is due is a probe whose period is not the period.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=60
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+
+	// FailureThreshold is how many failures in a row mean unhealthy. Zero keeps
+	// three. Kubernetes' own name for it; a panel is free to call it retries.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=20
+	FailureThreshold int32 `json:"failureThreshold,omitempty"`
 }
 
 // Autoscale replaces a fixed replica count with a range. Scale-up is immediate
@@ -214,6 +249,65 @@ type WorkloadSpec struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=8
 	Volumes []Volume `json:"volumes,omitempty"`
+
+	// BuildEnv are variables for the build that produces this app's image, and
+	// not for the container that runs it.
+	//
+	// Two lists rather than one list with a flag, and the flag is the design
+	// Coolify got right: a variable can be build-time, run-time, both or
+	// neither, because the two have different lifetimes. A build-time variable
+	// chooses what is compiled in; a run-time one chooses what the process
+	// talks to. Delivering either to the other is a real mistake — an API key
+	// baked into an image layer, or a compiler flag in a running container's
+	// environment.
+	//
+	// Nothing reads this yet. BuildSpec has no environment at all, so a build
+	// cannot receive one, and the endpoint that writes this says so in the
+	// answer rather than letting somebody set a value that goes nowhere. The
+	// list is here because the setting has to survive between being typed and
+	// being consumed, and git is where this platform keeps what it was told.
+	//
+	// Literal values only. A build-time secret is refused, and not for lack of
+	// a field: builds run in their own namespace and a Secret in the tenant's
+	// is not reachable from it, so the value would have to be copied there by
+	// something that can read it. Nothing in this platform can, deliberately.
+	//
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=64
+	BuildEnv []EnvVar `json:"buildEnv,omitempty"`
+
+	// UserSecrets are the names of environment variables whose values this
+	// platform holds in a Secret instead of in git.
+	//
+	// The counterpart of Secrets above, and the missing third case. There were
+	// two: a literal in Env, which is in the commit and readable by anyone who
+	// can read the repository, and a value the platform invents, which never
+	// exists outside the cluster. The one nobody could express was a value the
+	// *user* has — a database address, an API key, the token an n8n template
+	// asks for — and without it a catalogue entry that needs one cannot be
+	// installed at all.
+	//
+	// Names and never values, which is the whole point. The value is written
+	// straight into the Secret this platform keeps beside the workload
+	// (<name>-env) and never appears here, in the commit, or in any diff of
+	// either. What git carries is that the variable exists and where it lives,
+	// which is more than a platform holding the value in its own database can
+	// show.
+	//
+	// The cost is written down in docs/KARARLAR.md and it is real: a value that
+	// is not in git has no rollback, and nothing restores it if the Secret is
+	// deleted. A manifest comes back in about ten seconds; this does not come
+	// back at all.
+	//
+	// A valid environment variable name, because envFrom silently skips a key
+	// that is not one — the pod starts, the variable is absent, and the only
+	// trace is an event nobody is reading.
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:Pattern=`^[A-Za-z_][A-Za-z0-9_]*$`
+	// +kubebuilder:validation:items:MaxLength=128
+	UserSecrets []string `json:"userSecrets,omitempty"`
 
 	Resources Resources `json:"resources,omitempty"`
 

@@ -190,13 +190,29 @@ same endpoints; there is no private API.
 | `…/backup` | The app's database, and when its backup was last restored. |
 | `…/export` | Every record, oldest first, as JSONL. |
 | `POST …/deploys` | Writes a commit. Argo CD applies it; this endpoint touches no cluster. |
+| `GET …/settings` | What an app is configured with: its environment variables, its probes and its resource requests. A secret's value is never in the answer. |
+| `PUT …/settings` | Changes them. A commit, so a setting has an author, a time and a rollback — for everything except a secret's value. |
 
-Four of these write, and only one of them writes to the cluster. `deploys` and
-the two `apps` endpoints write to git and to the control plane's own database;
-`builds` is the single exception, because a build is an action rather than a
-desired state and has to happen before there is a digest to commit. That
-exception is why the ServiceAccount in `cluster/control-plane.yaml` can create a
-`Build` in one namespace and nothing else anywhere.
+Six of these write, and two of them write to the cluster. `deploys`, `settings`
+and the two `apps` endpoints write to git and to the control plane's own
+database. The two exceptions are exceptions for different reasons and both are
+worth naming:
+
+- `builds`, because a build is an action rather than a desired state and has to
+  happen before there is a digest to commit. That is why the ServiceAccount in
+  `cluster/control-plane.yaml` can create a `Build` in one namespace.
+- `settings`, but only for the value of a secret. A literal setting is a commit
+  like everything else; a secret's value is written straight into a Secret
+  beside the workload, because a value in git is a value in every clone of it.
+  Git still carries which variables exist and which Secret each one reads, which
+  is more than a platform holding values in its own database can show — and the
+  cost is written down in `docs/KARARLAR.md`: a value git does not have cannot
+  be rolled back, and nothing restores it if the Secret is deleted.
+
+The grant behind that second one is `create` and `patch` on Secrets, and
+deliberately not `get`: the control plane can write a value it was handed and
+can never read one back. That is what makes "a secret's value is never in an API
+response" a property of the deployment rather than a promise in a handler.
 
 Every endpoint under `/tenants/{tenant}` resolves the caller from the session
 cookie and the membership row, and from nothing the request carries. A tenant
