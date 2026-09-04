@@ -75,6 +75,22 @@ func (a *Authorizer) Authorize(
 		// no reason somebody who may create an app and ship to it may not also
 		// unregister one. A viewer still may not.
 		return authz.Decision{Allow: role != roleViewer, Reason: role + " may unregister an app"}, nil
+	case authz.ActionAppExec:
+		// Owner only, and the strongest thing in this set. Everything else here
+		// is scoped by what it can express: a deploy ships an image somebody
+		// built, a rollback ships one already shipped, a scale changes a
+		// number. Running a command inside a container is scoped by nothing —
+		// it reads the environment the app was given, which is where its
+		// database password is, and it writes wherever that password reaches.
+		//
+		// It is also the one action that leaves the write path. Principle 1
+		// says the only way to change what runs is a commit; an exec changes
+		// what a running container has done without changing what it is, so the
+		// next sync puts the container back and keeps whatever the command did
+		// to the data. Grouping it with the deploy right would hand that to
+		// everybody who may ship a release, which is a different and much
+		// larger promise than the one they were given.
+		return authz.Decision{Allow: role == roleOwner, Reason: role + " may run a command in a container"}, nil
 	case authz.ActionAppConnect:
 		// Owner only, and named here rather than left to the default, because
 		// the reason is not obvious from the verb. Deploying ships an image;

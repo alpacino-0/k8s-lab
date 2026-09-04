@@ -305,6 +305,13 @@ var tenantRoutes = []struct {
 	// template, and no field of a Workload reaches the pod template.
 	{http.MethodPost, "/apps/{app}/envs/{env}/restart", restartRoute},
 	{http.MethodPost, "/apps/{app}/envs/{env}/scale", scaleRoute},
+	// The only route that runs somebody else's code, and the only one whose
+	// effect no commit describes. It is here rather than beside the deploy
+	// routes because it is not one: a deploy changes what will run and this
+	// changes what a running container has already done. authz.ActionAppExec
+	// is owner-only for that reason, and the ClusterRole has to grant
+	// pods/exec before it can do anything at all — see execRoute.
+	{http.MethodPost, "/apps/{app}/envs/{env}/exec", execRoute},
 }
 
 // handler builds the routes, then hands the mux to the Routes hook and wraps
