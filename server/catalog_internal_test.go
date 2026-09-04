@@ -561,10 +561,16 @@ func TestInstallingOverAnExistingManifestIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("installing into an empty directory failed: %v", err)
 	}
-	// The entry's one object, plus the namespace and the quota it lands in.
-	if len(files) != 3 {
-		t.Fatalf("a one-object entry committed %d files, want 3: the workload, the namespace "+
-			"and its quota", len(files))
+	// The entry's one object, plus the fence it lands in — counted from the
+	// fence rather than written down, because it has grown twice and every
+	// place that spelled the number out had to be found by a failing test.
+	fence, err := manifest.Fence(nsHomeProd)
+	if err != nil {
+		t.Fatalf("rendering the fence to count it: %v", err)
+	}
+	if want := len(fence) + 1; len(files) != want {
+		t.Fatalf("a one-object entry committed %d files, want %d: the workload and the %d "+
+			"files that make the namespace it lands in", len(files), want, len(fence))
 	}
 	if _, ok := files[manifest.File]; !ok {
 		t.Fatalf("the app is not in %s, which is the one file every later deploy reads",
@@ -790,12 +796,16 @@ func TestAMultiObjectEntryCommitsAFilePerObject(t *testing.T) {
 	}
 
 	names := committedNames(t, repo)
-	if len(names) != 4 {
+	fence, err := manifest.Fence(nsHomeProd)
+	if err != nil {
+		t.Fatalf("rendering the fence to count it: %v", err)
+	}
+	if want := len(fence) + 2; len(names) != want {
 		// The keys and not the map: a failure message carrying two YAML files
 		// as byte slices is a failure message nobody reads.
 		t.Fatalf("the directory holds %v; a workload and a database are two objects and two "+
-			"files, and the namespace and quota they land in are two more",
-			slices.Sorted(maps.Keys(names)))
+			"files, and the fence they land in is %d more",
+			slices.Sorted(maps.Keys(names)), len(fence))
 	}
 	if _, ok := names[manifest.File]; !ok {
 		t.Fatalf("the app is not in %s, which is the one file every later deploy reads: %v",
@@ -817,7 +827,7 @@ func TestAMultiObjectEntryCommitsAFilePerObject(t *testing.T) {
 	// workload points at that string.
 	var database string
 	for name := range names {
-		if name != manifest.File && name != manifest.NamespaceFile && name != manifest.QuotaFile {
+		if name != manifest.File && !manifest.IsFence(name) {
 			database = name
 		}
 	}

@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"sigs.k8s.io/yaml"
 
 	"github.com/damgahq/damga/internal/manifest"
@@ -34,16 +35,23 @@ const (
 	policyNamespace = "../../policies/namespace.yaml"
 	policyQuota     = "../../policies/tenant-quota.yaml"
 
+	// The namespace every case here renders a fence for.
+	tenantNamespace = "acme-prod"
+
 	// The reference tenant's own fence, committed as two files for the reason
 	// Fence exists: Argo CD applies them and selfHeal puts them back.
 	gitopsFence          = "../../gitops/fence/"
 	gitopsNamespace      = "damga-gitops"
 	referenceApplication = "../../gitops/application.yaml"
+
+	// The manifest that declares the control plane's identity and what it may
+	// do outside a tenant's namespace.
+	controlPlane = "../../cluster/control-plane.yaml"
 )
 
 func fenceFiles(t *testing.T) (corev1.Namespace, corev1.ResourceQuota) {
 	t.Helper()
-	files, err := manifest.Fence("acme-prod")
+	files, err := manifest.Fence(tenantNamespace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +191,11 @@ func TestTheReferenceTenantIsUnderTheFenceTenantsGet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{manifest.NamespaceFile, manifest.QuotaFile} {
+	// Every file Fence renders, and nothing else in the directory. Named files
+	// were what this iterated over first, so when the fence gained a Role and a
+	// RoleBinding the reference tenant silently did not get them: the two files
+	// it did have still matched, and the test still passed.
+	for name := range want {
 		got, err := os.ReadFile(gitopsFence + name)
 		if err != nil {
 			t.Fatalf("the reference tenant has no %s: %v\n"+
@@ -196,6 +208,24 @@ func TestTheReferenceTenantIsUnderTheFenceTenantsGet(t *testing.T) {
 				"tenant and a real one have to be the same fence, and the copy that drifts is "+
 				"the one nobody applies by hand.\n--- committed ---\n%s\n--- Fence renders ---\n%s",
 				name, gitopsNamespace, got, want[name])
+		}
+	}
+
+	// And nothing beside them. A file left behind by a fence that stopped
+	// rendering it is a manifest Argo CD goes on applying — the reference
+	// tenant's own version of a stale object nobody removed.
+	entries, err := os.ReadDir(gitopsFence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".md") {
+			// The README that explains the directory. Argo CD reads only YAML.
+			continue
+		}
+		if _, rendered := want[e.Name()]; !rendered {
+			t.Errorf("gitops/fence/%s is not something Fence renders any more; Argo CD is "+
+				"still applying it", e.Name())
 		}
 	}
 }
@@ -251,4 +281,130 @@ func TestTheReferenceApplicationAppliesThatFence(t *testing.T) {
 		t.Error("the reference Application creates its own namespace again, which arrives " +
 			"with none of the labels in gitops/fence/namespace.yaml")
 	}
+}
+
+// What the platform may do inside a tenant's namespace, and what it may not.
+//
+// The verbs that are absent are the assertion. The settings endpoint's promise
+// is that a secret's value is never in an API response, and what makes that a
+// property of the deployment rather than a sentence in a handler is that the
+// control plane cannot read a Secret at all: no get, no list, no watch. A raw
+// merge patch needs neither — measured against a real API server on 2026-09-05,
+// because kubectl's own `patch` does a get first and its refusal makes it look
+// as though the API requires one.
+//
+// delete is absent for a different reason: this platform never removes a
+// tenant's Secret object, only keys inside it. A grant that could would be a
+// grant that can destroy every value a tenant ever typed.
+func TestThePlatformsAccessToATenantNamespaceIsWriteOnly(t *testing.T) {
+	files, err := manifest.Fence(tenantNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var role rbacv1.Role
+	if err := yaml.Unmarshal(files[manifest.RoleFile], &role); err != nil {
+		t.Fatalf("the platform role is not a Role: %v", err)
+	}
+	if role.Namespace != tenantNamespace {
+		t.Errorf("the role lands in namespace %q, not the one it is about", role.Namespace)
+	}
+	if len(role.Rules) != 1 {
+		t.Fatalf("the role carries %d rules; it grants one thing", len(role.Rules))
+	}
+	rule := role.Rules[0]
+	if !slices.Equal(rule.Resources, []string{"secrets"}) ||
+		!slices.Equal(rule.APIGroups, []string{""}) {
+		t.Fatalf("the role is about %v in %v", rule.Resources, rule.APIGroups)
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(rule.Verbs)), []string{"create", "patch"}) {
+		t.Fatalf("the platform may %v in a tenant's namespace, and it needs create and patch.\n"+
+			"Every other verb is a decision: get, list and watch would let the control plane "+
+			"read a value it promises never to return, and delete would let it destroy every "+
+			"value a tenant has typed", rule.Verbs)
+	}
+	if len(rule.ResourceNames) != 0 {
+		t.Errorf("the rule names %v: RBAC matches resourceNames on objects that already "+
+			"exist, so a create would be refused by a rule that looks tighter and is broken",
+			rule.ResourceNames)
+	}
+}
+
+// The binding names the control plane, and the control plane is what
+// cluster/control-plane.yaml says it is.
+//
+// Read out of that file rather than written twice. A RoleBinding whose subject
+// does not match the running ServiceAccount authorizes nobody and looks exactly
+// right, and the failure arrives as a 403 at the moment somebody saves a
+// password.
+func TestTheBindingNamesTheServiceAccountTheControlPlaneRunsAs(t *testing.T) {
+	files, err := manifest.Fence(tenantNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var binding rbacv1.RoleBinding
+	if err := yaml.Unmarshal(files[manifest.RoleBindingFile], &binding); err != nil {
+		t.Fatalf("the platform rolebinding is not a RoleBinding: %v", err)
+	}
+	if binding.RoleRef.Kind != "Role" || binding.RoleRef.Name != "damga-settings" {
+		t.Errorf("the binding points at %s/%s", binding.RoleRef.Kind, binding.RoleRef.Name)
+	}
+	if len(binding.Subjects) != 1 {
+		t.Fatalf("the binding has %d subjects; it authorizes one identity", len(binding.Subjects))
+	}
+
+	sa, ns := controlPlaneIdentity(t)
+	got := binding.Subjects[0]
+	if got.Kind != "ServiceAccount" || got.Name != sa || got.Namespace != ns {
+		t.Errorf("the binding authorizes %s %s/%s and the control plane runs as "+
+			"ServiceAccount %s/%s.\nA binding whose subject does not exist authorizes nobody "+
+			"and looks correct; it fails as a 403 when somebody saves a secret",
+			got.Kind, got.Namespace, got.Name, ns, sa)
+	}
+}
+
+// And the grant this replaced does not come back.
+//
+// It was create and patch on Secrets in every namespace in the cluster, because
+// RBAC cannot say "the namespaces this platform owns" from a cluster-scoped
+// rule. The namespaces are known one at a time, in the manifest that creates
+// them, which is where the grant lives now. If a cluster-wide rule ever
+// reappears, the tenant-scoped one has become decoration.
+func TestTheControlPlaneHoldsNoClusterWideAccessToSecrets(t *testing.T) {
+	body, err := os.ReadFile(controlPlane)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for doc := range strings.SplitSeq(string(body), "\n---\n") {
+		var role rbacv1.ClusterRole
+		if err := yaml.Unmarshal([]byte(doc), &role); err != nil || role.Kind != "ClusterRole" {
+			continue
+		}
+		for _, rule := range role.Rules {
+			if !slices.Contains(rule.Resources, "secrets") {
+				continue
+			}
+			t.Errorf("ClusterRole %s may %v secrets in every namespace in the cluster, "+
+				"including the ones holding Argo CD's admin password and every tenant's "+
+				"database credentials.\nThe tenant-scoped Role in internal/manifest.Fence is "+
+				"what replaced this", role.Name, rule.Verbs)
+		}
+	}
+}
+
+// controlPlaneIdentity reads the ServiceAccount the control plane runs as.
+func controlPlaneIdentity(t *testing.T) (name, namespace string) {
+	t.Helper()
+	body, err := os.ReadFile(controlPlane)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for doc := range strings.SplitSeq(string(body), "\n---\n") {
+		var sa corev1.ServiceAccount
+		if err := yaml.Unmarshal([]byte(doc), &sa); err != nil || sa.Kind != "ServiceAccount" {
+			continue
+		}
+		return sa.Name, sa.Namespace
+	}
+	t.Fatalf("%s declares no ServiceAccount", controlPlane)
+	return "", ""
 }

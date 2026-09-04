@@ -81,26 +81,25 @@ rules:
   - apiGroups: [""]
     resources: [pods/exec]
     verbs: [create]
-  # The values a user typed into the settings page, in the Secret beside their
-  # workload. Without this the only values an application can receive are the
-  # ones in the commit and the ones the platform invented, which is why n8n
-  # could not be installed at all.
+  # No secrets rule, and its absence is the point.
   #
-  # create and patch, and deliberately no get, list or watch. That is not
-  # tidiness: it is what makes "a secret's value is never in an API response"
-  # a property of the deployment rather than a promise in a handler. The
-  # control plane can write a value it was handed and can never read one back —
-  # not this one, not a database password, not Argo CD's admin secret — and the
-  # endpoint's merge patch is built around that absence rather than working
-  # despite it.
+  # The settings endpoint writes the values a user typed into a Secret beside
+  # their workload, and this ClusterRole granted create and patch on Secrets in
+  # every namespace in the cluster to make that possible. RBAC could express
+  # nothing smaller here: tenant namespaces are made as tenants arrive, and a
+  # cluster-scoped rule cannot say "the ones this platform owns".
   #
-  # It is still a write into every namespace, because tenant namespaces are
-  # made as tenants arrive and RBAC cannot say "the ones this platform owns".
-  # A Role per tenant namespace, written when the tenant is created, is the
-  # smaller grant and it is not what this installs today.
-  - apiGroups: [""]
-    resources: [secrets]
-    verbs: [create, patch]
+  # So the grant moved to the only place that knows a namespace's name — the
+  # manifest that creates it. internal/manifest.Fence renders a Role and a
+  # RoleBinding into the tenant's own repository beside the namespace and the
+  # quota, Argo CD applies them in the same sync, and selfHeal puts them back if
+  # somebody removes them. Measured 2026-09-05: with them, this ServiceAccount
+  # answers yes to create and patch in that namespace and no to get, list, watch
+  # and delete; without them it answers no to all six, in every namespace.
+  #
+  # What that buys, said plainly: a compromise of the control plane no longer
+  # reaches Argo CD's admin secret, or any database password in any namespace it
+  # was never invited into.
   # Live CPU and memory for one tenant's app, which is what turns a restart
   # count into a diagnosis: a pod restarting every four minutes with memory at
   # 98% of its limit is a different conversation from one that is crashing.
