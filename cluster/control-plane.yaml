@@ -50,14 +50,37 @@ rules:
   # more of the same, and it is worth naming as one: everything above tells the
   # platform what it deployed, and this tells it what the deployed thing said.
   # Granted because a platform whose panel cannot show a log is a platform
-  # people leave a terminal open beside — and scoped to get and list, so nothing
-  # here can exec into a pod or delete one.
+  # people leave a terminal open beside. It was scoped to get and list, and this
+  # sentence used to end "so nothing here can exec into a pod or delete one" —
+  # see the pods/exec rule below, which reverses half of that on purpose. The
+  # delete half still holds.
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list]
   - apiGroups: [""]
     resources: [pods/log]
     verbs: [get]
+  # Running a command in a tenant's container, which is the one grant here that
+  # is not a read.
+  #
+  # It reverses the sentence three rules above this one — "scoped to get and
+  # list, so nothing here can exec into a pod or delete one" — and that
+  # sentence was right when it was written. What changed is that the product
+  # now offers the action: docs/PLAN.md counts `exec` as phase-A parity, and a
+  # platform whose answer to "run this migration" is "get a kubeconfig" has
+  # handed the user something larger than exec.
+  #
+  # What this grant actually is, said plainly: the control plane may run
+  # arbitrary code in any pod it can see, which is every tenant's. That is
+  # strictly more than every other rule in this ClusterRole combined, and it is
+  # why the endpoint in front of it is owner-only (authz.ActionAppExec) and why
+  # the delete verb is still absent — exec is asked for by the product, delete
+  # is not.
+  #
+  # create and not get: the exec subresource is invoked with POST.
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
   # Live CPU and memory for one tenant's app, which is what turns a restart
   # count into a diagnosis: a pod restarting every four minutes with memory at
   # 98% of its limit is a different conversation from one that is crashing.
