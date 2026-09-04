@@ -88,6 +88,24 @@ func (a *Authorizer) Authorize(
 		// no reason somebody who may create an app and ship to it may not also
 		// unregister one. A viewer still may not.
 		return authz.Decision{Allow: role != roleViewer, Reason: role + " may unregister an app"}, nil
+	case authz.ActionDatabaseCreate:
+		// The deploy right, and named here so the reasoning is on the record
+		// rather than inferred from the default. Creating a database commits a
+		// manifest and takes a persistent volume claim — and a member can
+		// already do both, because a Workload carries Volumes and deploying one
+		// is the deploy right. Putting this above that line would mean somebody
+		// who may ship an application that writes to disk may not ask for the
+		// database it writes to, which is a distinction with nothing behind it.
+		return authz.Decision{Allow: role != roleViewer, Reason: role + " may create a database"}, nil
+	case authz.ActionDatabaseDelete:
+		// Owner only, and not grouped with app:delete, which is the one it
+		// looks like. Unregistering an application removes a row: the manifests
+		// stay committed, what is running keeps running, and the history stays
+		// readable. Removing a database withdraws the manifest that keeps a
+		// StatefulSet alive, and what happens to the volume after that is not
+		// something this control plane can undo — see deleteDatabase, which
+		// says so in the response rather than leaving it to be discovered.
+		return authz.Decision{Allow: role == roleOwner, Reason: role + " may remove a database"}, nil
 	case authz.ActionAppExec:
 		// Owner only, and the strongest thing in this set. Everything else here
 		// is scoped by what it can express: a deploy ships an image somebody

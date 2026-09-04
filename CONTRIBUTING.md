@@ -165,6 +165,18 @@ controller already holding 80 and 443 passes by finding nothing. When a green
 run does not exercise the condition, say so where the green appears — a tick
 that means less than it looks like is worse than a missing one.
 
+**Write the prose first and the matcher second.** A guard that searches a file
+for a string will be satisfied by the sentence explaining the rule, and that
+sentence is usually the one worth writing. Four times in three days: a guard on
+the container path failed on install.sh's own comment about why a bare name
+does not resolve; an ordering guard blamed the file whose order was right,
+because it named the manifest in prose long before applying it; a panel guard
+forbidding a password field matched the word inside the sentence saying there is
+no password here; and an orphan check matched `showNewApp()` in its own
+definition. Match a command, a call site, a field — something the file does, not
+something it says about what it does. Otherwise the rule makes its own
+explanation unwritable.
+
 **Commit messages** are lowercase, describe the change, and say why in the body
 when the why is not obvious. `git log` is the record of reasoning.
 

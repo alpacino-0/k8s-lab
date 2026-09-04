@@ -282,36 +282,26 @@ func (w *Writer) Deploy(ctx context.Context, req Request) (Result, error) {
 	return Result{Record: updated, CommitSHA: sha}, nil
 }
 
-// Read returns what the target directory holds, without writing anything.
+// commit does the git half: clone, write, commit as the user, push.
+// Read returns what is committed under target, without writing anything.
 //
-// The same clone the commit path makes, and stopping there. It exists because
-// a page that shows what is configured has to read the state, and the state is
-// the committed file — there is no second copy in a database, which is the
-// arrangement that keeps the panel and the cluster from drifting apart. Every
-// caller before this one only ever read the directory from inside a commit,
-// through the render callback.
+// Two sessions arrived at this method independently on the same day, one
+// calling it Read and one Files, with the same signature and the same clone.
+// That is the shape of a gap rather than a duplication: everything before them
+// could only read the directory from inside a commit, through the render
+// callback.
 //
-// A missing directory is an empty map and not an error, for the reason readDir
-// gives: an app that has never been deployed has no directory yet, and that is
-// a state to render rather than a failure.
+// The same clone the commit path makes, stopping before it changes anything.
+// It exists because a reader needs the desired state and the alternatives were
+// both worse: a second clone written beside this one is the parallel write
+// path this package exists to prevent, and reading the cluster instead answers
+// a different question — what Argo CD has applied so far, which lags a commit
+// by however long the next sync takes. An endpoint that creates a database and
+// then cannot list it has not created anything a person can see.
+//
+// A directory that is not there yet is an empty map, for the reason readDir
+// says: the first write to an app is the ordinary case.
 func (w *Writer) Read(ctx context.Context, target Target) (map[string][]byte, error) {
-	repo, err := clone(ctx, target)
-	if err != nil {
-		return nil, err
-	}
-	tree, err := repo.Worktree()
-	if err != nil {
-		return nil, err
-	}
-	return readDir(tree, target.Dir)
-}
-
-// clone fetches the branch this target names, in memory and shallow.
-//
-// A tenant's state repository holds manifests, so it is small by construction;
-// a worktree on disk would be one more thing to clean up after a crash, and the
-// workloads this platform renders run with a read-only root filesystem anyway.
-func clone(ctx context.Context, target Target) (*git.Repository, error) {
 	cloneOpts := &git.CloneOptions{
 		URL: target.RepoURL, Auth: target.Auth,
 		Depth: 1, SingleBranch: true,
@@ -323,14 +313,28 @@ func clone(ctx context.Context, target Target) (*git.Repository, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cloning %s: %w", target.RepoURL, err)
 	}
-	return repo, nil
+	tree, err := repo.Worktree()
+	if err != nil {
+		return nil, err
+	}
+	return readDir(tree, target.Dir)
 }
 
-// commit does the git half: clone, write, commit as the user, push.
 func (w *Writer) commit(ctx context.Context, req Request, rolloutID string, at time.Time) (string, error) {
-	repo, err := clone(ctx, req.Target)
+	// In memory, and shallow. A tenant's state repository holds manifests, so
+	// it is small by construction; a worktree on disk would be one more thing
+	// to clean up after a crash, and the workloads this platform renders run
+	// with a read-only root filesystem anyway.
+	cloneOpts := &git.CloneOptions{
+		URL: req.Target.RepoURL, Auth: req.Target.Auth,
+		Depth: 1, SingleBranch: true,
+	}
+	if req.Target.Branch != "" {
+		cloneOpts.ReferenceName = plumbing.NewBranchReferenceName(req.Target.Branch)
+	}
+	repo, err := git.CloneContext(ctx, memory.NewStorage(), memfs.New(), cloneOpts)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("cloning %s: %w", req.Target.RepoURL, err)
 	}
 
 	tree, err := repo.Worktree()

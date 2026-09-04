@@ -348,6 +348,16 @@ var tenantRoutes = []struct {
 	// is owner-only for that reason, and the ClusterRole has to grant
 	// pods/exec before it can do anything at all — see execRoute.
 	{http.MethodPost, "/apps/{app}/envs/{env}/exec", execRoute},
+	// One click, and the engine was already here: the Database CRD carries
+	// postgres and redis with backups and a restore rehearsal, and until now
+	// the only way to ask for one was kubectl.
+	{http.MethodGet, "/apps/{app}/envs/{env}/databases", listDatabases},
+	{http.MethodPost, "/apps/{app}/envs/{env}/databases", createDatabase},
+	// Its own action rather than app:delete, and owner-only. Unregistering an
+	// app removes a row; this withdraws the manifest holding a StatefulSet up,
+	// and what happens to the volume afterwards is not something this control
+	// plane can undo. See deleteDatabase.
+	{http.MethodDelete, "/apps/{app}/envs/{env}/databases/{database}", deleteDatabase},
 }
 
 // handler builds the routes, then hands the mux to the Routes hook and wraps
