@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -235,7 +236,7 @@ func updateSettingsRoute(g guard, st stores) http.Handler {
 		secretName := manifest.UserSecretName(place.App)
 		if len(plan.set) > 0 {
 			if err := st.secrets.Put(r.Context(), place.Namespace, secretName, plan.set, nil); err != nil {
-				problem(w, http.StatusBadGateway, "the secret values could not be written: "+err.Error())
+				problemWritingSecrets(w, place.Namespace, err)
 				return
 			}
 		}
@@ -301,6 +302,34 @@ func updateSettingsRoute(g guard, st stores) http.Handler {
 		w.WriteHeader(code)
 		writeJSON(w, body)
 	})
+}
+
+// problemWritingSecrets turns the API server's refusal into the sentence that
+// names what is actually wrong.
+//
+// Forbidden is the interesting one and it has exactly one ordinary cause. The
+// control plane holds no cluster-wide permission over Secrets: what lets it
+// write into a tenant's namespace is a Role and a RoleBinding that live in the
+// tenant's own repository, beside the namespace and the quota, and arrive when
+// Argo CD applies them. So a refusal here almost always means the manifests are
+// committed and have not been applied yet — either the first sync of a new app,
+// or a namespace that predates this arrangement and has not been redeployed
+// since.
+//
+// Answered as a conflict rather than a 502, because nothing is broken: the state
+// is committed, the cluster is behind it, and pressing save again after the sync
+// works. A 502 would send somebody to look at the control plane's logs for a
+// fault that is not there.
+func problemWritingSecrets(w http.ResponseWriter, namespace string, err error) {
+	if apierrors.IsForbidden(err) {
+		problem(w, http.StatusConflict,
+			"this installation may not write into "+namespace+" yet: the permission to hold "+
+				"a secret value there is a manifest in this app's own directory, and Argo CD "+
+				"has not applied it yet. Deploy this app once, or wait for the next sync, and "+
+				"save again. Literal settings are unaffected.")
+		return
+	}
+	problem(w, http.StatusBadGateway, "the secret values could not be written: "+err.Error())
 }
 
 // readCommittedWorkload is the state, read from the only place it lives.

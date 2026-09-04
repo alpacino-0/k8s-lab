@@ -307,11 +307,16 @@ func TestTheInstalledObjectsKeepTheirComposeGroup(t *testing.T) {
 	}
 
 	for name, body := range files {
-		// The namespace and its quota are the container rather than objects of
-		// the entry: the converter did not produce them, the placement did, and
-		// no NetworkPolicy selects them. The label marks what the east-west
-		// rule has to be able to find, which is pods.
-		if name == manifest.NamespaceFile || name == manifest.QuotaFile {
+		// The fence is the container rather than an object of the entry: the
+		// converter did not produce it, the placement did, and no NetworkPolicy
+		// selects a namespace, a quota or an RBAC object. The label marks what
+		// the east-west rule has to be able to find, which is pods.
+		//
+		// Asked of the manifest package rather than spelled out here. This read
+		// `name == NamespaceFile || name == QuotaFile` and broke the day the
+		// fence gained a Role and a RoleBinding — with a message about
+		// NetworkPolicies, which is not what had changed.
+		if manifest.IsFence(name) {
 			continue
 		}
 		app, err := manifest.Parse(body)

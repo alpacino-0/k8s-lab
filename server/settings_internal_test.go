@@ -20,14 +20,17 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -633,4 +636,59 @@ func everyCommittedFile(t *testing.T, repoPath string) map[string][]byte {
 		t.Fatal("the repository has no committed files at all, so this scan proves nothing")
 	}
 	return out
+}
+
+// The window between committing an app's manifests and the cluster having them,
+// said as a sentence somebody can act on.
+//
+// What lets the control plane hold a secret value in a tenant's namespace is a
+// Role and a RoleBinding in that tenant's own repository, applied by Argo CD
+// with the namespace itself. There is no cluster-wide grant behind it any more.
+// So the first save on a freshly installed app — or on a namespace that
+// predates this arrangement — can arrive before the permission does, and the
+// API server answers Forbidden.
+//
+// That is not a fault in the control plane, which is why it is not a 502: the
+// state is committed, the cluster is behind it, and saving again after the sync
+// works. A 502 sends somebody to read logs for a problem that is not there.
+func TestASaveBeforeTheNamespaceHasThePermissionSaysWhichHalfIsMissing(t *testing.T) {
+	l, secrets := configured(t)
+	secrets.err = apierrors.NewForbidden(
+		schema.GroupResource{Resource: "secrets"}, manifest.UserSecretName(appAPI),
+		errors.New(`User "system:serviceaccount:damga-system:damga" cannot create resource `+
+			`"secrets" in API group "" in the namespace "`+nsHomeProd+`"`))
+
+	before := commitsOnMain(t, l.repo)
+	code, body := l.settings(http.MethodPut, accMember,
+		`{"env":[{"key":"`+settingsSecretKey+`","value":"`+settingsSecretValue+`","secret":true,"runtime":true}],
+		  "health":{},"resources":{}}`)
+	if code != http.StatusConflict {
+		t.Fatalf("PUT = %d, want 409: %s", code, body)
+	}
+	if !strings.Contains(body, nsHomeProd) {
+		t.Errorf("the refusal does not name the namespace it is about: %s", body)
+	}
+	if !strings.Contains(body, "Argo CD has not applied it yet") {
+		t.Errorf("the refusal does not say what is missing or when it arrives: %s", body)
+	}
+	if commitsOnMain(t, l.repo) != before {
+		t.Error("a save that could not write its secret committed anyway, so the manifest " +
+			"now names a value that is not there")
+	}
+}
+
+// A failure that is not the permission still reads as one.
+func TestAnotherFailureWritingASecretIsNotDressedUpAsTheSyncWindow(t *testing.T) {
+	l, secrets := configured(t)
+	secrets.err = errors.New("connection refused")
+
+	code, body := l.settings(http.MethodPut, accMember,
+		`{"env":[{"key":"`+settingsSecretKey+`","value":"x","secret":true,"runtime":true}],
+		  "health":{},"resources":{}}`)
+	if code != http.StatusBadGateway {
+		t.Fatalf("PUT = %d, want 502: %s", code, body)
+	}
+	if !strings.Contains(body, "connection refused") {
+		t.Errorf("the answer does not carry what actually failed: %s", body)
+	}
 }

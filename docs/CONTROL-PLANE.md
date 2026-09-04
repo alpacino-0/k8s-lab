@@ -214,6 +214,33 @@ deliberately not `get`: the control plane can write a value it was handed and
 can never read one back. That is what makes "a secret's value is never in an API
 response" a property of the deployment rather than a promise in a handler.
 
+**And it is scoped to one namespace at a time.** It was a ClusterRole for one
+release — create and patch on Secrets in *every* namespace in the cluster —
+because RBAC cannot say "the namespaces this platform owns" from a
+cluster-scoped rule and tenant namespaces are made as tenants arrive. The grant
+now lives in the only place that knows a namespace's name: the manifest that
+creates it. `internal/manifest.Fence` renders a `Role` and a `RoleBinding` into
+the tenant's own repository beside the namespace and the quota, Argo CD applies
+them in the same sync, and `selfHeal` puts them back if they are removed.
+
+Measured on a cluster, 2026-09-05: with those two objects the control plane's
+ServiceAccount answers `yes` to create and patch in that namespace and `no` to
+get, list, watch and delete; without them it answers `no` to all six, in every
+namespace. A raw merge patch needs only `patch` — measured against the API
+server rather than assumed, because `kubectl patch` performs a get of its own
+and its refusal makes it look as though the API requires one.
+
+What that buys, said plainly: a compromise of the control plane no longer
+reaches Argo CD's admin password, or a database credential in a namespace it was
+never invited into.
+
+It has one consequence a user can see, and the endpoint says it in words rather
+than leaving it as a 403. The permission arrives with the app's manifests, so a
+secret saved before the first sync — or in a namespace that predates this
+arrangement — is refused with `this installation may not write into <namespace>
+yet`, and works after the sync. Literal settings are unaffected, because they
+are part of the commit rather than something written beside it.
+
 Every endpoint under `/tenants/{tenant}` resolves the caller from the session
 cookie and the membership row, and from nothing the request carries. A tenant
 you are not a member of answers `403` with the same message as a tenant that

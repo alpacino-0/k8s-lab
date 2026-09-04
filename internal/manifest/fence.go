@@ -23,20 +23,37 @@ import (
 	"slices"
 
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 )
 
-// The two files that make a tenant's directory a place a workload may land.
+// The files that make a tenant's directory a place a workload may land.
 const (
-	NamespaceFile = "namespace.yaml"
-	QuotaFile     = "quota.yaml"
+	NamespaceFile   = "namespace.yaml"
+	QuotaFile       = "quota.yaml"
+	RoleFile        = "platform-role.yaml"
+	RoleBindingFile = "platform-rolebinding.yaml"
 
 	// tenantQuotaName is what the quota is called inside the namespace. Fixed,
 	// because there is one per namespace and the namespace already names the
 	// tenant.
 	tenantQuotaName = "tenant-quota"
+
+	// platformRoleName is what the platform may do inside this namespace, and
+	// it is named for the feature rather than for the platform: somebody
+	// reading `kubectl get role` in their own namespace should be able to tell
+	// what it is for without reading its rules.
+	platformRoleName = "damga-settings"
+
+	// Who the Role is bound to. The control plane's identity, which
+	// cluster/control-plane.yaml declares and a test in this package reads back
+	// out of that file — a name agreed in two places is a name that drifts, and
+	// this one drifts into a RoleBinding that authorizes nobody while looking
+	// exactly right.
+	controlPlaneServiceAccount = "damga"
+	controlPlaneNamespace      = "damga-system"
 )
 
 // fenceLabels is Pod Security Admission, enforced at the namespace.
@@ -77,6 +94,22 @@ var fenceQuota = map[corev1.ResourceName]string{
 	corev1.ResourceLimitsMemory:    "10Gi",
 	corev1.ResourcePods:            "30",
 	"count/persistentvolumeclaims": "4",
+}
+
+// IsFence says whether a committed file is one Fence renders.
+//
+// A function rather than four comparisons at each call site, because the fence
+// has grown twice and both times the places that enumerate it by hand were
+// found by a failing test rather than by whoever added the file. What those
+// call sites actually mean is "this is the container, not an object of the
+// app", and that sentence should not have to be edited when the container gains
+// a part.
+func IsFence(name string) bool {
+	switch name {
+	case NamespaceFile, QuotaFile, RoleFile, RoleBindingFile:
+		return true
+	}
+	return false
 }
 
 // Fence renders the namespace a tenant's objects live in and the quota that
@@ -139,5 +172,93 @@ func Fence(namespace string) (map[string][]byte, error) {
 		return nil, fmt.Errorf("manifest: rendering the quota: %w", err)
 	}
 
-	return map[string][]byte{NamespaceFile: nsBody, QuotaFile: quotaBody}, nil
+	roleBody, bindingBody, err := platformAccess(namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string][]byte{
+		NamespaceFile: nsBody, QuotaFile: quotaBody,
+		RoleFile: roleBody, RoleBindingFile: bindingBody,
+	}, nil
+}
+
+// platformAccess is the only thing the control plane may do inside a tenant's
+// namespace, said in the tenant's own repository.
+//
+// # What this replaces
+//
+// A ClusterRole granting create and patch on Secrets in every namespace in the
+// cluster. That was the smallest grant RBAC could express for the shape the
+// settings endpoint needed — tenant namespaces are made as tenants arrive, and
+// a rule cannot say "the ones this platform owns". It was also a write into
+// every namespace on the machine, including the ones holding Argo CD's admin
+// secret and every database password.
+//
+// This says the same thing in the only place that knows the namespace's name:
+// the manifest that creates it. Measured on a cluster (2026-09-05): with this
+// Role and RoleBinding present, the control plane's ServiceAccount answers yes
+// to create and patch in that namespace and no to get, list, watch and delete;
+// in a namespace without them it answers no to everything. The cluster-wide
+// rule is gone.
+//
+// # Why it is a committed manifest and not something the control plane applies
+//
+// The same reason the namespace and the quota are, and the measurement is the
+// one from 2026-09-02: a manifest Argo CD applies comes back about ten seconds
+// after somebody deletes it, and an object written directly does not come back
+// at all. A platform whose access to a namespace can be silently removed is a
+// platform whose settings page silently stops working.
+//
+// It also means the tenant's repository shows what the platform may do in their
+// namespace, in the same commit as the namespace itself, rather than in a
+// ClusterRole they cannot see.
+//
+// # What it does not grant
+//
+// No get, no list, no watch. That is the same asymmetry the endpoint is built
+// on: the control plane can write a value it was handed and can never read one
+// back. A raw merge patch needs only the patch verb — measured against the API
+// server rather than assumed, because kubectl's own `patch` does a get first
+// and its refusal makes it look as though the API requires one.
+//
+// Create cannot be narrowed to one name: RBAC matches resourceNames on objects
+// that already exist, and a create has no name to match yet. The scope is
+// therefore the namespace, which is the tenant's own.
+func platformAccess(namespace string) (role, binding []byte, err error) {
+	r := rbacv1.Role{
+		TypeMeta: metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "Role"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: platformRoleName, Namespace: namespace, Labels: map[string]string{},
+		},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{""},
+			Resources: []string{"secrets"},
+			Verbs:     []string{"create", "patch"},
+		}},
+	}
+	roleBody, err := yaml.Marshal(r)
+	if err != nil {
+		return nil, nil, fmt.Errorf("manifest: rendering the platform role: %w", err)
+	}
+
+	b := rbacv1.RoleBinding{
+		TypeMeta: metav1.TypeMeta{APIVersion: rbacv1.SchemeGroupVersion.String(), Kind: "RoleBinding"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: platformRoleName, Namespace: namespace, Labels: map[string]string{},
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName, Kind: "Role", Name: platformRoleName,
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:      rbacv1.ServiceAccountKind,
+			Name:      controlPlaneServiceAccount,
+			Namespace: controlPlaneNamespace,
+		}},
+	}
+	bindingBody, err := yaml.Marshal(b)
+	if err != nil {
+		return nil, nil, fmt.Errorf("manifest: rendering the platform rolebinding: %w", err)
+	}
+	return roleBody, bindingBody, nil
 }
