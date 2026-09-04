@@ -30,13 +30,14 @@ import (
 
 // recordingDeliverer stands in for the cluster.
 type recordingDeliverer struct {
-	got []placement.Placement
-	err error
+	got  []placement.Placement
+	note string
+	err  error
 }
 
-func (d *recordingDeliverer) Deliver(_ context.Context, p placement.Placement) error {
+func (d *recordingDeliverer) Deliver(_ context.Context, p placement.Placement) (string, error) {
 	d.got = append(d.got, p)
-	return d.err
+	return d.note, d.err
 }
 
 // The link the product was missing, asserted at the point it is made: an

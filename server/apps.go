@@ -215,8 +215,12 @@ func createApp(g guard, st stores) http.Handler {
 		// watching for it. Argo CD polls, so one that appears afterwards still
 		// finds the commit — it just waits for a poll rather than a sync.
 		delivered := "an Argo CD Application is watching this app's directory"
-		if err := deliverPlacement(r.Context(), st, got); err != nil {
+		note, err := deliverPlacement(r.Context(), st, got)
+		switch {
+		case err != nil:
 			delivered = "nothing is applying this app's commits yet: " + err.Error()
+		case note != "":
+			delivered += ", but " + note
 		}
 
 		w.WriteHeader(http.StatusCreated)

@@ -19,8 +19,12 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 
+	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -58,7 +62,15 @@ type Deliverer interface {
 	// Deliver makes an Argo CD Application for one placement, or updates the
 	// one that is already there. It is called after the placement is written
 	// and must be safe to call again with the same arguments.
-	Deliver(ctx context.Context, place placement.Placement) error
+	//
+	// The note is empty when the whole chain was written. It is a sentence when
+	// the Application exists but something it needs does not — today that is
+	// the credential Argo CD reads the repository with, which cannot be written
+	// when this install has none. Returned rather than logged because the
+	// failure it describes is silent everywhere else: the Application is
+	// created, the endpoint answers 201, and Argo CD sits at ComparisonError
+	// where nobody is looking.
+	Deliver(ctx context.Context, place placement.Placement) (note string, err error)
 }
 
 // deliver hands one placement to whatever applies commits, and says plainly
@@ -67,9 +79,9 @@ type Deliverer interface {
 // An error here never fails the request that produced it. The placement is
 // written and the manifests are pushed; what is missing is delivery, and a 500
 // would tell the caller to undo work that is fine.
-func deliverPlacement(ctx context.Context, st stores, place placement.Placement) error {
+func deliverPlacement(ctx context.Context, st stores, place placement.Placement) (string, error) {
 	if st.delivery == nil {
-		return fmt.Errorf("this installation has no delivery: it was started without a " +
+		return "", fmt.Errorf("this installation has no delivery: it was started without a " +
 			"cluster to write Argo CD Applications into, so commits accumulate and nothing " +
 			"applies them")
 	}
@@ -93,7 +105,13 @@ func applicationName(place placement.Placement) string {
 }
 
 // clusterDelivery writes Applications into the cluster this server runs in.
-type clusterDelivery struct{ client client.Client }
+type clusterDelivery struct {
+	client client.Client
+	// auth is where the credential Argo CD is given comes from: the same token
+	// this server pushes with, because the repository is the same repository.
+	// Two credentials for one repository would be two things to rotate.
+	auth GitAuth
+}
 
 // Deliver creates or updates the Application, as unstructured rather than
 // through Argo CD's Go types.
@@ -102,7 +120,15 @@ type clusterDelivery struct{ client client.Client }
 // its transitive graph for the rest of this binary's build. What is written
 // here is a document with a known shape; the API server validates it against
 // the CRD Argo CD installed, which is the check that matters.
-func (d clusterDelivery) Deliver(ctx context.Context, place placement.Placement) error {
+func (d clusterDelivery) Deliver(ctx context.Context, place placement.Placement) (string, error) {
+	// The credential first. An Application that arrives before the Secret it
+	// needs spends a poll interval at ComparisonError, and the order costs
+	// nothing to get right.
+	note, err := d.credential(ctx, place)
+	if err != nil {
+		return "", err
+	}
+
 	app := &unstructured.Unstructured{}
 	app.SetAPIVersion("argoproj.io/v1alpha1")
 	app.SetKind("Application")
@@ -142,19 +168,117 @@ func (d clusterDelivery) Deliver(ctx context.Context, place placement.Placement)
 		},
 	}
 	if err := unstructured.SetNestedMap(app.Object, spec, "spec"); err != nil {
-		return fmt.Errorf("building the Application: %w", err)
+		return "", fmt.Errorf("building the Application: %w", err)
 	}
 
 	// Server-side apply, so this owns the fields it sets and leaves anything a
 	// human added beside them. Create-then-update would race a second control
 	// plane replica through the same endpoint.
-	err := d.client.Apply(ctx, client.ApplyConfigurationFromUnstructured(app),
-		client.ForceOwnership, client.FieldOwner("damga-control-plane"))
+	err = d.client.Apply(ctx, client.ApplyConfigurationFromUnstructured(app),
+		client.ForceOwnership, client.FieldOwner(fieldOwner))
 	if err != nil {
-		return fmt.Errorf("delivering %s: %w", applicationName(place), err)
+		return "", fmt.Errorf("delivering %s: %w", applicationName(place), err)
 	}
-	return nil
+	return note, nil
 }
+
+// credential writes the Secret Argo CD reads this placement's repository with.
+//
+// The half of delivery that was missing, and the way it was missing is the
+// point: the Application was created, the endpoint answered 201, and Argo CD
+// answered
+//
+//	ComparisonError: failed to list refs: authentication required: Unauthorized
+//
+// where only somebody already looking at Argo CD would ever see it. Measured on
+// a cluster: with the Secret, the same Application reached Synced and the object
+// was in the namespace 21 seconds later.
+//
+// Written from the same GitAuth this server pushes with, because it is the same
+// repository. When there is no credential to write — no token configured, or a
+// URL tokenAuth refuses — the Application is still delivered and the reason
+// comes back as a note. A public repository needs no Secret and that case is
+// real, so this is not an error; it is a sentence in the answer.
+func (d clusterDelivery) credential(ctx context.Context, place placement.Placement) (string, error) {
+	if d.auth == nil {
+		return noCredentialNote("this server was started without git credentials"), nil
+	}
+	method, err := d.auth.For(place.RepoURL)
+	if err != nil {
+		return noCredentialNote(err.Error()), nil
+	}
+	basic, ok := method.(*githttp.BasicAuth)
+	if !ok || basic.Password == "" {
+		// A GitAuth another build replaced this one with may authenticate by
+		// something an Argo CD repository Secret cannot carry — an SSH key, a
+		// token minted per call. Saying so is better than writing a Secret with
+		// an empty password, which fails as a bad credential rather than as a
+		// missing one.
+		return noCredentialNote(fmt.Sprintf(
+			"the configured git credential is a %T, which an Argo CD repository "+
+				"Secret cannot carry", method)), nil
+	}
+
+	sec := &unstructured.Unstructured{}
+	sec.SetAPIVersion("v1")
+	sec.SetKind("Secret")
+	sec.SetName(repoSecretName(place.RepoURL))
+	sec.SetNamespace(argoNamespace)
+	// The label is the whole mechanism: Argo CD finds repository credentials by
+	// this label and by nothing else, so a Secret without it is a Secret that
+	// is never read.
+	sec.SetLabels(map[string]string{"argocd.argoproj.io/secret-type": "repository"})
+	// data rather than stringData. stringData is write-only — the API server
+	// converts it and stores data — so a server-side apply that sends it owns a
+	// field that does not exist on the object it just wrote, and the second
+	// apply cannot tell what the first one put there.
+	if err := unstructured.SetNestedStringMap(sec.Object, map[string]string{
+		"type":     base64.StdEncoding.EncodeToString([]byte("git")),
+		"url":      base64.StdEncoding.EncodeToString([]byte(place.RepoURL)),
+		"username": base64.StdEncoding.EncodeToString([]byte(basic.Username)),
+		"password": base64.StdEncoding.EncodeToString([]byte(basic.Password)),
+	}, "data"); err != nil {
+		return "", fmt.Errorf("building the repository credential: %w", err)
+	}
+
+	err = d.client.Apply(ctx, client.ApplyConfigurationFromUnstructured(sec),
+		client.ForceOwnership, client.FieldOwner(fieldOwner))
+	if err != nil {
+		// An error here does fail delivery, unlike the note above. This is the
+		// difference between "there was nothing to write" and "there was
+		// something to write and it did not land", and the second one leaves an
+		// Application that cannot read its own repository.
+		return "", fmt.Errorf("writing the repository credential for %s: %w", place.RepoURL, err)
+	}
+	return "", nil
+}
+
+// noCredentialNote is the one sentence the answer carries when Argo CD was
+// given nothing to authenticate with.
+func noCredentialNote(why string) string {
+	return "Argo CD was given no credential for this repository, so it can read it " +
+		"only if the repository is public (" + why + ")"
+}
+
+// repoSecretName names the credential after the repository rather than after
+// the placement.
+//
+// One repository, one Secret: Argo CD matches a credential to a repository by
+// URL, so a second placement in the same repository wants the same Secret and
+// not a second one saying the same thing. The store already enforces that a
+// repository belongs to one tenant.
+//
+// Hashed because a URL is not a name — it carries slashes, colons, dots and a
+// length no object name may have. Sixteen hex characters of SHA-256: enough
+// that two repositories on one install colliding is not a thing that happens,
+// and short enough to read in a `kubectl get secret` listing.
+func repoSecretName(repoURL string) string {
+	sum := sha256.Sum256([]byte(repoURL))
+	return "damga-repo-" + hex.EncodeToString(sum[:8])
+}
+
+// fieldOwner is who these objects belong to, in the eyes of server-side apply.
+const fieldOwner = "damga-control-plane"
 
 // clusterDelivery builds the writer this server delivers through.
 //
@@ -175,7 +299,7 @@ func (o Options) clusterDelivery() (Deliverer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("building the delivery client: %w", err)
 	}
-	return clusterDelivery{client: c}, nil
+	return clusterDelivery{client: c, auth: o.GitAuth}, nil
 }
 
 // revisionOf is the ref Argo CD should track for a placement.

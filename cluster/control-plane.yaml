@@ -139,6 +139,18 @@ rules:
     # delivered twice has to address the object the first call made rather than
     # fail on a name that already exists.
     verbs: [get, create, patch]
+  - apiGroups: [""]
+    resources: [secrets]
+    # The repository credential Argo CD reads a tenant's state repository with.
+    # Without it the Application above is created, the endpoint answers 201, and
+    # Argo CD sits at "authentication required" — measured.
+    #
+    # No get, no list, no watch, and that is deliberate rather than minimal by
+    # habit: this namespace also holds Argo CD's admin password and the
+    # credentials for every cluster it deploys to. The control plane has no
+    # reason to read any secret here, and a server-side apply does not need one
+    # — it sends what it wants and the API server decides.
+    verbs: [create, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

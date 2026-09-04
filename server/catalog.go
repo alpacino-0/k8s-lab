@@ -417,12 +417,16 @@ func installFromCatalog(g guard, st stores) http.Handler {
 		// would never run — the manifests were correct, in the right
 		// repository, and nothing was watching it.
 		delivered := "the manifests are committed and an Argo CD Application is watching them"
-		if err := deliverPlacement(r.Context(), st, place); err != nil {
+		note, err := deliverPlacement(r.Context(), st, place)
+		switch {
+		case err != nil:
 			// Not a failure of the install: the app is registered and the
 			// manifests are pushed, and both survive. What is missing is the
 			// thing that applies them, and saying which half is missing is the
 			// difference between "retry the install" and "look at Argo CD".
 			delivered = "the manifests are committed and nothing is applying them yet: " + err.Error()
+		case note != "":
+			delivered += ", but " + note
 		}
 
 		w.WriteHeader(http.StatusCreated)
