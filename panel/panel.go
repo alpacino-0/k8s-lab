@@ -15,8 +15,14 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-// Package panel is the free front end: three files embedded in the binary, and
-// a fourth beside them that is not.
+// Package panel is the free front end: the assets directory, embedded whole,
+// and the tests beside it that are not.
+//
+// It said "three files" until there were seven. The count was written when the
+// page was index.html, app.js and style.css, and every view added since —
+// metrics, logs, catalogue, exec — walked past it. Replaced with a description
+// rather than a larger number, because the next view will walk past that one
+// too: //go:embed takes the directory, so nothing here has to be counted.
 //
 // There is no build step, no framework and no CDN, and that is a decision
 // rather than a stage this has not reached yet.

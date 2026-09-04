@@ -30,6 +30,7 @@ const views = [
   { file: 'metrics.js', global: 'damgaMetrics' },
   { file: 'logs.js', global: 'damgaLogs' },
   { file: 'catalog.js', global: 'damgaCatalog' },
+  { file: 'exec.js', global: 'damgaExec' },
 ];
 
 test('every view is loaded by the page, before the script that uses it', () => {
@@ -51,7 +52,12 @@ test('every view is loaded by the page, before the script that uses it', () => {
 test('every view publishes the global the page looks for', () => {
   for (const view of views) {
     const source = read(view.file);
-    assert.ok(source.includes(`window.${view.global}`),
+    // Followed by '=' or whitespace, because `includes` alone accepts a
+    // longer name that merely starts with this one: renaming the export to
+    // window.damgaExecOther satisfied `includes('window.damgaExec')` and the
+    // view was reported as published while app.js could not find it. Same
+    // shape as the showNewApp assertion below.
+    assert.ok(new RegExp(`window\\.${view.global}\\s*=`).test(source),
       `${view.file} does not publish window.${view.global}, so loading it achieves nothing`);
     // Both guards, or the file is a page and not a module — and its own tests
     // stop being able to require it.
@@ -75,8 +81,11 @@ test('app.js reaches every view, and reaches it by the published name', () => {
 // application that printed nothing.
 test('the page has rules for what the views draw', () => {
   const css = read('style.css');
-  for (const selector of ['.logs', '.catalog-entry', '.refusal', '#catalog-list']) {
-    assert.ok(css.includes(selector),
+  for (const selector of ['.logs', '.catalog-entry', '.refusal', '#catalog-list',
+    '.exec-output', '.exec-form']) {
+    // Terminated, not merely present. `.exec-outputX { }` contains the string
+    // '.exec-output' and would report a rule that styles nothing on the page.
+    assert.ok(new RegExp(`\\${selector}(?![\\w-])`).test(css),
       `style.css has no ${selector}: the view renders, and renders unstyled`);
   }
 });
@@ -107,4 +116,47 @@ test('the page can actually POST an application', () => {
   assert.ok(app.includes('method: "POST"'),
     'nothing on this page POSTs anything but the sign-in form, which is the state that ' +
     'made every first app on every install a curl command');
+});
+
+// The exec view can be orphaned the way showNewApp was, and one step earlier.
+//
+// The table above proves app.js mentions damgaExec — but the mention lives
+// inside app.js's own mountExec, so a mountExec that is defined and never
+// called satisfies every check above it while the box never appears on the
+// page. That is exactly the shape 32 found in the showNewApp assertion, where
+// `includes('showNewApp()')` matched the definition and reported a deleted
+// button as wired.
+//
+// So: defined, and called from somewhere that is not its own definition.
+test('the exec view is mounted and not merely defined', () => {
+  const app = read('app.js');
+  assert.ok(/function mountExec\(/.test(app),
+    'app.js has no mountExec: exec.js would be loaded by the page and mounted by nothing');
+  // Call sites only. A bare count of the word reports three mentions for a
+  // view nothing mounts: the definition is one, and `m.mountExec(...)` inside
+  // app.js's own seam is another. Deleting the single real call still left two
+  // and this assertion passed — which is the showNewApp bug, found again here
+  // by deleting the call and watching this line stay green.
+  const calls = app.match(/(?<!function )(?<!m\.)mountExec\(/g) || [];
+  assert.ok(calls.length >= 1,
+    'mountExec is defined and never called: the endpoint is reachable from curl and from ' +
+    'nowhere on the page, which is the state logs.js and catalog.js were both in');
+
+  // And it is pushed into the list that gets stopped, or leaving the app
+  // abandons a reader on an open POST.
+  // [\s\S]*? and not [^)]*: the push already contains mountHealth(...) and
+  // mountLogs(...), so a class that stops at the first ')' never reaches this one.
+  assert.ok(/mounted\.push\([\s\S]*?mountExec/.test(app),
+    'mountExec is called but its stop function is not collected, so switching apps leaves ' +
+    'the previous run reading a stream nobody is watching');
+});
+
+// The rule the server keeps about its own log, kept by the page.
+test('the panel never stores what was typed into the command box', () => {
+  const source = read('exec.js');
+  for (const forbidden of ['localStorage', 'sessionStorage', 'indexedDB']) {
+    assert.ok(!source.includes(forbidden),
+      `exec.js uses ${forbidden}: the server deliberately logs the program and not the ` +
+      'arguments, because a command line is where a password ends up');
+  }
 });

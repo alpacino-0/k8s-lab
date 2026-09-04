@@ -276,6 +276,28 @@ function mountLogs(el, prefix) {
   return mountFrom("damgaLogs", (m) => m.mountLogs(el, prefix, {}));
 }
 
+// The exec view, and the one seam here that cannot use api().
+//
+// api() reads the body into JSON and throws on a non-2xx, which is right for
+// every other endpoint and wrong for this one twice over: the body is a stream
+// this view reads frame by frame, and a command that exits 1 comes back 200
+// with the code in the last frame. Handing it to api() would consume the
+// stream and lose the exit code. What is kept by hand is the part that
+// matters here — a 401 still becomes the sign-in form.
+function mountExec(el, prefix) {
+  return mountFrom("damgaExec", (m) => m.mountExec(el, prefix, {
+    fetcher: async (path, options = {}) => {
+      const res = await fetch(path, {
+        credentials: "same-origin",
+        ...options,
+        headers: { "Accept": "text/event-stream", ...(options.headers || {}) },
+      });
+      if (res.status === 401) throw new NotSignedIn("not signed in");
+      return res;
+    },
+  }));
+}
+
 async function pickApp(app) {
   state.ref = app;
   stopMounted();
@@ -645,13 +667,24 @@ async function showEvidence() {
     el("h3", {}, "Logs"));
   parts.push(logs);
 
+  // And the one box on this page that does something rather than showing
+  // something. Below the logs on purpose: the command somebody runs here is
+  // usually the answer to what the logs above it just said.
+  const run = el("div", { class: "box", style: "margin-top:1rem" },
+    el("h3", {}, "Run a command"),
+    el("p", { class: "muted" },
+      "Runs once, in one container, as the application user. Owner only."));
+  parts.push(run);
+
   render(...parts);
 
   // After render, because replaceChildren would otherwise drop what mount put
   // in. api and not fetch: it is the one place a 401 becomes the sign-in form.
   const logBody = el("div", {});
   logs.append(logBody);
-  mounted.push(mountHealth(health, prefix), mountLogs(logBody, prefix));
+  const execBody = el("div", {});
+  run.append(execBody);
+  mounted.push(mountHealth(health, prefix), mountLogs(logBody, prefix), mountExec(execBody, prefix));
 }
 
 // ---------------------------------------------------------------- rendering

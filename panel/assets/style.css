@@ -189,3 +189,50 @@ p[data-ok="false"] { color: var(--bad); }
 .install-status.ok { color: var(--ok); }
 .install-status.bad { color: var(--bad); }
 a { color: var(--accent); }
+
+/* The exec view.
+ *
+ * .exec-output shares the log pane's shape because it is the same kind of
+ * thing — text a container wrote — and differs where the states differ. */
+.exec-form { display: flex; gap: .5rem; flex-wrap: wrap; margin: .5rem 0 0; }
+.exec-form input { flex: 1 1 14rem; min-width: 0; }
+.exec-form input#exec-container { flex: 0 1 16rem; }
+
+.exec-output {
+  min-height: 6rem; max-height: 22rem; overflow: auto;
+  margin: .5rem 0 0; padding: .6rem .7rem;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--bg);
+  font-size: .8rem; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+}
+
+/* The rule this whole view exists for.
+ *
+ * An empty pane is what a command that printed nothing looks like, and it is
+ * also what a command whose output was lost mid-flight looks like. The second
+ * one may have changed the database. So the pane itself is marked when the
+ * connection broke, and says so even when there is not a byte in it — the same
+ * argument metrics.js makes for dropping the Memory column rather than drawing
+ * an empty cell under it. */
+.exec-output[data-state="lost"] {
+  border-color: var(--bad);
+  border-style: dashed;
+}
+.exec-output[data-state="lost"]::after {
+  content: "the output stops here — the command may still have finished";
+  display: block;
+  margin-top: .5rem;
+  color: var(--bad);
+  font-style: italic;
+}
+/* Nothing has been run: the pane says so rather than sitting there empty
+ * looking like a command that answered with silence. */
+.exec-output[data-state="idle"]::after {
+  content: "no output yet";
+  color: var(--muted);
+  font-style: italic;
+}
+/* A command that ran and returned non-zero is not a refusal, and does not get
+ * the refusal's border. Its status line already carries the code. */
+.exec-output[data-state="exited"] { border-color: var(--line); }
+.exec-output[data-state="refused"] { border-color: var(--bad); }
