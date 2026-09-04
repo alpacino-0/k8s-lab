@@ -32,6 +32,7 @@ const (
 	ActionAppRollback    Action = "app:rollback"
 	ActionAppRestart     Action = "app:restart"
 	ActionAppScale       Action = "app:scale"
+	ActionAppSettings    Action = "app:settings"
 	ActionAppDelete      Action = "app:delete"
 	ActionAppConnect     Action = "app:connect"
 	ActionAppExec        Action = "app:exec"

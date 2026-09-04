@@ -307,6 +307,18 @@ type Options struct {
 	// as a deployment.
 	Delivery Deliverer
 
+	// Secrets writes the values a user typed into the Secret beside a workload.
+	// nil is built from the cluster this server runs in, and an install with no
+	// cluster gets nothing — the settings endpoint then accepts a literal and
+	// refuses a secret with a sentence saying which half is missing, rather
+	// than committing a manifest that names a Secret nobody wrote.
+	//
+	// A seam for the reason Delivery is one, and with a second reason of its
+	// own: the permission underneath it is create-and-patch-and-never-read, so
+	// a build that keeps values somewhere else — a vault, an external secrets
+	// operator — replaces this and nothing above it changes.
+	Secrets SecretWriter
+
 	// GitAuth answers how to authenticate to a repository. nil means the
 	// free build's answer, built from Config.GitTokenFile — and with no token
 	// configured, a deploy is refused with a message that says which flag is

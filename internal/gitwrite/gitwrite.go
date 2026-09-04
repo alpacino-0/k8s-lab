@@ -282,22 +282,55 @@ func (w *Writer) Deploy(ctx context.Context, req Request) (Result, error) {
 	return Result{Record: updated, CommitSHA: sha}, nil
 }
 
-// commit does the git half: clone, write, commit as the user, push.
-func (w *Writer) commit(ctx context.Context, req Request, rolloutID string, at time.Time) (string, error) {
-	// In memory, and shallow. A tenant's state repository holds manifests, so
-	// it is small by construction; a worktree on disk would be one more thing
-	// to clean up after a crash, and the workloads this platform renders run
-	// with a read-only root filesystem anyway.
+// Read returns what the target directory holds, without writing anything.
+//
+// The same clone the commit path makes, and stopping there. It exists because
+// a page that shows what is configured has to read the state, and the state is
+// the committed file — there is no second copy in a database, which is the
+// arrangement that keeps the panel and the cluster from drifting apart. Every
+// caller before this one only ever read the directory from inside a commit,
+// through the render callback.
+//
+// A missing directory is an empty map and not an error, for the reason readDir
+// gives: an app that has never been deployed has no directory yet, and that is
+// a state to render rather than a failure.
+func (w *Writer) Read(ctx context.Context, target Target) (map[string][]byte, error) {
+	repo, err := clone(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	tree, err := repo.Worktree()
+	if err != nil {
+		return nil, err
+	}
+	return readDir(tree, target.Dir)
+}
+
+// clone fetches the branch this target names, in memory and shallow.
+//
+// A tenant's state repository holds manifests, so it is small by construction;
+// a worktree on disk would be one more thing to clean up after a crash, and the
+// workloads this platform renders run with a read-only root filesystem anyway.
+func clone(ctx context.Context, target Target) (*git.Repository, error) {
 	cloneOpts := &git.CloneOptions{
-		URL: req.Target.RepoURL, Auth: req.Target.Auth,
+		URL: target.RepoURL, Auth: target.Auth,
 		Depth: 1, SingleBranch: true,
 	}
-	if req.Target.Branch != "" {
-		cloneOpts.ReferenceName = plumbing.NewBranchReferenceName(req.Target.Branch)
+	if target.Branch != "" {
+		cloneOpts.ReferenceName = plumbing.NewBranchReferenceName(target.Branch)
 	}
 	repo, err := git.CloneContext(ctx, memory.NewStorage(), memfs.New(), cloneOpts)
 	if err != nil {
-		return "", fmt.Errorf("cloning %s: %w", req.Target.RepoURL, err)
+		return nil, fmt.Errorf("cloning %s: %w", target.RepoURL, err)
+	}
+	return repo, nil
+}
+
+// commit does the git half: clone, write, commit as the user, push.
+func (w *Writer) commit(ctx context.Context, req Request, rolloutID string, at time.Time) (string, error) {
+	repo, err := clone(ctx, req.Target)
+	if err != nil {
+		return "", err
 	}
 
 	tree, err := repo.Worktree()
