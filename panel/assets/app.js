@@ -210,6 +210,18 @@ async function pickTenant(tenantId) {
   catalogue.addEventListener("click", () => showCatalog());
   nav.append(catalogue);
 
+  // The other way in, and until now the only one that did not exist. The
+  // catalogue installs something this platform ships a template for; this
+  // registers an application somebody builds themselves, which is the case the
+  // panel had no path to at all. Measured before it was written: the only POST
+  // this page made, other than signing in, was /api/v1/login — so every first
+  // app on every install had to be created with curl, and the endpoint's own
+  // refusals (the one that names -git-token-file among them) were sentences
+  // nobody could reach from here.
+  const newApp = el("button", { type: "button", class: "catalogue" }, "Add an application");
+  newApp.addEventListener("click", () => showNewApp());
+  nav.append(newApp);
+
   if (!apps.length) {
     nav.append(el("p", { class: "muted" }, "Nothing has been deployed here yet."));
     render(el("p", { class: "muted empty" },
@@ -314,6 +326,183 @@ function showCatalog() {
     return;
   }
   load().catch(fail);
+}
+
+// ------------------------------------------------------------- new application
+
+// The body of POST /apps, as values rather than as a request.
+//
+// A function of its own because it is the only part of this form that decides
+// anything, and the panel's rule is that what decides is testable. Trimming is
+// not cosmetic: the endpoint refuses " prod" as an environment with a message
+// about Kubernetes names, which reads as the platform rejecting the word prod.
+//
+// The path is defaulted here and not left empty, and the default is the
+// catalogue's: apps/<app>/<env>. The environment has to be in it, because two
+// environments that resolve to one directory are one environment with two
+// names — the store carries a unique index that refuses the second, and the
+// person typing would have no idea why.
+function newAppBody(form = {}) {
+  const app = (form.app || "").trim();
+  const env = (form.env || "").trim();
+  return {
+    app,
+    env,
+    repoUrl: (form.repoUrl || "").trim(),
+    branch: (form.branch || "").trim(),
+    path: (form.path || "").trim() || `apps/${app}/${env}`,
+    namespace: (form.namespace || "").trim(),
+  };
+}
+
+// What to say once the app has been created, or refused.
+//
+// The delivery line is quoted and never summarised. It is the sentence that
+// says whether anything will apply this app's commits — "an Argo CD Application
+// is watching this app's directory", or that with a "but" naming the credential
+// Argo CD was not given, or that nothing is applying anything because this
+// install was started without a cluster. All three are the server's own words
+// about a part of the system this page cannot see, and a panel that replaced
+// them with "created" would be hiding the only interesting half of the answer.
+function newAppOutcome(status, body) {
+  const detail = (body && body.detail) || "";
+  if (status === 201) {
+    const app = (body && body.app) || {};
+    return {
+      ok: true,
+      text: `${app.app || "the application"} · ${app.env || ""}`.trim() + " is registered",
+      // Said in the same breath as the success. Registering an app writes a
+      // placement and an Argo CD Application; it deploys nothing, and somebody
+      // who read "registered" as "running" would go looking for a pod that was
+      // never asked for.
+      note: (body && body.delivery) || "",
+      hint: "Nothing is deployed by this. It records where this app's manifests are "
+        + "committed and which namespace they run in.",
+    };
+  }
+  if (status === 409) {
+    // An app that exists, or a repository or namespace another tenant holds.
+    // The store's words name the field and quote only what was sent.
+    return { ok: false, text: "that is already taken", note: detail, hint: "" };
+  }
+  return { ok: false, text: detail || `the app could not be created (HTTP ${status})`, note: "", hint: "" };
+}
+
+// The form itself.
+//
+// Its defaults come from what the tenant already has, for the reason the
+// catalogue's do: a repository something is already deployed to is one that
+// exists and that damga can push to, and a namespace something is running in is
+// one that exists. The difference here is that the first app on an install has
+// neither, which is the whole case this view was missing — so nothing is
+// required to be a choice from a list, every field is typed, and the notes say
+// what has to be true of the values rather than the page pretending to know.
+function showNewApp() {
+  stopMounted();
+  for (const button of $("apps").children) {
+    if (button.setAttribute) button.setAttribute("aria-current", "false");
+  }
+  state.ref = null;
+
+  const known = (of) => [...new Set((state.apps || []).map(of).filter(Boolean))].sort();
+  const fields = {};
+  const field = (name, label, value, options = []) => {
+    const input = el("input", { id: `newapp-${name}`, value: value || "" });
+    let listNode = el("span", {});
+    if (options.length) {
+      // A datalist and not a select, the same choice the catalogue's form
+      // makes: what the tenant already has is a suggestion and never the only
+      // legal answer.
+      const id = `newapp-${name}-options`;
+      input.setAttribute("list", id);
+      listNode = el("datalist", { id }, ...options.map((v) => el("option", { value: v })));
+    }
+    fields[name] = input;
+    return el("label", { class: "install-field" }, el("span", {}, label), input, listNode);
+  };
+
+  const status = el("p", { class: "install-status" });
+  const button = el("button", { class: "install", type: "button" }, "Add the application");
+
+  const form = el("div", { class: "install-form" },
+    field("app", "Name", ""),
+    field("env", "Environment", "prod"),
+    field("repoUrl", "Repository for its manifests", known((a) => a.repoUrl)[0] || "", known((a) => a.repoUrl)),
+    field("branch", "Branch", known((a) => a.branch)[0] || "main", known((a) => a.branch)),
+    field("path", "Directory in that repository", ""),
+    field("namespace", "Namespace", "", known((a) => a.namespace)),
+  );
+
+  const values = () => Object.fromEntries(
+    Object.entries(fields).map(([name, input]) => [name, input.value]));
+
+  button.addEventListener("click", async () => {
+    const body = newAppBody(values());
+    const missing = ["app", "env", "repoUrl", "namespace"].filter((k) => !body[k]);
+    if (missing.length) {
+      // Refused here rather than sent, because the endpoint answers an empty
+      // repository with a 400 naming a field this form calls something else.
+      status.className = "install-status bad";
+      status.textContent = `still needed: ${missing.join(", ")}`;
+      return;
+    }
+    button.disabled = true;
+    status.className = "install-status";
+    status.textContent = "creating…";
+    let outcome;
+    try {
+      const created = await api(`${tenantBase()}/apps`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      outcome = newAppOutcome(201, created);
+    } catch (err) {
+      if (err instanceof NotSignedIn) {
+        fail(err);
+        return;
+      }
+      // api() throws the detail as the message and keeps the status on the
+      // error, which is everything the outcome needs; there is no second
+      // request here to get the body back.
+      outcome = newAppOutcome(err.status || 0, { detail: err.message });
+    }
+
+    status.className = `install-status ${outcome.ok ? "ok" : "bad"}`;
+    status.textContent = outcome.text;
+    const extra = [];
+    if (outcome.note) extra.push(el("p", { class: "install-note" }, outcome.note));
+    if (outcome.hint) extra.push(el("p", { class: "muted" }, outcome.hint));
+    status.after(...extra);
+    button.disabled = outcome.ok;
+    if (outcome.ok) {
+      // The navigation is out of date the moment this succeeds. Reloaded
+      // rather than jumped into, for the reason the catalogue gives: the app
+      // exists and nothing is running in it, and landing the reader on a page
+      // that says "nothing has been deployed here" reads as a failure.
+      pickTenant(state.tenant).catch(fail);
+    }
+  });
+
+  // The catalogue's own wrapper, because the page's rules for a full-pane view
+  // are written against it. A bare h2 in #detail is the heading of an evidence
+  // box and is sized like one.
+  render(el("div", { class: "catalogue-view" },
+    el("h2", {}, "Add an application"),
+    el("p", { class: "muted" },
+      "For something you build yourself. The catalogue is for what this platform ships a "
+      + "template for."),
+    form,
+    el("p", { class: "install-note" },
+      "The repository is where damga commits this app's manifests — not where its source "
+      + "lives. It has to exist already and damga has to be able to push to it; nothing "
+      + "here creates one."),
+    el("p", { class: "install-note" },
+      "The namespace has to exist too, with the tenant quota and the Pod Security labels "
+      + "on it."),
+    button,
+    status,
+  ));
 }
 
 // ---------------------------------------------------------------- evidence
@@ -552,5 +741,5 @@ if (typeof document !== "undefined") {
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { whatToShow, admissionKnown, backupView, short, when };
+  module.exports = { whatToShow, admissionKnown, backupView, short, when, newAppBody, newAppOutcome };
 }

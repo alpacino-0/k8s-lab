@@ -18,6 +18,7 @@ public address yet.
 | Domain | A record pointing at the server's IP. A subdomain is fine |
 | Tools | `kubectl`, `helm`, `openssl`, `sed`. On the server, if you use `scripts/install.sh`; on your own machine if you follow the sections by hand |
 | This repository | checked out **on the server**. Every manifest and the chart are applied from it, and `scripts/install.sh` lives in it |
+| A git host | An account on GitHub, GitLab, Gitea or anything that speaks git over https, and **one repository per tenant** for damga to commit manifests into. Nothing here creates one. It must not be empty — see below |
 | Images | Published: `ghcr.io/damgahq/damga` (the reference tenant), `ghcr.io/damgahq/damga-operator` and `ghcr.io/damgahq/damga-control-plane`, public, amd64 + arm64, each signed with keyless cosign. If you fork this and publish your own, note that a new organisation's GHCR packages start private and the visibility has to be flipped once by hand |
 
 ---
@@ -538,20 +539,59 @@ operator.
 
 Named here rather than discovered on the machine.
 
-- **The operator.** The types from section 5 exist and nothing reconciles them,
-  so a `Workload` is a row in etcd and not a Deployment. It needs an image and
-  `make -f Makefile.operator deploy`, which wants kustomize and Go on the
-  server. `ghcr.io/damgahq/damga-operator` **is** published, so only the deploy
-  step is missing here.
-- **Argo CD.** A deploy writes a commit and nothing applies it. `make gitops`
-  installs Argo CD against a local cluster; there is no equivalent on this page.
-- **A git token.** `cluster/control-plane.yaml` passes no `-git-token-file`, so
-  `POST .../deploys` refuses with a message naming that flag. Everything the
-  panel reads works without it.
+- **The operator and Argo CD, if you follow the sections by hand.**
+  `scripts/install.sh` installs both — the operator with `kubectl apply -k
+  config/default`, Argo CD from the argo-helm chart with
+  `cluster/argocd-values.yaml` — and the numbered sections above do not spell
+  either of them out. Without the operator a `Workload` is a row in etcd and not
+  a Deployment; without Argo CD a deploy writes a commit and nothing applies it.
+- **A state repository, and the token for it.** This is the one thing on this
+  list you have to bring rather than install, and it is what turns a platform
+  you can log into into one that deploys.
 
-Each of these is a step, not a redesign. What they add up to is that this page
-gets you a platform you can log into and look at, and not yet one that ships a
-commit to a running pod.
+  A tenant's manifests are committed to a repository damga owns and pushes to —
+  not the repository their application's source is in. Create one per tenant on
+  your git host, private, over **https**: `tokenAuth` refuses anything else, and
+  says so — `only https repositories are supported: git://...`. SSH would need a
+  key and a `known_hosts` policy, and getting the second one wrong is how a
+  platform ends up trusting whatever host answers.
+
+  **Not an empty repository.** Measured: go-git cannot clone one, so the first
+  deploy fails with
+
+  ```
+  the commit could not be pushed: cloning https://…/state.git: remote repository is empty
+  ```
+
+  Tick "add a README" when you create it, or push one commit into it. A
+  repository with a single commit clones and pushes normally.
+
+  Then give the control plane a token that can push to it. A file rather than a
+  flag value or an environment variable — a flag is in the process table, an
+  environment variable is in `kubectl describe pod`, and only a file can be
+  rotated without restarting what reads it:
+
+  ```bash
+  kubectl -n damga-system create secret generic damga-git \
+      --from-literal=token="$FORGE_TOKEN"
+  # then mount it and add the flag to the container's args:
+  #   -git-token-file=/etc/damga/git/token
+  ```
+
+  Without it every deploy refuses with `no git credentials are configured: pass
+  -git-token-file`, which the panel prints word for word. Everything the panel
+  reads works without it.
+
+  Argo CD's own credential for that repository is **not** a second thing to
+  create: the control plane writes it as a Secret in the `argocd` namespace when
+  it delivers, from this same token. It used to be missing entirely, and the
+  failure was silent — the Application existed, the endpoint answered 201, and
+  Argo CD sat at `authentication required` where nobody was looking.
+
+Each of these is a step, not a redesign. What they add up to: run the one
+command, bring a repository and a token, and a deploy reaches a running pod.
+Follow the numbered sections instead and you have a platform you can log into
+and look at.
 
 ## What a single node costs you
 

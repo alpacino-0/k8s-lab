@@ -416,9 +416,15 @@ Measured on this cluster:
 | `kubectl scale --replicas=5` (git says 2) | back to 2 in **5 seconds**, `OutOfSync → Synced` logged |
 | `kubectl delete deployment` | recreated in **5 seconds** |
 
-The namespace gets its Pod Security Admission labels and the policy opt-in
-label from `managedNamespaceMetadata`, so a GitOps-managed release is held to
-exactly the rules a hand-deployed one is.
+The namespace is one of the manifests, and that is a correction rather than a
+detail. It used to get its Pod Security Admission labels from
+`managedNamespaceMetadata`, which applies them when the namespace is created and
+never again: measured against Argo CD v3.1.8, a label removed by hand was not
+restored in four minutes, nor by a forced sync, nor after a hard refresh, while
+the Application reported Synced and Healthy throughout. The demo of drift
+correction could not correct drift in its own fence. Committed as files —
+`gitops/fence/`, generated from the same code that writes a tenant's — the same
+label comes back in about ten seconds.
 
 **A permanent OutOfSync that was not drift.** The Application sat at `OutOfSync`
 while being perfectly in sync. The API server fills in `apiVersion`, `kind`,

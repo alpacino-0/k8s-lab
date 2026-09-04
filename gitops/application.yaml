@@ -17,52 +17,74 @@ metadata:
 spec:
   project: default
 
-  source:
-    repoURL: https://github.com/damgahq/damga.git
-    targetRevision: main
-    path: chart
-    helm:
-      valueFiles:
-        - values-public.yaml
-      # Overrides for this cluster. In a real deployment these live in a second
-      # values file in git; kept inline here so the file reads as one unit.
-      values: |
-        # Pinned by digest, not by the 1.0.0 tag values-public.yaml carries.
-        #
-        # The first reason written here is gone: Kyverno rewrote the reference
-        # to the digest it had verified, so against a tag this Application sat at
-        # OutOfSync forever while being exactly what git asked for. The admission
-        # layer was removed and nothing rewrites the field now.
-        #
-        # The second reason is why the digest stays, and it never involved
-        # Kyverno: 1.0.0 would not help even as a version, because CI republishes
-        # that tag on every push to main. It means "whatever is there today" as
-        # surely as :latest does.
-        #
-        # A release moves this line. Argo CD Image Updater is what writes it,
-        # and that is Phase 1.
-        image:
-          digest: sha256:f8b41ad0b0d4ae565dc0abbeca841ec3d91d4c1325db26beb4fbb9296abadba0
-        ingress:
-          host: gitops.local
-          tls:
-            enabled: true
-            clusterIssuer: selfsigned-ca
-            secretName: gitops-tls
-        # A demo of drift correction does not need six replicas.
-        replicaCount: 2
-        autoscaling:
-          enabled: false
-        podDisruptionBudget:
-          enabled: false
-        postgres:
-          persistence:
-            size: 1Gi
-          backup:
+  # Two sources, and the first one is the reason: the namespace this release runs
+  # in is a manifest like everything else in it.
+  #
+  # It used to be metadata on the sync policy — CreateNamespace=true plus
+  # managedNamespaceMetadata — and that is the arrangement this project measured
+  # and rejected. Against Argo CD v3.1.8, a pod-security label removed from a
+  # namespace managed that way was never put back: not in four minutes, not
+  # after a forced sync, not after a hard refresh, while this Application went
+  # on reporting Synced and Healthy. The demo of drift correction could not
+  # correct drift in its own fence. As files, the same label came back in about
+  # ten seconds, which is what selfHeal below is worth.
+  #
+  # gitops/fence is generated from internal/manifest/fence.go, the code that
+  # writes a paying tenant's fence, and a test fails when the two differ. The
+  # reference tenant is a tenant.
+  #
+  # Ordering needs nothing here: Argo CD applies a Namespace before what goes in
+  # it, by kind, in one sync.
+  sources:
+    - repoURL: https://github.com/damgahq/damga.git
+      targetRevision: main
+      path: gitops/fence
+
+    - repoURL: https://github.com/damgahq/damga.git
+      targetRevision: main
+      path: chart
+      helm:
+        valueFiles:
+          - values-public.yaml
+        # Overrides for this cluster. In a real deployment these live in a second
+        # values file in git; kept inline here so the file reads as one unit.
+        values: |
+          # Pinned by digest, not by the 1.0.0 tag values-public.yaml carries.
+          #
+          # The first reason written here is gone: Kyverno rewrote the reference
+          # to the digest it had verified, so against a tag this Application sat at
+          # OutOfSync forever while being exactly what git asked for. The admission
+          # layer was removed and nothing rewrites the field now.
+          #
+          # The second reason is why the digest stays, and it never involved
+          # Kyverno: 1.0.0 would not help even as a version, because CI republishes
+          # that tag on every push to main. It means "whatever is there today" as
+          # surely as :latest does.
+          #
+          # A release moves this line. Argo CD Image Updater is what writes it,
+          # and that is Phase 1.
+          image:
+            digest: sha256:f8b41ad0b0d4ae565dc0abbeca841ec3d91d4c1325db26beb4fbb9296abadba0
+          ingress:
+            host: gitops.local
+            tls:
+              enabled: true
+              clusterIssuer: selfsigned-ca
+              secretName: gitops-tls
+          # A demo of drift correction does not need six replicas.
+          replicaCount: 2
+          autoscaling:
             enabled: false
-        config:
-          APP_ENV: gitops
-          GREETING: Synced
+          podDisruptionBudget:
+            enabled: false
+          postgres:
+            persistence:
+              size: 1Gi
+            backup:
+              enabled: false
+          config:
+            APP_ENV: gitops
+            GREETING: Synced
 
   destination:
     server: https://kubernetes.default.svc
@@ -88,26 +110,11 @@ spec:
       prune: true      # something deleted from git is deleted from the cluster
       selfHeal: true   # something changed by hand is changed back
     syncOptions:
-      - CreateNamespace=true
+      # Deliberately no CreateNamespace. The namespace is the first source
+      # above, and one Argo CD conjured would carry none of its labels — which
+      # is the whole failure this arrangement exists to close, and is what this
+      # file did until 2026-09-04.
       - ServerSideApply=true
-    managedNamespaceMetadata:
-      labels:
-        # Pod Security Admission, so a GitOps-managed release is held to the
-        # same rules as a hand-deployed one. A damga.co/policies label sat here
-        # too, opting the namespace into admission policies that were removed
-        # on 2026-08-29 — an opt-in to nothing.
-        #
-        # These labels are applied when the namespace is created and are not
-        # maintained afterwards, which selfHeal above does not change: measured
-        # against Argo CD v3.1.8, a pod-security label removed from a namespace
-        # managed this way was never restored — not in four minutes, not after a
-        # forced sync, not after a hard refresh — while this Application went on
-        # reporting Synced and Healthy. A tenant namespace is a committed
-        # manifest for that reason (internal/manifest/fence.go); this one is not
-        # yet, and the difference is measured rather than assumed.
-        pod-security.kubernetes.io/enforce: restricted
-        pod-security.kubernetes.io/audit: restricted
-        pod-security.kubernetes.io/warn: restricted
     retry:
       limit: 5
       backoff:

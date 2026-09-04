@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tenant-quota
+  namespace: damga-gitops
+spec:
+  hard:
+    count/persistentvolumeclaims: "4"
+    limits.memory: 10Gi
+    pods: "30"
+    requests.cpu: "2"
+    requests.memory: 3Gi
+status: {}
