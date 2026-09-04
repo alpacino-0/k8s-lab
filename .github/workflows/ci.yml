@@ -1085,6 +1085,86 @@ jobs:
           # placement, and there is no Argo CD here to turn that into anything.
           helm uninstall metrics-server -n kube-system >/dev/null
 
+      # Running a command in a container, which is the one endpoint no unit
+      # test can reach: the fake Execer in server/exec_internal_test.go proves
+      # the five refusals and the exit-code handling, and proves nothing about
+      # whether the ClusterRole may exec or whether the SPDY stream survives
+      # the API server. Both of those are only true or false against a cluster.
+      #
+      # NOT placed immediately after "A Workload must reach Ready", which is
+      # where it was asked for, and the reason is measured rather than
+      # preferred: this endpoint needs a placement row, and the placement for
+      # ci-probe is created by the metrics step below with `createApp=201`
+      # asserted exactly. Registering ci-probe any earlier makes that step's
+      # POST answer 409 and fail. So it goes after the step that already
+      # created what it needs.
+      # The commands below assume a shell and coreutils, which ci-probe has
+      # because app/Dockerfile's runtime stage is node:<version>, a Debian
+      # image. If that ever becomes distroless these turn into "executable file
+      # not found", which is the platform's own /damga bug pointed at the test
+      # — so the failure would be real but would name the wrong thing.
+      - name: A command must run in a container, and its exit code must survive
+        run: |
+          set -euo pipefail
+          kubectl -n damga-system port-forward svc/damga 18080:80 >/dev/null 2>&1 &
+          forward=$!
+          trap 'kill "$forward" 2>/dev/null || true' EXIT
+          started=$(date +%s)
+          for i in $(seq 1 30); do
+            curl -sf --max-time 2 http://127.0.0.1:18080/healthz >/dev/null && break
+            [ "$i" = 30 ] && { echo "the port-forward never answered in $(($(date +%s)-started))s"; exit 1; }
+            sleep 1
+          done
+
+          api() { curl -s -b /tmp/execjar -c /tmp/execjar "$@"; }
+          api -X POST -H 'Content-Type: application/json' \
+            -d "{\"email\":\"owner@example.test\",\"password\":\"$CI_OWNER_PASSWORD\"}" \
+            http://127.0.0.1:18080/api/v1/login -o /dev/null -w 'login=%{http_code}\n' \
+            | grep -q 'login=200' || { echo "the owner cannot log in"; exit 1; }
+          tenant=$(api http://127.0.0.1:18080/api/v1/me | jq -r '.memberships[0].tenantId')
+          exec_url="http://127.0.0.1:18080/api/v1/tenants/$tenant/apps/ci-probe/envs/prod/exec"
+
+          # 1. It runs at all. This is the assertion that covers the RBAC: with
+          # pods/exec absent the stream carries an error frame naming the grant
+          # instead of the output, and the platform reads as broken to the one
+          # person who could fix it.
+          api -X POST -H 'Content-Type: application/json' \
+            -d '{"command":["echo","damga-exec-works"]}' "$exec_url" > /tmp/exec-ok.sse
+          grep -q 'damga-exec-works' /tmp/exec-ok.sse || {
+            echo "the command produced no output. The whole stream:"; cat /tmp/exec-ok.sse
+            echo "--- if this names pods/exec, the ClusterRole in cluster/control-plane.yaml lost the grant"
+            exit 1
+          }
+          grep -q '"code":0' /tmp/exec-ok.sse || {
+            echo "a command that succeeded did not report exit 0:"; cat /tmp/exec-ok.sse; exit 1
+          }
+
+          # 2. A non-zero exit is a result and not a failure. This is the
+          # distinction the endpoint carries in a separate field and the panel
+          # draws as a separate screen, and it is worth one line here because
+          # every simpler implementation of exec loses it: a migration that
+          # exits 1 ran, and reporting it as a transport failure loses both the
+          # code and what it printed.
+          api -X POST -H 'Content-Type: application/json' \
+            -d '{"command":["sh","-c","echo to-stderr >&2; exit 3"]}' "$exec_url" > /tmp/exec-3.sse
+          grep -q '"code":3' /tmp/exec-3.sse || {
+            echo "exit 3 did not survive as a code:"; cat /tmp/exec-3.sse; exit 1
+          }
+          grep -q 'event: error' /tmp/exec-3.sse && {
+            echo "a command that exited 3 was reported as an error; it ran:"; cat /tmp/exec-3.sse; exit 1
+          }
+          grep -q 'to-stderr' /tmp/exec-3.sse || {
+            echo "stderr never reached the stream:"; cat /tmp/exec-3.sse; exit 1
+          }
+
+          # 3. A container that does not exist is refused by name, rather than
+          # by whatever the kubelet says about it.
+          api -X POST -H 'Content-Type: application/json' \
+            -d '{"command":["true"],"container":"nope"}' "$exec_url" > /tmp/exec-bad.sse
+          grep -q 'no such container' /tmp/exec-bad.sse || {
+            echo "a missing container was not refused by name:"; cat /tmp/exec-bad.sse; exit 1
+          }
+
       # Reading the rendered pod back rather than the operator's own source. The
       # unit tests already prove the renderer intends this; this proves the API
       - name: The rendered pod must actually carry the hardening

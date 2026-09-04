@@ -7,7 +7,7 @@
 // this covers logs.js, and the two are read separately. node --test, no npm,
 // nothing installed — the same terms panel/panel.go argues for.
 //
-// CI runs `node --test panel/app_test.js` by name, so nothing runs this yet.
+// CI runs `node --test panel/*_test.js`, a glob, so this runs on every push.
 // That line is in .github/workflows/ci.yml, which this change does not own; the
 // report says so.
 
