@@ -306,6 +306,41 @@ func TestAFailedPushIsRecordedAgainstTheRecord(t *testing.T) {
 	}
 }
 
+// The repository somebody has just created on a forge, and why the instruction
+// for creating it is what it is.
+//
+// "Make an empty repository" is the obvious thing to tell a user and it is the
+// wrong thing: a repository with no commits cannot be cloned, so the first
+// deploy fails with a sentence about the repository being empty rather than
+// about anything they did — and on the forge it looks perfectly fine.
+//
+// docs/DEPLOY.md and the installer's closing note both say to put one commit in
+// it ("tick add a README"). This is what makes that instruction true, and what
+// fails if go-git ever starts cloning empty repositories and the advice becomes
+// unnecessary.
+func TestAnEmptyRepositoryIsRefusedAsEmpty(t *testing.T) {
+	bare := filepath.Join(t.TempDir(), "state.git")
+	if _, err := git.PlainInit(bare, true); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	store := memory.New(0)
+	res, err := newWriter(store).Deploy(context.Background(), request(bare, manifest))
+	if err == nil {
+		t.Fatal("a deploy into a repository with no commits succeeded")
+	}
+	if !strings.Contains(err.Error(), "remote repository is empty") {
+		t.Errorf("a deploy into an empty repository failed with %q.\n"+
+			"The runbook tells people to put one commit in the repository because of that "+
+			"sentence; if the sentence has changed, the runbook is now quoting an error "+
+			"nobody will see", err)
+	}
+	// And the attempt is still on the record, like every other failed push.
+	if res.Record.ID == "" {
+		t.Error("no record was opened, so the first deploy of an install left no trace")
+	}
+}
+
 // Redeploying an identical manifest is a legitimate thing to ask for, and it is
 // not a commit. Inventing an empty one would put a deploy in the history that
 // changed nothing.

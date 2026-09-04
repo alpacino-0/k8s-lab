@@ -597,7 +597,26 @@ Done.
 
 What this did NOT install, said out loud rather than discovered:
 
-  - A git token. The control plane runs without -git-token-file, so the deploy
-    endpoint refuses with a message naming that flag. Nothing else is affected.
+  - A repository to deploy into, and the token for it. This is the one thing
+    you have to bring; everything above is installed.
+
+    Create one repository per tenant on your git host, over https, and put ONE
+    commit in it — tick "add a README". An empty repository cannot be cloned,
+    so the first deploy would fail with "remote repository is empty" naming a
+    repository that looks perfectly fine on the forge.
+
+    Then give the control plane a token that can push to it:
+
+      kubectl -n ${SYSTEM_NAMESPACE} create secret generic damga-git \
+          --from-literal=token=YOUR_TOKEN
+      # mount it and add -git-token-file=/etc/damga/git/token to the args
+      # in cluster/control-plane.yaml, then roll the deployment
+
+    Until then every deploy refuses with "no git credentials are configured:
+    pass -git-token-file", which the panel prints word for word. Everything
+    the panel reads works without it.
+
+    Argo CD's credential for that repository is not a second thing to make:
+    the control plane writes it when it delivers, from this same token.
 
 TXT
