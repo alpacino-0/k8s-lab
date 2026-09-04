@@ -14,7 +14,10 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { whatToShow, admissionKnown, short, when } = require('./assets/app.js');
+const {
+  whatToShow, admissionKnown, short, when, newAppBody, newAppOutcome,
+} = require('./assets/app.js');
+const { defaultPath } = require('./assets/catalog.js');
 
 const rec = (state, extra = {}) => ({
   seq: 1, state, admission: { allowed: false, reason: '' }, ...extra,
@@ -162,4 +165,71 @@ test('one table is a table', () => {
     rows: 3, sourceRows: 3, tables: 1,
   });
   assert.match(v.verified.text, /1 table\b/);
+});
+
+// --- adding an application --------------------------------------------------
+
+// The panel could not create one. Measured: its only POST other than signing in
+// was /api/v1/login, and the catalogue's form offered the repositories and
+// namespaces the tenant already had — so the first app on a new install had to
+// be created with curl, and every refusal the endpoint gives, including the one
+// that names -git-token-file, was a sentence nobody could reach from the page.
+
+test('the values are trimmed, because the endpoint judges them as typed', () => {
+  const got = newAppBody({
+    app: '  api ', env: ' prod', repoUrl: ' https://example.test/state.git ',
+    branch: ' main ', namespace: ' acme-prod ', path: '',
+  });
+  assert.deepStrictEqual(got, {
+    app: 'api', env: 'prod', repoUrl: 'https://example.test/state.git',
+    branch: 'main', path: 'apps/api/prod', namespace: 'acme-prod',
+  });
+});
+
+// One rule, in two files, that must not drift. Two environments whose manifests
+// resolve to one directory are one environment with two names, and the store
+// refuses the second with a unique index — so a form that defaulted to
+// apps/<app> would walk the second environment into a refusal nobody could
+// read. The catalogue learned that; this form has to agree with it.
+test('the directory defaults to the same one the catalogue would commit to', () => {
+  assert.strictEqual(newAppBody({ app: 'api', env: 'qa' }).path, defaultPath('api', 'qa'));
+});
+
+test('a path that was typed is left alone', () => {
+  assert.strictEqual(newAppBody({ app: 'api', env: 'prod', path: 'clusters/one' }).path,
+    'clusters/one');
+});
+
+// The line this whole view exists to put in front of somebody. The server says
+// whether anything will apply this app's commits; the panel quotes it and adds
+// nothing. Measured on a cluster: without the credential Argo CD reads the
+// repository with, the Application is created, the endpoint answers 201, and
+// Argo CD sits at "authentication required" where nobody is looking.
+test('the delivery line is quoted word for word, including the half that is missing', () => {
+  const delivery = "an Argo CD Application is watching this app's directory, but Argo CD was "
+    + 'given no credential for this repository, so it can read it only if the repository is '
+    + 'public (no git credentials are configured: pass -git-token-file)';
+  const got = newAppOutcome(201, { app: { app: 'api', env: 'prod' }, delivery });
+  assert.strictEqual(got.ok, true);
+  assert.strictEqual(got.note, delivery,
+    'the panel summarised the delivery line instead of quoting it; that line is the only '
+    + 'place the missing half of the chain is said');
+});
+
+test('a created app does not claim anything is running', () => {
+  const got = newAppOutcome(201, { app: { app: 'api', env: 'prod' }, delivery: 'watching' });
+  assert.match(got.text, /registered/);
+  assert.match(got.hint, /Nothing is deployed by this/);
+});
+
+test('a refusal is the server\'s sentence and not the page\'s', () => {
+  const got = newAppOutcome(409, { detail: 'repository https://example.test/state.git belongs to another tenant' });
+  assert.strictEqual(got.ok, false);
+  assert.strictEqual(got.note, 'repository https://example.test/state.git belongs to another tenant');
+});
+
+test('a failure with no detail still says what happened', () => {
+  const got = newAppOutcome(500, {});
+  assert.strictEqual(got.ok, false);
+  assert.match(got.text, /HTTP 500/);
 });

@@ -80,3 +80,31 @@ test('the page has rules for what the views draw', () => {
       `style.css has no ${selector}: the view renders, and renders unstyled`);
   }
 });
+
+// The view that lives in app.js rather than in a file of its own, and can be
+// orphaned the same way: a function that draws a form, and no button that
+// reaches it. That is not hypothetical here — the panel had exactly one POST
+// other than signing in, so the endpoint that registers an application was
+// reachable from curl and from nowhere on the page.
+test('the page offers a way to create an application, and reaches it', () => {
+  const app = read('app.js');
+  assert.ok(/function showNewApp\(/.test(app),
+    'app.js has no showNewApp: the only way to create an app is the catalogue, which ' +
+    'installs a template and cannot register something somebody builds themselves');
+  // Two mentions, not one. The definition is a mention, which is why the first
+  // version of this assertion passed with the button deleted: `includes` found
+  // `showNewApp()` in `function showNewApp()` and reported the view as wired.
+  const mentions = app.match(/showNewApp/g) || [];
+  assert.ok(mentions.length >= 2,
+    'showNewApp is defined and never called: a form nothing opens is a form nobody has');
+});
+
+test('the page can actually POST an application', () => {
+  const app = read('app.js');
+  assert.ok(app.includes('`${tenantBase()}/apps`'),
+    "app.js never addresses the tenant's /apps: the form draws and submits nothing, or " +
+    'submits somewhere else');
+  assert.ok(app.includes('method: "POST"'),
+    'nothing on this page POSTs anything but the sign-in form, which is the state that ' +
+    'made every first app on every install a curl command');
+});
