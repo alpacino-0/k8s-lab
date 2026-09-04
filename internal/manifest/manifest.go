@@ -64,6 +64,20 @@ func FileFor(kind, name string) string {
 	return strings.ToLower(kind) + "-" + name + ".yaml"
 }
 
+// UserSecretName is where the values a user typed live.
+//
+// Here rather than in either of the two packages that need it, because they
+// need it for opposite halves of one arrangement: the control plane writes this
+// object and cannot read it, the operator references it and never looks inside.
+// A name agreed by convention in two files is a name that drifts, and the
+// failure it drifts into is silent — envFrom naming a Secret that does not
+// exist leaves the pod Pending with the reason in an event.
+//
+// Its own object rather than a key on the generated one, and the lifetimes are
+// why: the platform may re-mint a value it invented, and must never re-mint one
+// somebody typed.
+func UserSecretName(app string) string { return app + "-env" }
+
 // Owns says whether a committed file is one this platform wrote.
 //
 // The test is the API group and not the filename. A name is a convention, and
