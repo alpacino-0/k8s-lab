@@ -236,3 +236,48 @@ a { color: var(--accent); }
  * the refusal's border. Its status line already carries the code. */
 .exec-output[data-state="exited"] { border-color: var(--line); }
 .exec-output[data-state="refused"] { border-color: var(--bad); }
+
+/* The two views over one application. */
+.tabs { display: flex; gap: .25rem; margin: 0 0 .75rem; }
+.tabs .tab {
+  padding: .3rem .7rem; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--bg); font-size: .85rem;
+}
+.tabs span.tab[aria-current="true"] { border-color: var(--fg); font-weight: 600; }
+
+/* The settings view. */
+.settings-env { display: flex; flex-direction: column; gap: .4rem; margin: .5rem 0 0; }
+.settings-row {
+  display: flex; gap: .5rem; align-items: center; flex-wrap: wrap;
+  padding: .4rem .5rem; border: 1px solid var(--line); border-radius: var(--radius);
+}
+.settings-row input[type="text"] { flex: 1 1 10rem; min-width: 0; }
+.settings-row label { display: flex; align-items: center; gap: .25rem; font-size: .8rem; }
+.settings-scope { font-size: .75rem; color: var(--muted); }
+.settings-scope[data-ok="false"] { color: var(--bad); }
+.settings-actions { display: flex; gap: .5rem; align-items: center; margin-top: .6rem; }
+
+/* The three states, drawn as three things.
+ *
+ * A secret is the one that must not read as an ordinary empty box: its value
+ * is not on this page and never will be, and the row says so rather than
+ * looking like a variable nobody has filled in yet. metrics.js's rule, applied
+ * to a text input instead of a table cell. */
+.settings-row[data-state="secret"] { border-color: var(--fg); border-style: dashed; }
+.settings-row[data-state="secret"] input[type="text"][aria-label="Value"] {
+  font-style: italic;
+}
+/* The empty string is a setting, and it is not the same as an untouched row.
+ * Its placeholder says so; this makes the row look deliberate rather than
+ * unfinished. */
+.settings-row[data-state="empty"] { border-style: dotted; }
+
+/* Why a secret costs what it costs. Full width under its row, because it is a
+ * sentence rather than a label. */
+.settings-warning {
+  flex-basis: 100%; margin: .3rem 0 0; font-size: .75rem; color: var(--muted);
+}
+/* The server's warnings: a save that happened and did less than it looks like.
+ * Deliberately not styled as .refusal, which is a save that did not happen. */
+.settings-warnings { margin: .6rem 0 0; padding-left: 1.1rem; font-size: .8rem; color: var(--bad); }
+.settings-warnings:empty { display: none; }

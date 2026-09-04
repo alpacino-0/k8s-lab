@@ -31,6 +31,7 @@ const views = [
   { file: 'logs.js', global: 'damgaLogs' },
   { file: 'catalog.js', global: 'damgaCatalog' },
   { file: 'exec.js', global: 'damgaExec' },
+  { file: 'settings.js', global: 'damgaSettings' },
 ];
 
 test('every view is loaded by the page, before the script that uses it', () => {
@@ -82,7 +83,7 @@ test('app.js reaches every view, and reaches it by the published name', () => {
 test('the page has rules for what the views draw', () => {
   const css = read('style.css');
   for (const selector of ['.logs', '.catalog-entry', '.refusal', '#catalog-list',
-    '.exec-output', '.exec-form']) {
+    '.exec-output', '.exec-form', '.settings-row', '.settings-warning', '.tabs']) {
     // Terminated, not merely present. `.exec-outputX { }` contains the string
     // '.exec-output' and would report a rule that styles nothing on the page.
     assert.ok(new RegExp(`\\${selector}(?![\\w-])`).test(css),
@@ -158,5 +159,55 @@ test('the panel never stores what was typed into the command box', () => {
     assert.ok(!source.includes(forbidden),
       `exec.js uses ${forbidden}: the server deliberately logs the program and not the ` +
       'arguments, because a command line is where a password ends up');
+  }
+});
+
+// The settings view, and the same orphan check the exec view carries.
+//
+// Written the way the exec one ended up rather than the way it started: a bare
+// count of the word reports a mounted view for one that is only defined,
+// because the definition and app.js's own `m.mountSettings(...)` seam are two
+// mentions on their own. That is the showNewApp bug, and it was live in three
+// assertions in this file before the exec view was added.
+test('the settings view is mounted and not merely defined', () => {
+  const app = read('app.js');
+  assert.ok(/function mountSettings\(/.test(app),
+    'app.js has no mountSettings: settings.js would be loaded by the page and mounted by ' +
+    'nothing');
+  const calls = app.match(/(?<!function )(?<!m\.)mountSettings\(/g) || [];
+  assert.ok(calls.length >= 1,
+    'mountSettings is defined and never called: the settings endpoint is reachable from ' +
+    'curl and from nowhere on the page');
+  assert.ok(/mounted\.push\([\s\S]*?mountSettings/.test(app),
+    'mountSettings is called but its stop function is not collected, so leaving the app ' +
+    'leaves the view behind');
+});
+
+// A view nothing navigates to is orphaned even when it is mounted correctly.
+//
+// showSettings can be defined, wired and unreachable — which is the state the
+// new-application form was in, reachable from curl and from nowhere on the
+// page. The tab strip is the only way in, so it has to exist and it has to be
+// on both views or the way back is missing.
+test('both application views are reachable from the other', () => {
+  const app = read('app.js');
+  assert.ok(/function showSettings\(/.test(app), 'app.js has no showSettings');
+  const shown = app.match(/(?<!function )showSettings\b/g) || [];
+  assert.ok(shown.length >= 1,
+    'showSettings is defined and nothing navigates to it: the settings tab exists in the ' +
+    'source and not in the browser');
+  assert.ok(/appTabs\(["']overview["']\)/.test(app),
+    'the overview does not draw the tab strip, so a reader who opens settings has no way ' +
+    'back to it');
+  assert.ok(/appTabs\(["']settings["']\)/.test(app),
+    'the settings view does not draw the tab strip');
+});
+
+// The rule this page inherits from exec.js and from the server's own log.
+test('the settings page stores nothing that was typed into it', () => {
+  const source = read('settings.js');
+  for (const forbidden of ['localStorage', 'sessionStorage', 'indexedDB']) {
+    assert.ok(!source.includes(forbidden),
+      `settings.js uses ${forbidden}: this is the page where passwords are typed`);
   }
 });

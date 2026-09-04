@@ -276,6 +276,69 @@ function mountLogs(el, prefix) {
   return mountFrom("damgaLogs", (m) => m.mountLogs(el, prefix, {}));
 }
 
+// The settings view. Same raw-Response fetcher the exec view needs, and for
+// the first of the same two reasons: api() throws on a non-2xx, and this page
+// prints the endpoint's refusal rather than a generic failure — so it has to
+// see the body of a 400.
+function mountSettings(el, prefix) {
+  return mountFrom("damgaSettings", (m) => m.mountSettings(el, prefix, {
+    fetcher: async (path, options = {}) => {
+      const res = await fetch(path, {
+        credentials: "same-origin",
+        ...options,
+        headers: { "Accept": "application/json", ...(options.headers || {}) },
+      });
+      if (res.status === 401) throw new NotSignedIn("not signed in");
+      return res;
+    },
+  }));
+}
+
+// Two views over one application: what it did, and what it is set to.
+//
+// A strip rather than a second entry in the app list, because they are the
+// same app and the list is how you choose which app. The current one is a
+// span and not a button: a control that does nothing is a control somebody
+// presses twice wondering what they missed.
+function appTabs(active) {
+  const strip = el("nav", { class: "tabs", "aria-label": "Application views" });
+  for (const tab of [
+    { id: "overview", label: "Overview", go: showEvidence },
+    { id: "settings", label: "Settings", go: showSettings },
+  ]) {
+    if (tab.id === active) {
+      const here = el("span", { class: "tab", "aria-current": "true" }, tab.label);
+      strip.append(here);
+      continue;
+    }
+    const button = el("button", { type: "button", class: "tab" }, tab.label);
+    button.addEventListener("click", () => tab.go());
+    strip.append(button);
+  }
+  return strip;
+}
+
+// The settings view: environment variables, with the build/runtime split and
+// the secrets that are deliberately not shown.
+//
+// This is the gap that stopped n8n installing from the catalogue — the
+// template needs a token and there was no way to type one. docs/PLAN.md §6.
+function showSettings() {
+  const prefix = base();
+  stopMounted();
+  const { app, env } = state.ref;
+  const box = el("div", {});
+  render(
+    appTabs("settings"),
+    el("h2", {}, `${app} · ${env}`),
+    el("p", { class: "sub muted" },
+      "Environment variables. Plain values are committed to git; secret values are " +
+      "written to the cluster and are not."),
+    box,
+  );
+  mounted.push(mountSettings(box, prefix));
+}
+
 // The exec view, and the one seam here that cannot use api().
 //
 // api() reads the body into JSON and throws on a non-2xx, which is right for
@@ -569,6 +632,7 @@ async function showEvidence() {
   const { blocked, shown } = whatToShow(current, latest);
 
   const parts = [
+    appTabs("overview"),
     el("h2", {}, `${app} · ${env}`),
     el("p", { class: "sub muted" }, current
       ? `Deploy ${current.seq}, ${current.state}, ${when(current.updatedAt)}`
